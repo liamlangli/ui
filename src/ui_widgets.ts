@@ -1,6 +1,6 @@
 import { theme_color } from './theme'
 import type { theme_definition } from './types'
-import { ui_renderer } from './ui-renderer'
+import { ui_renderer } from './ui_renderer'
 
 export interface ui_input_snapshot {
   mouse_x: number
@@ -64,15 +64,15 @@ const w_submenu_w = 160
 const w_section_h = 22
 const w_popup_safe_margin = 6
 
-function clamp01(value: number): number {
+function clamp_01(value: number): number {
   return Math.max(0, Math.min(1, value))
 }
 
-function packRgba(r: number, g: number, b: number, a: number): number {
-  const rr = Math.round(clamp01(r) * 255)
-  const gg = Math.round(clamp01(g) * 255)
-  const bb = Math.round(clamp01(b) * 255)
-  const aa = Math.round(clamp01(a) * 255)
+function pack_rgba(r: number, g: number, b: number, a: number): number {
+  const rr = Math.round(clamp_01(r) * 255)
+  const gg = Math.round(clamp_01(g) * 255)
+  const bb = Math.round(clamp_01(b) * 255)
+  const aa = Math.round(clamp_01(a) * 255)
   return (((aa & 255) << 24) | ((bb & 255) << 16) | ((gg & 255) << 8) | (rr & 255)) >>> 0
 }
 
@@ -640,10 +640,10 @@ export class ui_widgets {
     this.ui.fill_round_rect(x, y, w, h, w_radius * scale, bg)
     this.ui.stroke_rect(x, y, w, h, 1, open ? this.color('accent') : this.color('border'))
     this.draw_checkerboard(x + 1, y + 1, Math.max(0, w - 2), Math.max(0, h - 2), 4 * scale)
-    this.ui.fill_rect(x + 1, y + 1, Math.max(0, w - 2), Math.max(0, h - 2), packRgba(current.r, current.g, current.b, current.a))
+    this.ui.fill_rect(x + 1, y + 1, Math.max(0, w - 2), Math.max(0, h - 2), pack_rgba(current.r, current.g, current.b, current.a))
 
     const swatch_w = Math.min(24 * scale, Math.max(12 * scale, h - 4 * scale))
-    this.ui.fill_rect(x + 2 * scale, y + 2 * scale, swatch_w, Math.max(0, h - 4 * scale), packRgba(current.r, current.g, current.b, current.a))
+    this.ui.fill_rect(x + 2 * scale, y + 2 * scale, swatch_w, Math.max(0, h - 4 * scale), pack_rgba(current.r, current.g, current.b, current.a))
     this.ui.stroke_rect(x + 2 * scale, y + 2 * scale, swatch_w, Math.max(0, h - 4 * scale), 1, this.color('border_strong'))
     const label = options?.label ?? 'Color'
     const text_x = x + swatch_w + 8 * scale
@@ -735,7 +735,7 @@ export class ui_widgets {
 
     const preview_y = title_y + 14 * scale
     this.draw_checkerboard(px + pad, preview_y, placement.w - pad * 2, preview_h, 4 * scale)
-    this.ui.fill_rect(px + pad, preview_y, placement.w - pad * 2, preview_h, packRgba(popup.color_ref.r, popup.color_ref.g, popup.color_ref.b, popup.color_ref.a))
+    this.ui.fill_rect(px + pad, preview_y, placement.w - pad * 2, preview_h, pack_rgba(popup.color_ref.r, popup.color_ref.g, popup.color_ref.b, popup.color_ref.a))
     this.ui.stroke_rect(px + pad, preview_y, placement.w - pad * 2, preview_h, 1, this.color('border_strong'))
 
     const square_x = px + pad

@@ -1,6 +1,8 @@
-import interFontJsonUrl from '../assets/Inter.json?url'
-import interFontPngUrl from '../assets/Inter.png?url'
-import uiShaderUrl from '../assets/ui.wgsl?url'
+import inter_font_json_url from '../assets/Inter.json?url'
+import inter_font_image_url from '../assets/Inter.png?url'
+import ping_fang_font_json_url from '../assets/ping_fang_sc_regular.json?url'
+import ping_fang_font_image_url from '../assets/ping_fang_sc_regular.webp?url'
+import ui_shader_url from '../assets/ui.wgsl?url'
 import { clamp } from './math'
 
 export interface ui_draw_command {
@@ -31,6 +33,8 @@ type font_atlas = {
   glyphs: Map<number, glyph_metric>
 }
 
+type font_doc = { pages?: string[]; chars: number[][]; width: number; height: number; line_height: number; size: number }
+
 type clip_rect = { x: number; y: number; w: number; h: number }
 
 type color_panel_texture = {
@@ -42,9 +46,33 @@ type color_panel_texture = {
 
 const vertex_stride = 20
 const default_font_scale = 1.5
+const latin_font_texture_id = 0
+const white_texture_id = 1
+const cjk_font_texture_id = 2
+const first_external_texture_id = 3
 const rr_corner_points = 4
 const rr_points = 8 + 4 * rr_corner_points
 const rr_cos = [0.9510565162951535, 0.8090169943749475, 0.5877852522924732, 0.3090169943749474]
+const cjk_punctuation_aliases: [number, number][] = [
+  [0x3001, 0x2c],
+  [0x3002, 0x2e],
+  [0x300a, 0x3c],
+  [0x300b, 0x3e],
+  [0x2018, 0x27],
+  [0x2019, 0x27],
+  [0x201c, 0x22],
+  [0x201d, 0x22],
+  [0xff08, 0x28],
+  [0xff09, 0x29],
+  [0xff0c, 0x2c],
+  [0xff1a, 0x3a],
+  [0xff1b, 0x3b],
+  [0xff1f, 0x3f],
+]
+const font_page_urls: Record<string, string> = {
+  'Inter.png': inter_font_image_url,
+  'ping_fang_sc_regular.webp': ping_fang_font_image_url,
+}
 
 const color_panel_shader = /* wgsl */ `
 struct Params {
@@ -54,7 +82,7 @@ struct Params {
   data : vec4f,
 }
 
-struct VOut {
+struct v_out {
   @builtin(position) pos : vec4f,
   @location(0) uv : vec2f,
 }
@@ -62,7 +90,7 @@ struct VOut {
 @group(0) @binding(0) var<uniform> u : Params;
 
 @vertex
-fn vs_main(@builtin(vertex_index) vi : u32) -> VOut {
+fn vs_main(@builtin(vertex_index) vi : u32) -> v_out {
   var quad = array<vec2f, 6>(
     vec2f(0.0, 0.0),
     vec2f(1.0, 0.0),
@@ -72,7 +100,7 @@ fn vs_main(@builtin(vertex_index) vi : u32) -> VOut {
     vec2f(1.0, 1.0),
   );
   let uv = quad[vi];
-  var out : VOut;
+  var out : v_out;
   out.pos = vec4f(uv * vec2f(2.0, -2.0) + vec2f(-1.0, 1.0), 0.0, 1.0);
   out.uv = uv;
   return out;
@@ -99,7 +127,7 @@ fn hash12(p : vec2f) -> f32 {
 }
 
 @fragment
-fn fs_main(v : VOut) -> @location(0) vec4f {
+fn fs_main(v : v_out) -> @location(0) vec4f {
   let uv = clamp(v.uv, vec2f(0.0), vec2f(1.0));
   var color = vec3f(0.0);
   var alpha = 1.0;
@@ -134,10 +162,31 @@ async function load_image_bitmap_asset(url: string): Promise<ImageBitmap> {
   return createImageBitmap(blob, { premultiplyAlpha: 'none', colorSpaceConversion: 'none' })
 }
 
-function glyph_map(doc: { chars: number[][]; width: number; height: number; line_height: number; size: number }): font_atlas {
+function font_image_url(doc: font_doc, label: string): string {
+  const page = doc.pages?.[0]
+  if (!page) throw new Error(`font ${label} has no atlas page`)
+  const page_name = page.split(/[\\/]/).pop() ?? page
+  const url = font_page_urls[page_name]
+  if (!url) throw new Error(`font ${label} atlas page is not bundled: ${page}`)
+  return url
+}
+
+function glyph_map(doc: font_doc, options?: { cjk_punctuation_fallbacks?: boolean }): font_atlas {
   const glyphs = new Map<number, glyph_metric>()
   for (const [code, width, height, x_offset, y_offset, x_advance, atlas_x, atlas_y] of doc.chars) {
     glyphs.set(code, { width, height, x_offset, y_offset, x_advance, atlas_x, atlas_y })
+  }
+  if (options?.cjk_punctuation_fallbacks) {
+    for (const [target, source] of cjk_punctuation_aliases) {
+      const glyph = glyphs.get(source)
+      if (!glyph || glyphs.has(target)) continue
+      const x_advance = Math.max(glyph.x_advance, doc.size)
+      glyphs.set(target, {
+        ...glyph,
+        x_offset: glyph.x_offset + (x_advance - glyph.x_advance) * 0.5,
+        x_advance,
+      })
+    }
   }
   return {
     width: doc.width,
@@ -146,6 +195,20 @@ function glyph_map(doc: { chars: number[][]; width: number; height: number; line
     line_height: doc.line_height,
     glyphs,
   }
+}
+
+function is_cjk_codepoint(code: number): boolean {
+  return (
+    (code >= 0x2e80 && code <= 0x2eff) ||
+    (code >= 0x3000 && code <= 0x303f) ||
+    (code >= 0x3100 && code <= 0x312f) ||
+    (code >= 0x31c0 && code <= 0x31ef) ||
+    (code >= 0x3400 && code <= 0x4dbf) ||
+    (code >= 0x4e00 && code <= 0x9fff) ||
+    (code >= 0xf900 && code <= 0xfaff) ||
+    (code >= 0xff00 && code <= 0xffef) ||
+    (code >= 0x20000 && code <= 0x2ebef)
+  )
 }
 
 function clip_intersect(a: clip_rect, b: clip_rect): clip_rect {
@@ -264,7 +327,7 @@ export class ui_renderer {
   private pipeline_sdf: GPURenderPipeline | null = null
   private color_panel_pipeline: GPURenderPipeline | null = null
   private bind_group_white: GPUBindGroup | null = null
-  private bind_group_font: GPUBindGroup | null = null
+  private readonly font_bind_groups = new Map<number, GPUBindGroup>()
   private readonly extra_bind_groups = new Map<number, GPUBindGroup>()
   private vertex_buffer: GPUBuffer | null = null
   private vertex_data = new ArrayBuffer(4096 * vertex_stride)
@@ -272,14 +335,14 @@ export class ui_renderer {
   private vertex_count = 0
   private commands: ui_draw_command[] = []
   private clip_stack: clip_rect[] = []
-  private current_texture_id = 1
-  private font_atlas: font_atlas | null = null
+  private current_texture_id = white_texture_id
+  private readonly font_atlases = new Map<number, font_atlas>()
   private canvas_width = 1
   private canvas_height = 1
   private bind_group_layout: GPUBindGroupLayout | null = null
   private color_panel_bind_group_layout: GPUBindGroupLayout | null = null
   private sampler: GPUSampler | null = null
-  private next_texture_id = 2
+  private next_texture_id = first_external_texture_id
   private color_panel_uniform: GPUBuffer | null = null
   private color_square_texture: color_panel_texture | null = null
   private color_value_texture: color_panel_texture | null = null
@@ -298,20 +361,25 @@ export class ui_renderer {
     if (!this.context) throw new Error('WebGPU canvas context unavailable')
     this.format = navigator.gpu.getPreferredCanvasFormat()
 
-    const [shader_code, font_doc, font_image] = await Promise.all([
-      load_text(uiShaderUrl),
-      load_json<{ chars: number[][]; width: number; height: number; line_height: number; size: number }>(interFontJsonUrl),
-      load_image_bitmap_asset(interFontPngUrl),
+    const [shader_code, latin_font_doc, cjk_font_doc] = await Promise.all([
+      load_text(ui_shader_url),
+      load_json<font_doc>(inter_font_json_url),
+      load_json<font_doc>(ping_fang_font_json_url),
     ])
-    this.font_atlas = glyph_map(font_doc)
-    this.screen_buffer = this.device.createBuffer({ label: 'ui.screenBuffer', size: 8, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST })
+    const [latin_font_image, cjk_font_image] = await Promise.all([
+      load_image_bitmap_asset(font_image_url(latin_font_doc, 'latin')),
+      load_image_bitmap_asset(font_image_url(cjk_font_doc, 'cjk')),
+    ])
+    this.font_atlases.set(latin_font_texture_id, glyph_map(latin_font_doc))
+    this.font_atlases.set(cjk_font_texture_id, glyph_map(cjk_font_doc, { cjk_punctuation_fallbacks: true }))
+    this.screen_buffer = this.device.createBuffer({ label: 'ui.screen_buffer', size: 8, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST })
 
-    const shader_module = this.device.createShaderModule({ label: 'ui.shaderModule', code: shader_code })
-    const color_panel_module = this.device.createShaderModule({ label: 'ui.shaderModule.colorPanel', code: color_panel_shader })
-    const sampler = this.device.createSampler({ label: 'ui.linearSampler', magFilter: 'linear', minFilter: 'linear' })
+    const shader_module = this.device.createShaderModule({ label: 'ui.shader_module', code: shader_code })
+    const color_panel_module = this.device.createShaderModule({ label: 'ui.shader_module.color_panel', code: color_panel_shader })
+    const sampler = this.device.createSampler({ label: 'ui.linear_sampler', magFilter: 'linear', minFilter: 'linear' })
     this.sampler = sampler
     const bind_group_layout = this.device.createBindGroupLayout({
-      label: 'ui.bindGroupLayout',
+      label: 'ui.bind_group_layout',
       entries: [
         { binding: 0, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
         { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: {} },
@@ -320,11 +388,11 @@ export class ui_renderer {
     })
     this.bind_group_layout = bind_group_layout
     this.color_panel_bind_group_layout = this.device.createBindGroupLayout({
-      label: 'ui.bindGroupLayout.colorPanel',
+      label: 'ui.bind_group_layout.color_panel',
       entries: [{ binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } }],
     })
-    const pipeline_layout = this.device.createPipelineLayout({ label: 'ui.pipelineLayout', bindGroupLayouts: [bind_group_layout] })
-    const color_panel_layout = this.device.createPipelineLayout({ label: 'ui.pipelineLayout.colorPanel', bindGroupLayouts: [this.color_panel_bind_group_layout] })
+    const pipeline_layout = this.device.createPipelineLayout({ label: 'ui.pipeline_layout', bindGroupLayouts: [bind_group_layout] })
+    const color_panel_layout = this.device.createPipelineLayout({ label: 'ui.pipeline_layout.color_panel', bindGroupLayouts: [this.color_panel_bind_group_layout] })
     const vertex: GPUVertexBufferLayout = {
       arrayStride: vertex_stride,
       attributes: [
@@ -355,7 +423,7 @@ export class ui_renderer {
       primitive: { topology: 'triangle-list' },
     })
     this.color_panel_pipeline = this.device.createRenderPipeline({
-      label: 'ui.pipeline.colorPanel',
+      label: 'ui.pipeline.color_panel',
       layout: color_panel_layout,
       vertex: { module: color_panel_module, entryPoint: 'vs_main' },
       fragment: { module: color_panel_module, entryPoint: 'fs_main', targets: [{ format: 'rgba8unorm' }] },
@@ -363,22 +431,14 @@ export class ui_renderer {
     })
 
     const white_texture = this.device.createTexture({
-      label: 'ui.whiteTexture',
+      label: 'ui.white_texture',
       size: [1, 1, 1],
       format: 'rgba8unorm',
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     })
     this.device.queue.writeTexture({ texture: white_texture }, new Uint8Array([255, 255, 255, 255]), { bytesPerRow: 4 }, { width: 1, height: 1, depthOrArrayLayers: 1 })
-    const font_texture = this.device.createTexture({
-      label: 'ui.fontTexture',
-      size: [font_image.width, font_image.height, 1],
-      format: 'rgba8unorm',
-      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
-    })
-    this.device.queue.copyExternalImageToTexture({ source: font_image }, { texture: font_texture }, { width: font_image.width, height: font_image.height })
-
     this.bind_group_white = this.device.createBindGroup({
-      label: 'ui.bindGroup.white',
+      label: 'ui.bind_group.white',
       layout: bind_group_layout,
       entries: [
         { binding: 0, resource: sampler },
@@ -386,17 +446,10 @@ export class ui_renderer {
         { binding: 2, resource: { buffer: this.screen_buffer } },
       ],
     })
-    this.bind_group_font = this.device.createBindGroup({
-      label: 'ui.bindGroup.font',
-      layout: bind_group_layout,
-      entries: [
-        { binding: 0, resource: sampler },
-        { binding: 1, resource: font_texture.createView() },
-        { binding: 2, resource: { buffer: this.screen_buffer } },
-      ],
-    })
+    this.font_bind_groups.set(latin_font_texture_id, this.create_texture_bind_group('ui.font_texture.latin', latin_font_image, sampler, bind_group_layout))
+    this.font_bind_groups.set(cjk_font_texture_id, this.create_texture_bind_group('ui.font_texture.cjk', cjk_font_image, sampler, bind_group_layout))
     this.color_panel_uniform = this.device.createBuffer({
-      label: 'ui.buffer.colorPanel',
+      label: 'ui.buffer.color_panel',
       size: 32,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
@@ -418,14 +471,14 @@ export class ui_renderer {
     this.vertex_count = 0
     this.commands = []
     this.clip_stack = [{ x: 0, y: 0, w: this.canvas_width, h: this.canvas_height }]
-    this.current_texture_id = 1
+    this.current_texture_id = white_texture_id
   }
 
   register_external_texture(texture: GPUTexture): number {
-    if (!this.device || !this.bind_group_layout || !this.sampler || !this.screen_buffer) throw new Error('UiRenderer not initialized')
+    if (!this.device || !this.bind_group_layout || !this.sampler || !this.screen_buffer) throw new Error('ui_renderer not initialized')
     const id = this.next_texture_id++
     this.extra_bind_groups.set(id, this.device.createBindGroup({
-      label: `ui.bindGroup.external.${id}`,
+      label: `ui.bind_group.external.${id}`,
       layout: this.bind_group_layout,
       entries: [
         { binding: 0, resource: this.sampler },
@@ -439,7 +492,7 @@ export class ui_renderer {
   update_external_texture(texture_id: number, texture: GPUTexture): void {
     if (!this.device || !this.bind_group_layout || !this.sampler || !this.screen_buffer) return
     this.extra_bind_groups.set(texture_id, this.device.createBindGroup({
-      label: `ui.bindGroup.external.${texture_id}`,
+      label: `ui.bind_group.external.${texture_id}`,
       layout: this.bind_group_layout,
       entries: [
         { binding: 0, resource: this.sampler },
@@ -465,11 +518,11 @@ export class ui_renderer {
     const texture = this.ensure_color_panel_texture('square', Math.max(1, Math.round(w)), Math.max(1, Math.round(h)))
     if (!texture || !this.device || !this.color_panel_pipeline || !this.color_panel_bind_group_layout || !this.color_panel_uniform) return
     this.device.queue.writeBuffer(this.color_panel_uniform, 0, new Float32Array([texture.width, texture.height, 0, 0, value, 0, 0, 0]))
-    const encoder = this.device.createCommandEncoder({ label: 'ui.commandEncoder.colorSquare' })
+    const encoder = this.device.createCommandEncoder({ label: 'ui.command_encoder.color_square' })
     const pass = encoder.beginRenderPass({
-      label: 'ui.renderPass.colorSquare',
+      label: 'ui.render_pass.color_square',
       colorAttachments: [{
-        view: texture.texture.createView({ label: 'ui.view.colorSquare' }),
+        view: texture.texture.createView({ label: 'ui.view.color_square' }),
         clearValue: { r: 0, g: 0, b: 0, a: 0 },
         loadOp: 'clear',
         storeOp: 'store',
@@ -477,7 +530,7 @@ export class ui_renderer {
     })
     pass.setPipeline(this.color_panel_pipeline)
     pass.setBindGroup(0, this.device.createBindGroup({
-      label: 'ui.bindGroup.colorSquare',
+      label: 'ui.bind_group.color_square',
       layout: this.color_panel_bind_group_layout,
       entries: [{ binding: 0, resource: { buffer: this.color_panel_uniform } }],
     }))
@@ -491,11 +544,11 @@ export class ui_renderer {
     const texture = this.ensure_color_panel_texture('value', Math.max(1, Math.round(w)), Math.max(1, Math.round(h)))
     if (!texture || !this.device || !this.color_panel_pipeline || !this.color_panel_bind_group_layout || !this.color_panel_uniform) return
     this.device.queue.writeBuffer(this.color_panel_uniform, 0, new Float32Array([texture.width, texture.height, 1, 0, hue, saturation, alpha, 0]))
-    const encoder = this.device.createCommandEncoder({ label: 'ui.commandEncoder.colorValue' })
+    const encoder = this.device.createCommandEncoder({ label: 'ui.command_encoder.color_value' })
     const pass = encoder.beginRenderPass({
-      label: 'ui.renderPass.colorValue',
+      label: 'ui.render_pass.color_value',
       colorAttachments: [{
-        view: texture.texture.createView({ label: 'ui.view.colorValue' }),
+        view: texture.texture.createView({ label: 'ui.view.color_value' }),
         clearValue: { r: 0, g: 0, b: 0, a: 0 },
         loadOp: 'clear',
         storeOp: 'store',
@@ -503,7 +556,7 @@ export class ui_renderer {
     })
     pass.setPipeline(this.color_panel_pipeline)
     pass.setBindGroup(0, this.device.createBindGroup({
-      label: 'ui.bindGroup.colorValue',
+      label: 'ui.bind_group.color_value',
       layout: this.color_panel_bind_group_layout,
       entries: [{ binding: 0, resource: { buffer: this.color_panel_uniform } }],
     }))
@@ -524,7 +577,7 @@ export class ui_renderer {
 
   fill_rect(x: number, y: number, w: number, h: number, rgba: number): void {
     if (w <= 0 || h <= 0) return
-    this.current_texture_id = 1
+    this.current_texture_id = white_texture_id
     this.push_quad(x, y, x + w, y + h, this.white_u(), this.white_v(), this.white_u(), this.white_v(), rgba)
   }
 
@@ -541,7 +594,7 @@ export class ui_renderer {
     const pts = this.round_rect_points
     const n = compact_closed_polyline_points(pts, build_round_rect_points(pts, x, y, w, h, rtl, rtr, rbl, rbr))
     if (n < 3) return
-    this.current_texture_id = 1
+    this.current_texture_id = white_texture_id
     const u = this.white_u()
     const v = this.white_v()
     const x0 = pts[0]
@@ -564,12 +617,12 @@ export class ui_renderer {
     const pts = this.round_rect_points
     const n = compact_closed_polyline_points(pts, build_round_rect_points(pts, x, y, w, h, rtl, rtr, rbl, rbr))
     if (n < 2) return
-    this.current_texture_id = 1
+    this.current_texture_id = white_texture_id
     this.push_closed_polyline_stroke(pts, n, Math.max(1, thickness), rgba, this.round_rect_outer, this.round_rect_inner)
   }
 
   fill_triangle(x0: number, y0: number, x1: number, y1: number, x2: number, y2: number, rgba: number): void {
-    this.current_texture_id = 1
+    this.current_texture_id = white_texture_id
     const u = this.white_u()
     const v = this.white_v()
     this.push_tri(x0, y0, x1, y1, x2, y2, u, v, rgba)
@@ -578,7 +631,7 @@ export class ui_renderer {
   fill_circle(cx: number, cy: number, radius: number, rgba: number): void {
     if (radius <= 0) return
     const steps = Math.max(12, Math.ceil(radius * 0.75))
-    this.current_texture_id = 1
+    this.current_texture_id = white_texture_id
     const u = this.white_u()
     const v = this.white_v()
     let prev_x = cx + radius
@@ -611,7 +664,7 @@ export class ui_renderer {
     const ny = dx / len
     const hx = nx * (t * 0.5)
     const hy = ny * (t * 0.5)
-    this.current_texture_id = 1
+    this.current_texture_id = white_texture_id
     const u = this.white_u()
     const v = this.white_v()
     this.push_tri(x0 - hx, y0 - hy, x1 - hx, y1 - hy, x0 + hx, y0 + hy, u, v, rgba)
@@ -619,31 +672,33 @@ export class ui_renderer {
   }
 
   draw_text(x: number, y: number, text: string, font_px: number, rgba: number): void {
-    if (!text || !this.font_atlas) return
+    if (!text || !this.font_atlases.size) return
     const effective_font_px = font_px * default_font_scale
-    const scale = effective_font_px / this.font_atlas.font_size
-    const inv_w = 1 / this.font_atlas.width
-    const inv_h = 1 / this.font_atlas.height
     let cx = x
     let cy = y
-    this.current_texture_id = 0
     for (const ch of text) {
       if (ch === '\n') {
         cx = x
-        cy += this.font_atlas.line_height * scale
+        cy += this.text_line_height(font_px)
         continue
       }
       const code = ch.codePointAt(0) ?? 32
-      const glyph = this.font_atlas.glyphs.get(code) ?? this.font_atlas.glyphs.get(32)
+      const font = this.font_for_codepoint(code)
+      if (!font) continue
+      const glyph = font.atlas.glyphs.get(code) ?? font.atlas.glyphs.get(32)
       if (!glyph) continue
+      const scale = effective_font_px / font.atlas.font_size
       if (glyph.width <= 0 || glyph.height <= 0) {
         cx += glyph.x_advance * scale
         continue
       }
+      const inv_w = 1 / font.atlas.width
+      const inv_h = 1 / font.atlas.height
       const x0 = cx + glyph.x_offset * scale
       const y0 = cy + glyph.y_offset * scale
       const x1 = x0 + glyph.width * scale
       const y1 = y0 + glyph.height * scale
+      this.current_texture_id = font.texture_id
       this.push_quad(
         x0,
         y0,
@@ -709,9 +764,10 @@ export class ui_renderer {
   }
 
   text_line_height(font_px: number): number {
-    if (!this.font_atlas) return font_px
+    const atlas = this.font_atlases.get(latin_font_texture_id)
+    if (!atlas) return font_px
     const effective_font_px = font_px * default_font_scale
-    return this.font_atlas.line_height * (effective_font_px / this.font_atlas.font_size)
+    return atlas.line_height * (effective_font_px / atlas.font_size)
   }
 
   text_v_center_y(y: number, h: number, font_px: number): number {
@@ -721,35 +777,38 @@ export class ui_renderer {
 
   text_width(text: string, font_px: number): number {
     const effective_font_px = font_px * default_font_scale
-    if (!this.font_atlas) return text.length * effective_font_px * 0.55
-    const scale = effective_font_px / this.font_atlas.font_size
     let width = 0
     for (const ch of text) {
       if (ch === '\n') break
-      const glyph = this.font_atlas.glyphs.get(ch.codePointAt(0) ?? 32) ?? this.font_atlas.glyphs.get(32)
-      if (glyph) width += glyph.x_advance * scale
+      const font = this.font_for_codepoint(ch.codePointAt(0) ?? 32)
+      if (!font) {
+        width += effective_font_px * 0.55
+        continue
+      }
+      const glyph = font.atlas.glyphs.get(ch.codePointAt(0) ?? 32) ?? font.atlas.glyphs.get(32)
+      if (glyph) width += glyph.x_advance * (effective_font_px / font.atlas.font_size)
     }
     return width
   }
 
   flush(clear_color: GPUColorDict): void {
-    if (!this.device || !this.context || !this.pipeline_image || !this.pipeline_sdf || !this.bind_group_white || !this.bind_group_font) return
+    if (!this.device || !this.context || !this.pipeline_image || !this.pipeline_sdf || !this.bind_group_white) return
     const byte_length = Math.max(this.vertex_count * vertex_stride, vertex_stride)
     if (!this.vertex_buffer || this.vertex_buffer.size < byte_length) {
       this.vertex_buffer?.destroy()
       this.vertex_buffer = this.device.createBuffer({
-        label: 'ui.vertexBuffer',
+        label: 'ui.vertex_buffer',
         size: Math.max(byte_length, 4096),
         usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
       })
     }
     this.device.queue.writeBuffer(this.vertex_buffer, 0, this.vertex_data, 0, this.vertex_count * vertex_stride)
-    const encoder = this.device.createCommandEncoder({ label: 'ui.commandEncoder' })
+    const encoder = this.device.createCommandEncoder({ label: 'ui.command_encoder' })
     const pass = encoder.beginRenderPass({
-      label: 'ui.renderPass',
+      label: 'ui.render_pass',
       colorAttachments: [
         {
-          view: this.context.getCurrentTexture().createView({ label: 'ui.swapchainView' }),
+          view: this.context.getCurrentTexture().createView({ label: 'ui.swapchain_view' }),
           clearValue: clear_color,
           loadOp: 'clear',
           storeOp: 'store',
@@ -760,9 +819,10 @@ export class ui_renderer {
     for (const cmd of this.commands) {
       if (cmd.clip_w <= 0 || cmd.clip_h <= 0) continue
       pass.setScissorRect(cmd.clip_x, cmd.clip_y, cmd.clip_w, cmd.clip_h)
-      const bind_group = cmd.texture_id === 0 ? this.bind_group_font : cmd.texture_id === 1 ? this.bind_group_white : this.extra_bind_groups.get(cmd.texture_id)
+      const font_bind_group = this.font_bind_groups.get(cmd.texture_id)
+      const bind_group = font_bind_group ?? (cmd.texture_id === white_texture_id ? this.bind_group_white : this.extra_bind_groups.get(cmd.texture_id))
       if (!bind_group) continue
-      if (cmd.texture_id === 0) {
+      if (font_bind_group) {
         pass.setPipeline(this.pipeline_sdf)
         pass.setBindGroup(0, bind_group)
       } else {
@@ -773,6 +833,37 @@ export class ui_renderer {
     }
     pass.end()
     this.device.queue.submit([encoder.finish()])
+  }
+
+  private create_texture_bind_group(label: string, image: ImageBitmap, sampler: GPUSampler, layout: GPUBindGroupLayout): GPUBindGroup {
+    if (!this.device || !this.screen_buffer) throw new Error('ui_renderer not initialized')
+    const texture = this.device.createTexture({
+      label,
+      size: [image.width, image.height, 1],
+      format: 'rgba8unorm',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
+    })
+    this.device.queue.copyExternalImageToTexture({ source: image }, { texture }, { width: image.width, height: image.height })
+    return this.device.createBindGroup({
+      label: label.replace('texture', 'bind_group'),
+      layout,
+      entries: [
+        { binding: 0, resource: sampler },
+        { binding: 1, resource: texture.createView() },
+        { binding: 2, resource: { buffer: this.screen_buffer } },
+      ],
+    })
+  }
+
+  private font_for_codepoint(code: number): { texture_id: number; atlas: font_atlas } | null {
+    const latin = this.font_atlases.get(latin_font_texture_id) ?? null
+    const cjk = this.font_atlases.get(cjk_font_texture_id) ?? null
+    if (is_cjk_codepoint(code) && cjk?.glyphs.has(code)) return { texture_id: cjk_font_texture_id, atlas: cjk }
+    if (latin?.glyphs.has(code)) return { texture_id: latin_font_texture_id, atlas: latin }
+    if (cjk?.glyphs.has(code)) return { texture_id: cjk_font_texture_id, atlas: cjk }
+    if (latin) return { texture_id: latin_font_texture_id, atlas: latin }
+    if (cjk) return { texture_id: cjk_font_texture_id, atlas: cjk }
+    return null
   }
 
   canvas_size(): { width: number; height: number } {
@@ -957,7 +1048,7 @@ export class ui_renderer {
     if (current && current.width === width && current.height === height) return current
     current?.texture.destroy()
     const texture = this.device.createTexture({
-      label: `ui.texture.colorPanel.${kind}`,
+      label: `ui.texture.color_panel.${kind}`,
       size: [width, height, 1],
       format: 'rgba8unorm',
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
@@ -975,10 +1066,10 @@ export class ui_renderer {
   }
 
   private white_u(): number {
-    return this.font_atlas ? 0.5 / this.font_atlas.width : 0
+    return 0.5
   }
 
   private white_v(): number {
-    return this.font_atlas ? 0.5 / this.font_atlas.height : 0
+    return 0.5
   }
 }

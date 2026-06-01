@@ -4,7 +4,7 @@ Immediate-mode WebGPU UI toolkit extracted from the `union` editor runtime.
 
 It bundles the pieces needed to build a browser-native editor UI on top of WebGPU:
 
-- **`ui_renderer`** — a batched WebGPU renderer for rectangles, rounded rects, SDF text (Inter atlas), images, and the HSV color picker panels.
+- **`ui_renderer`** — a batched WebGPU renderer for rectangles, rounded rects, SDF text (Inter for Latin text, PingFang SC for Chinese text), images, and the HSV color picker panels.
 - **`ui_widgets`** — an immediate-mode widget layer (buttons, toggles, sliders, dropdowns, text/number inputs, color pickers, scroll regions, menus) drawn through `ui_renderer`.
 - **`dock`** — a docking layout engine: split/leaf trees, tab drag-and-drop, drop targets, and (de)serialization.
 - **`theme`** — palette/CSS-variable theming with `load_theme`, `apply_theme`, `theme_color`, and `hex_to_normalized_rgba`.
@@ -19,7 +19,8 @@ await renderer.init()
 const widgets = new ui_widgets(renderer)
 ```
 
-The renderer loads its font atlas (`assets/Inter.{json,png}`) and shader (`assets/ui.wgsl`)
+The renderer loads its font atlases (`assets/Inter.{json,png}` and
+`assets/ping_fang_sc_regular.{json,webp}`) and shader (`assets/ui.wgsl`)
 via Vite `?url` imports, so consumers are expected to build with Vite (or an equivalent
 bundler that understands the `?url` suffix).
 

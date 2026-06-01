@@ -4,5 +4,5 @@
 export * from './types'
 export * from './theme'
 export * from './dock'
-export * from './ui-renderer'
-export * from './ui-widgets'
+export * from './ui_renderer'
+export * from './ui_widgets'
