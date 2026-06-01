@@ -1,5 +1,5 @@
-import inter_font_json_url from '../assets/Inter.json?url'
-import inter_font_image_url from '../assets/Inter.png?url'
+import latin_mono_font_json_url from '../assets/latin_mono.json?url'
+import latin_mono_font_image_url from '../assets/latin_mono.png?url'
 import ping_fang_font_json_url from '../assets/ping_fang_sc_regular.json?url'
 import ping_fang_font_image_url from '../assets/ping_fang_sc_regular.webp?url'
 import ui_shader_url from '../assets/ui.wgsl?url'
@@ -33,7 +33,20 @@ type font_atlas = {
   glyphs: Map<number, glyph_metric>
 }
 
-type font_doc = { pages?: string[]; chars: number[][]; width: number; height: number; line_height: number; size: number }
+export const FONT_MAIN = 'FONT_MAIN' as const
+export const FONT_ZH = 'FONT_ZH' as const
+export const FONT_MONO = 'FONT_MONO' as const
+
+export type ui_font_primitive = typeof FONT_MAIN | typeof FONT_ZH | typeof FONT_MONO
+
+type font_face_doc = { chars: number[][]; line_height: number; size: number }
+type font_doc = font_face_doc & { pages?: string[]; width: number; height: number }
+type font_bundle_doc = {
+  pages?: string[]
+  width: number
+  height: number
+  fonts: Record<typeof FONT_MAIN | typeof FONT_MONO, font_face_doc>
+}
 
 type clip_rect = { x: number; y: number; w: number; h: number }
 
@@ -46,7 +59,7 @@ type color_panel_texture = {
 
 const vertex_stride = 20
 const default_font_scale = 1.5
-const latin_font_texture_id = 0
+const latin_mono_font_texture_id = 0
 const white_texture_id = 1
 const cjk_font_texture_id = 2
 const first_external_texture_id = 3
@@ -70,7 +83,7 @@ const cjk_punctuation_aliases: [number, number][] = [
   [0xff1f, 0x3f],
 ]
 const font_page_urls: Record<string, string> = {
-  'Inter.png': inter_font_image_url,
+  'latin_mono.png': latin_mono_font_image_url,
   'ping_fang_sc_regular.webp': ping_fang_font_image_url,
 }
 
@@ -162,7 +175,7 @@ async function load_image_bitmap_asset(url: string): Promise<ImageBitmap> {
   return createImageBitmap(blob, { premultiplyAlpha: 'none', colorSpaceConversion: 'none' })
 }
 
-function font_image_url(doc: font_doc, label: string): string {
+function font_image_url(doc: font_doc | font_bundle_doc, label: string): string {
   const page = doc.pages?.[0]
   if (!page) throw new Error(`font ${label} has no atlas page`)
   const page_name = page.split(/[\\/]/).pop() ?? page
@@ -171,7 +184,13 @@ function font_image_url(doc: font_doc, label: string): string {
   return url
 }
 
-function glyph_map(doc: font_doc, options?: { cjk_punctuation_fallbacks?: boolean }): font_atlas {
+function font_face(doc: font_bundle_doc, font_type: typeof FONT_MAIN | typeof FONT_MONO): font_face_doc {
+  const face = doc.fonts[font_type]
+  if (!face) throw new Error(`font bundle missing ${font_type}`)
+  return face
+}
+
+function glyph_map(doc: font_face_doc, texture_width: number, texture_height: number, options?: { cjk_punctuation_fallbacks?: boolean }): font_atlas {
   const glyphs = new Map<number, glyph_metric>()
   for (const [code, width, height, x_offset, y_offset, x_advance, atlas_x, atlas_y] of doc.chars) {
     glyphs.set(code, { width, height, x_offset, y_offset, x_advance, atlas_x, atlas_y })
@@ -189,8 +208,8 @@ function glyph_map(doc: font_doc, options?: { cjk_punctuation_fallbacks?: boolea
     }
   }
   return {
-    width: doc.width,
-    height: doc.height,
+    width: texture_width,
+    height: texture_height,
     font_size: doc.size,
     line_height: doc.line_height,
     glyphs,
@@ -336,7 +355,7 @@ export class ui_renderer {
   private commands: ui_draw_command[] = []
   private clip_stack: clip_rect[] = []
   private current_texture_id = white_texture_id
-  private readonly font_atlases = new Map<number, font_atlas>()
+  private readonly font_atlases = new Map<ui_font_primitive, font_atlas>()
   private canvas_width = 1
   private canvas_height = 1
   private bind_group_layout: GPUBindGroupLayout | null = null
@@ -361,17 +380,18 @@ export class ui_renderer {
     if (!this.context) throw new Error('WebGPU canvas context unavailable')
     this.format = navigator.gpu.getPreferredCanvasFormat()
 
-    const [shader_code, latin_font_doc, cjk_font_doc] = await Promise.all([
+    const [shader_code, latin_mono_font_doc, cjk_font_doc] = await Promise.all([
       load_text(ui_shader_url),
-      load_json<font_doc>(inter_font_json_url),
+      load_json<font_bundle_doc>(latin_mono_font_json_url),
       load_json<font_doc>(ping_fang_font_json_url),
     ])
-    const [latin_font_image, cjk_font_image] = await Promise.all([
-      load_image_bitmap_asset(font_image_url(latin_font_doc, 'latin')),
+    const [latin_mono_font_image, cjk_font_image] = await Promise.all([
+      load_image_bitmap_asset(font_image_url(latin_mono_font_doc, 'latin_mono')),
       load_image_bitmap_asset(font_image_url(cjk_font_doc, 'cjk')),
     ])
-    this.font_atlases.set(latin_font_texture_id, glyph_map(latin_font_doc))
-    this.font_atlases.set(cjk_font_texture_id, glyph_map(cjk_font_doc, { cjk_punctuation_fallbacks: true }))
+    this.font_atlases.set(FONT_MAIN, glyph_map(font_face(latin_mono_font_doc, FONT_MAIN), latin_mono_font_doc.width, latin_mono_font_doc.height))
+    this.font_atlases.set(FONT_MONO, glyph_map(font_face(latin_mono_font_doc, FONT_MONO), latin_mono_font_doc.width, latin_mono_font_doc.height))
+    this.font_atlases.set(FONT_ZH, glyph_map(cjk_font_doc, cjk_font_doc.width, cjk_font_doc.height, { cjk_punctuation_fallbacks: true }))
     this.screen_buffer = this.device.createBuffer({ label: 'ui.screen_buffer', size: 8, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST })
 
     const shader_module = this.device.createShaderModule({ label: 'ui.shader_module', code: shader_code })
@@ -446,7 +466,7 @@ export class ui_renderer {
         { binding: 2, resource: { buffer: this.screen_buffer } },
       ],
     })
-    this.font_bind_groups.set(latin_font_texture_id, this.create_texture_bind_group('ui.font_texture.latin', latin_font_image, sampler, bind_group_layout))
+    this.font_bind_groups.set(latin_mono_font_texture_id, this.create_texture_bind_group('ui.font_texture.latin_mono', latin_mono_font_image, sampler, bind_group_layout))
     this.font_bind_groups.set(cjk_font_texture_id, this.create_texture_bind_group('ui.font_texture.cjk', cjk_font_image, sampler, bind_group_layout))
     this.color_panel_uniform = this.device.createBuffer({
       label: 'ui.buffer.color_panel',
@@ -671,7 +691,7 @@ export class ui_renderer {
     this.push_tri(x0 + hx, y0 + hy, x1 - hx, y1 - hy, x1 + hx, y1 + hy, u, v, rgba)
   }
 
-  draw_text(x: number, y: number, text: string, font_px: number, rgba: number): void {
+  draw_text(x: number, y: number, text: string, font_px: number, rgba: number, font_type: ui_font_primitive = FONT_MAIN): void {
     if (!text || !this.font_atlases.size) return
     const effective_font_px = font_px * default_font_scale
     let cx = x
@@ -679,11 +699,11 @@ export class ui_renderer {
     for (const ch of text) {
       if (ch === '\n') {
         cx = x
-        cy += this.text_line_height(font_px)
+        cy += this.text_line_height(font_px, font_type)
         continue
       }
       const code = ch.codePointAt(0) ?? 32
-      const font = this.font_for_codepoint(code)
+      const font = this.font_for_codepoint(code, font_type)
       if (!font) continue
       const glyph = font.atlas.glyphs.get(code) ?? font.atlas.glyphs.get(32)
       if (!glyph) continue
@@ -714,7 +734,7 @@ export class ui_renderer {
     }
   }
 
-  wrap_text(text: string, font_px: number, max_w: number): string[] {
+  wrap_text(text: string, font_px: number, max_w: number, font_type: ui_font_primitive = FONT_MAIN): string[] {
     const normalized = text.replace(/\r/g, '')
     if (!normalized) return ['']
     const paragraphs = normalized.split('\n')
@@ -728,19 +748,19 @@ export class ui_renderer {
       let current = ''
       for (const word of words) {
         const candidate = current ? `${current} ${word}` : word
-        if (this.text_width(candidate, font_px) <= max_w) {
+        if (this.text_width(candidate, font_px, font_type) <= max_w) {
           current = candidate
           continue
         }
         if (current) lines.push(current)
-        if (this.text_width(word, font_px) <= max_w) {
+        if (this.text_width(word, font_px, font_type) <= max_w) {
           current = word
           continue
         }
         let chunk = ''
         for (const ch of word) {
           const next = `${chunk}${ch}`
-          if (chunk && this.text_width(next, font_px) > max_w) {
+          if (chunk && this.text_width(next, font_px, font_type) > max_w) {
             lines.push(chunk)
             chunk = ch
           } else {
@@ -754,33 +774,33 @@ export class ui_renderer {
     return lines.length ? lines : ['']
   }
 
-  draw_text_wrapped(x: number, y: number, w: number, text: string, font_px: number, rgba: number): number {
-    const lines = this.wrap_text(text, font_px, w)
-    const line_h = this.text_line_height(font_px)
+  draw_text_wrapped(x: number, y: number, w: number, text: string, font_px: number, rgba: number, font_type: ui_font_primitive = FONT_MAIN): number {
+    const lines = this.wrap_text(text, font_px, w, font_type)
+    const line_h = this.text_line_height(font_px, font_type)
     for (let i = 0; i < lines.length; i += 1) {
-      this.draw_text(x, y + i * line_h, lines[i] ?? '', font_px, rgba)
+      this.draw_text(x, y + i * line_h, lines[i] ?? '', font_px, rgba, font_type)
     }
     return lines.length * line_h
   }
 
-  text_line_height(font_px: number): number {
-    const atlas = this.font_atlases.get(latin_font_texture_id)
+  text_line_height(font_px: number, font_type: ui_font_primitive = FONT_MAIN): number {
+    const atlas = this.font_atlases.get(font_type) ?? this.font_atlases.get(FONT_MAIN)
     if (!atlas) return font_px
     const effective_font_px = font_px * default_font_scale
     return atlas.line_height * (effective_font_px / atlas.font_size)
   }
 
-  text_v_center_y(y: number, h: number, font_px: number): number {
-    const line_h = this.text_line_height(font_px)
+  text_v_center_y(y: number, h: number, font_px: number, font_type: ui_font_primitive = FONT_MAIN): number {
+    const line_h = this.text_line_height(font_px, font_type)
     return y + (h - line_h) * 0.5 - font_px * default_font_scale * 0.03
   }
 
-  text_width(text: string, font_px: number): number {
+  text_width(text: string, font_px: number, font_type: ui_font_primitive = FONT_MAIN): number {
     const effective_font_px = font_px * default_font_scale
     let width = 0
     for (const ch of text) {
       if (ch === '\n') break
-      const font = this.font_for_codepoint(ch.codePointAt(0) ?? 32)
+      const font = this.font_for_codepoint(ch.codePointAt(0) ?? 32, font_type)
       if (!font) {
         width += effective_font_px * 0.55
         continue
@@ -855,15 +875,25 @@ export class ui_renderer {
     })
   }
 
-  private font_for_codepoint(code: number): { texture_id: number; atlas: font_atlas } | null {
-    const latin = this.font_atlases.get(latin_font_texture_id) ?? null
-    const cjk = this.font_atlases.get(cjk_font_texture_id) ?? null
-    if (is_cjk_codepoint(code) && cjk?.glyphs.has(code)) return { texture_id: cjk_font_texture_id, atlas: cjk }
-    if (latin?.glyphs.has(code)) return { texture_id: latin_font_texture_id, atlas: latin }
-    if (cjk?.glyphs.has(code)) return { texture_id: cjk_font_texture_id, atlas: cjk }
-    if (latin) return { texture_id: latin_font_texture_id, atlas: latin }
-    if (cjk) return { texture_id: cjk_font_texture_id, atlas: cjk }
+  private font_for_codepoint(code: number, font_type: ui_font_primitive): { texture_id: number; atlas: font_atlas } | null {
+    const preferred = this.font_atlases.get(font_type) ?? null
+    const main = this.font_atlases.get(FONT_MAIN) ?? null
+    const zh = this.font_atlases.get(FONT_ZH) ?? null
+    const mono = this.font_atlases.get(FONT_MONO) ?? null
+    if (preferred?.glyphs.has(code)) return { texture_id: this.font_texture_id_for_type(font_type), atlas: preferred }
+    if (is_cjk_codepoint(code) && zh?.glyphs.has(code)) return { texture_id: cjk_font_texture_id, atlas: zh }
+    if (main?.glyphs.has(code)) return { texture_id: latin_mono_font_texture_id, atlas: main }
+    if (mono?.glyphs.has(code)) return { texture_id: latin_mono_font_texture_id, atlas: mono }
+    if (zh?.glyphs.has(code)) return { texture_id: cjk_font_texture_id, atlas: zh }
+    if (preferred) return { texture_id: this.font_texture_id_for_type(font_type), atlas: preferred }
+    if (main) return { texture_id: latin_mono_font_texture_id, atlas: main }
+    if (zh) return { texture_id: cjk_font_texture_id, atlas: zh }
+    if (mono) return { texture_id: latin_mono_font_texture_id, atlas: mono }
     return null
+  }
+
+  private font_texture_id_for_type(font_type: ui_font_primitive): number {
+    return font_type === FONT_ZH ? cjk_font_texture_id : latin_mono_font_texture_id
   }
 
   canvas_size(): { width: number; height: number } {
