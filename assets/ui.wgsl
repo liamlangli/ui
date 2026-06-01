@@ -45,8 +45,8 @@ fn screen_px_range(uv: vec2f) -> f32 {
   let s = textureSample(tex, samp, in.uv);
   let sd = median(s.r, s.g, s.b);
   let px_dist = (sd - 0.5) * screen_px_range(in.uv);
-  let aa = fwidth(px_dist);
-  let opacity = smoothstep(-aa, aa, px_dist);
+  // 1-pixel linear ramp — sharpest non-aliasing edge (msdfgen reference).
+  let opacity = clamp(px_dist + 0.5, 0.0, 1.0);
 
   return vec4f(in.col.rgb, in.col.a * opacity);
 }
