@@ -1,0 +1,1021 @@
+import { theme_color } from './theme'
+import type { theme_definition } from './types'
+import { ui_renderer } from './ui-renderer'
+
+export interface ui_input_snapshot {
+  mouse_x: number
+  mouse_y: number
+  mouse_down: boolean
+  mouse_pressed: boolean
+  mouse_released: boolean
+  wheel_y: number
+  typed_text: string
+  key_backspace: boolean
+  key_delete: boolean
+  key_enter: boolean
+  key_escape: boolean
+  key_left: boolean
+  key_right: boolean
+  key_home: boolean
+  key_end: boolean
+  shift: boolean
+  gizmo_manipulating: boolean
+}
+
+export interface ui_scroll_state {
+  offset_y: number
+}
+
+export interface ui_input_text_state {
+  cursor: number
+  sel_anchor: number
+  sel_head: number
+}
+
+export interface ui_number_input_state extends ui_input_text_state {
+  draft: string
+}
+
+export interface ui_menu_item {
+  label: string
+  separator?: boolean
+  disabled?: boolean
+  submenu?: ui_menu_item[]
+}
+
+export interface ui_color_rgba {
+  r: number
+  g: number
+  b: number
+  a: number
+}
+
+const w_font_px = 15
+const w_row_h = 28
+const w_radius = 3
+const w_scrollbar_w = 7
+const w_scrollbar_min = 20
+const w_toggle_w = 34
+const w_toggle_h = 18
+const w_slider_thumb = 11
+const w_pad = 8
+const w_popup_item_h = 22
+const w_submenu_w = 160
+const w_section_h = 22
+const w_popup_safe_margin = 6
+
+function clamp01(value: number): number {
+  return Math.max(0, Math.min(1, value))
+}
+
+function packRgba(r: number, g: number, b: number, a: number): number {
+  const rr = Math.round(clamp01(r) * 255)
+  const gg = Math.round(clamp01(g) * 255)
+  const bb = Math.round(clamp01(b) * 255)
+  const aa = Math.round(clamp01(a) * 255)
+  return (((aa & 255) << 24) | ((bb & 255) << 16) | ((gg & 255) << 8) | (rr & 255)) >>> 0
+}
+
+export function create_empty_ui_input(): ui_input_snapshot {
+  return {
+    mouse_x: 0,
+    mouse_y: 0,
+    mouse_down: false,
+    mouse_pressed: false,
+    mouse_released: false,
+    wheel_y: 0,
+    typed_text: '',
+    key_backspace: false,
+    key_delete: false,
+    key_enter: false,
+    key_escape: false,
+    key_left: false,
+    key_right: false,
+    key_home: false,
+    key_end: false,
+    shift: false,
+    gizmo_manipulating: false,
+  }
+}
+
+type dropdown_popup = {
+  id: string
+  x: number
+  y: number
+  w: number
+  h: number
+  items: string[]
+  selected_ref: { value: number }
+}
+
+type color_picker_popup = {
+  id: string
+  x: number
+  y: number
+  w: number
+  h: number
+  color_ref: ui_color_rgba
+  popup_w?: number
+}
+
+type popup_placement = {
+  x: number
+  y: number
+  w: number
+  h: number
+}
+
+export class ui_widgets {
+  private theme!: theme_definition
+  private input: ui_input_snapshot = create_empty_ui_input()
+  private active_id: string | null = null
+  private focused_input_id: string | null = null
+  private pending_focused_input_id: string | null = null
+  private open_dropdown_id: string | null = null
+  private pending_dropdown: dropdown_popup | null = null
+  private open_dropdown_popup_rect: { id: string; x: number; y: number; w: number; h: number } | null = null
+  private dropdown_selections = new Map<string, number>()
+  private focused_number_id: string | null = null
+  private open_color_picker_id: string | null = null
+  private pending_color_picker: color_picker_popup | null = null
+  private open_color_picker_popup_rect: { id: string; x: number; y: number; w: number; h: number } | null = null
+  private readonly color_picker_values = new Map<string, ui_color_rgba>()
+  private readonly color_picker_number_inputs = new Map<string, ui_number_input_state>()
+
+  constructor(private readonly ui: ui_renderer) {}
+
+  begin_frame(theme: theme_definition, input: ui_input_snapshot): void {
+    this.theme = theme
+    this.input = input
+    this.pending_dropdown = null
+    this.pending_color_picker = null
+    this.open_dropdown_popup_rect = null
+    this.open_color_picker_popup_rect = null
+    if (!input.mouse_down && this.active_id) this.active_id = null
+  }
+
+  end_frame(): void {
+    if (this.pending_dropdown) this.render_dropdown_popup(this.pending_dropdown)
+    if (this.pending_color_picker) this.render_color_picker_popup(this.pending_color_picker)
+  }
+
+  section(x: number, y: number, w: number, label: string): number {
+    const scale = window.devicePixelRatio || 1
+    const section_h = w_section_h * scale
+    const pad = w_pad * scale
+    this.ui.draw_text(x + pad, this.ui.text_v_center_y(y, section_h, w_font_px * scale), label, w_font_px * scale, this.color('text_dim'))
+    const lw = this.ui.text_width(label, w_font_px * scale) + pad * 2
+    this.ui.fill_rect(x + lw, y + section_h * 0.5, Math.max(0, w - lw - 4 * scale), 1, this.color('border'))
+    return y + section_h
+  }
+
+  button(id: string, x: number, y: number, w: number, h: number, label: string, options?: { active?: boolean }): boolean {
+    const scale = window.devicePixelRatio || 1
+    const hover = this.point_in(x, y, w, h)
+    const active = options?.active === true
+    const bg = active ? this.color('active') : hover ? this.color('hover') : this.color('selected')
+    const border = active ? this.color('accent') : this.color('border_strong')
+    this.ui.fill_rect(x, y, w, h, bg)
+    this.ui.stroke_rect(x, y, w, h, 1, border)
+    const font_px = w_font_px * scale / 2
+    const text_w = this.ui.text_width(label, font_px)
+    this.ui.draw_text(x + Math.max(0, (w - text_w) * 0.5), this.ui.text_v_center_y(y, h, font_px), label, font_px, this.color('text'))
+    return hover && this.input.mouse_pressed
+  }
+
+  toggle(id: string, x: number, y: number, value: boolean, label?: string): boolean {
+    const scale = window.devicePixelRatio || 1
+    const box_size = Math.max(8 * scale, (w_toggle_h - 3) * scale)
+    const label_gap = label ? 7 * scale : 0
+    const label_w = label ? this.ui.text_width(label, w_font_px * scale) : 0
+    const hit_w = box_size + label_gap + label_w
+    const hover = this.point_in(x, y, hit_w, box_size)
+    if (hover && this.input.mouse_pressed) value = !value
+    this.ui.fill_rect(x, y, box_size, box_size, hover ? this.color('panel_alt') : this.color('track'))
+    this.ui.stroke_rect(x, y, box_size, box_size, 1, value ? this.color('accent') : this.color('border_strong'))
+    if (value) {
+      const inner_pad = 4 * scale
+      this.ui.fill_rect(x + inner_pad, y + inner_pad, Math.max(0, box_size - inner_pad * 2), Math.max(0, box_size - inner_pad * 2), this.color('accent'))
+    }
+    if (label) this.ui.draw_text(x + box_size + label_gap, this.ui.text_v_center_y(y, box_size, w_font_px * scale), label, w_font_px * scale, this.color('text'))
+    return value
+  }
+
+  slider(id: string, x: number, y: number, w: number, h: number, value: number, min: number, max: number, show_value = false): number {
+    const scale = window.devicePixelRatio || 1
+    const hover = this.point_in(x, y, w, h)
+    if (this.input.mouse_pressed && hover) this.active_id = id
+    if (this.active_id === id && this.input.mouse_down) {
+      const t = Math.max(0, Math.min(1, (this.input.mouse_x - x) / Math.max(w, 1)))
+      value = min + (max - min) * t
+    }
+    value = Math.max(min, Math.min(max, value))
+    const t = max > min ? (value - min) / (max - min) : 0
+    const track_h = 4 * scale
+    const track_y = y + (h - track_h) * 0.5
+    this.ui.fill_rect(x, track_y, w, track_h, this.color('track'))
+    if (t > 0) this.ui.fill_rect(x, track_y, t * w, track_h, this.color('accent_dim'))
+    const th = w_slider_thumb * scale
+    const tx = x + t * w - th * 0.5
+    const ty = y + (h - th) * 0.5
+    this.ui.fill_rect(tx, ty, th, th, this.active_id === id ? this.color('accent') : this.color('selected'))
+    if (show_value) this.ui.draw_text(x + w + 8 * scale, this.ui.text_v_center_y(y, h, (w_font_px - 1) * scale), value.toFixed(2), (w_font_px - 1) * scale, this.color('text_dim'))
+    return value
+  }
+
+  list(id: string, x: number, y: number, w: number, h: number, items: string[], selected: number, scroll: ui_scroll_state): number {
+    const scale = window.devicePixelRatio || 1
+    const row_h = w_row_h * scale
+    const scrollbar_w = w_scrollbar_w * scale
+    const content_h = items.length * row_h
+    const max_off = Math.max(0, content_h - h)
+    if (this.point_in(x, y, w, h)) {
+      scroll.offset_y = Math.max(0, Math.min(max_off, scroll.offset_y - this.input.wheel_y * 20 * scale))
+    }
+    this.ui.push_clip(x, y, w, h)
+    let next_selected = selected
+    for (let i = 0; i < items.length; i += 1) {
+      const ry = y + i * row_h - scroll.offset_y
+      if (ry + row_h < y || ry > y + h) continue
+      const hover = this.point_in(x, ry, w - scrollbar_w, row_h)
+      const bg = i === selected ? this.color('selected') : hover ? this.color('hover') : 0
+      if (bg) this.ui.fill_rect(x, ry, w - scrollbar_w, row_h, bg)
+      this.ui.draw_text(x + w_pad * scale, this.ui.text_v_center_y(ry, row_h, w_font_px * scale), items[i], w_font_px * scale, i === selected ? this.color('text') : this.color('text_dim'))
+      if (hover && this.input.mouse_pressed) next_selected = i
+    }
+    this.ui.pop_clip()
+    if (content_h > h) {
+      const thumb_h = Math.max(w_scrollbar_min * scale, h * (h / content_h))
+      const travel = Math.max(1, h - thumb_h)
+      const t = max_off > 0 ? scroll.offset_y / max_off : 0
+      const thumb_y = y + t * travel
+      this.ui.fill_round_rect(x + w - scrollbar_w, y + 2 * scale, scrollbar_w, h - 4 * scale, scrollbar_w * 0.5, this.color('panel_alt'))
+      this.ui.fill_round_rect(x + w - scrollbar_w + 1, thumb_y + 1, scrollbar_w - 2, thumb_h - 2, (scrollbar_w - 2) * 0.5, this.color('selected'))
+    }
+    return next_selected
+  }
+
+  dropdown(
+    id: string,
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    items: string[],
+    selected: number,
+    options?: { chrome?: 'rounded' | 'rect' | 'none'; display_label?: string; show_arrow?: boolean },
+  ): number {
+    const scale = window.devicePixelRatio || 1
+    const popup_occluded =
+      this.open_dropdown_popup_rect != null &&
+      this.open_dropdown_popup_rect.id !== id &&
+      this.point_in_rect(
+        this.input.mouse_x,
+        this.input.mouse_y,
+        this.open_dropdown_popup_rect.x,
+        this.open_dropdown_popup_rect.y,
+        this.open_dropdown_popup_rect.w,
+        this.open_dropdown_popup_rect.h,
+      )
+    const hover = !popup_occluded && this.point_in(x, y, w, h)
+    const open = this.open_dropdown_id === id
+    if (hover && this.input.mouse_pressed) this.open_dropdown_id = open ? null : id
+    const chrome = options?.chrome ?? 'rounded'
+    const bg = open ? this.color('active') : hover ? this.color('hover') : this.color('panel')
+    if (chrome === 'rounded') {
+      this.ui.fill_round_rect(x, y, w, h, w_radius * scale, bg)
+      this.ui.stroke_rect(x, y, w, h, 1, open ? this.color('accent') : this.color('border'))
+    } else if (chrome === 'rect') {
+      this.ui.fill_rect(x, y, w, h, bg)
+      this.ui.stroke_rect(x, y, w, h, 1, open ? this.color('accent') : this.color('border'))
+    }
+    const effective_selected = this.dropdown_selections.get(id) ?? selected
+    const label = options?.display_label ?? items[effective_selected] ?? 'Select...'
+    const arrow_reserve = options?.show_arrow === false ? 0 : 18 * scale
+    this.ui.push_clip(x + 1, y + 1, Math.max(0, w - 2 - arrow_reserve), Math.max(0, h - 2))
+    this.ui.draw_text(x + w_pad * scale, this.ui.text_v_center_y(y, h, w_font_px * scale / 2), label, w_font_px * scale / 2, items[selected] ? this.color('text') : this.color('text_dim'))
+    this.ui.pop_clip()
+    if (options?.show_arrow !== false) {
+      this.ui.draw_text(x + w - 14 * scale, this.ui.text_v_center_y(y, h, w_font_px * scale / 2), 'v', w_font_px * scale / 2, this.color('text_dim'))
+    }
+    const ref = { value: effective_selected }
+    if (this.open_dropdown_id === id) {
+      this.pending_dropdown = { id, x, y, w, h, items, selected_ref: ref }
+      const placement = this.dropdown_popup_placement(x, y, w, h, items)
+      this.open_dropdown_popup_rect = { id, ...placement }
+    }
+    return this.dropdown_selections.get(id) ?? ref.value
+  }
+
+  set_dropdown_value(id: string, value: number): void {
+    this.dropdown_selections.set(id, value)
+  }
+
+  scrollbar(id: string, x: number, y: number, w: number, h: number, scroll: ui_scroll_state, content_h: number): void {
+    if (content_h <= h) return
+    const scale = window.devicePixelRatio || 1
+    const min_thumb = 20 * scale
+    const max_off = Math.max(0, content_h - h)
+    const thumb_h = Math.max(min_thumb, h * (h / content_h))
+    const travel = Math.max(1, h - thumb_h)
+    const t = max_off > 0 ? scroll.offset_y / max_off : 0
+    const thumb_y = y + t * travel
+
+    // Drag activation
+    const on_thumb = this.point_in(x, thumb_y, w, thumb_h)
+    const on_track = this.point_in(x, y, w, h)
+    if (this.input.mouse_pressed) {
+      if (on_thumb) {
+        this.active_id = id
+      } else if (on_track) {
+        // Click on track: jump to position
+        const click_t = Math.max(0, Math.min(1, (this.input.mouse_y - y - thumb_h * 0.5) / travel))
+        scroll.offset_y = Math.round(click_t * max_off)
+        this.active_id = id
+      }
+    }
+    if (this.active_id === id && this.input.mouse_down) {
+      const drag_t = Math.max(0, Math.min(1, (this.input.mouse_y - y - thumb_h * 0.5) / travel))
+      scroll.offset_y = Math.round(drag_t * max_off)
+    }
+
+    // Recompute thumb position after potential drag update
+    const t2 = max_off > 0 ? scroll.offset_y / max_off : 0
+    const thumb_y2 = y + t2 * travel
+    const thumb_hovered = this.active_id === id || this.point_in(x, thumb_y2, w, thumb_h)
+
+    this.ui.fill_rect(x, y, w, h, this.color('panel_alt'))
+    this.ui.fill_rect(x + 1, thumb_y2 + 1, w - 2, thumb_h - 2, thumb_hovered ? this.color('text_dim') : this.color('selected'))
+  }
+
+  hit_region(x: number, y: number, w: number, h: number): { hovered: boolean; pressed: boolean } {
+    const hovered = this.point_in(x, y, w, h)
+    return { hovered, pressed: hovered && this.input.mouse_pressed }
+  }
+
+  handle_scroll_area(x: number, y: number, w: number, h: number, scroll: ui_scroll_state, content_h: number): void {
+    if (!this.point_in(x, y, w, h)) return
+    const scale = window.devicePixelRatio || 1
+    const max_off = Math.max(0, content_h - h)
+    scroll.offset_y = Math.max(0, Math.min(max_off, scroll.offset_y - this.input.wheel_y * 20 * scale))
+  }
+
+  is_escape_pressed(): boolean {
+    return this.input.key_escape
+  }
+
+  is_enter_pressed(): boolean {
+    return this.input.key_enter
+  }
+
+  is_mouse_down(): boolean {
+    return this.input.mouse_down
+  }
+
+  is_mouse_pressed(): boolean {
+    return this.input.mouse_pressed
+  }
+
+  has_keyboard_focus(): boolean {
+    return this.focused_input_id != null || this.focused_number_id != null
+  }
+
+  focus_text_input(id: string, state: ui_input_text_state, cursor = state.cursor): void {
+    const next_cursor = Math.max(0, cursor)
+    this.focused_input_id = id
+    this.pending_focused_input_id = id
+    this.focused_number_id = null
+    this.active_id = null
+    state.cursor = next_cursor
+    state.sel_anchor = next_cursor
+    state.sel_head = next_cursor
+  }
+
+  mouse_x(): number {
+    return this.input.mouse_x
+  }
+
+  mouse_y(): number {
+    return this.input.mouse_y
+  }
+
+  input_text(id: string, x: number, y: number, w: number, h: number, buf: string, placeholder: string, state: ui_input_text_state): string {
+    return this.input_field(id, x, y, w, h, buf, placeholder, state)
+  }
+
+  input_field(id: string, x: number, y: number, w: number, h: number, buf: string, placeholder: string, state: ui_input_text_state): string {
+    const scale = window.devicePixelRatio || 1
+    const hover = this.point_in(x, y, w, h)
+    const auto_focused = this.pending_focused_input_id === id
+    const focused = this.focused_input_id === id
+    const text_x = x + w_pad * scale
+    if (this.input.mouse_pressed && !auto_focused) {
+      if (hover) {
+        this.focused_input_id = id
+        this.focused_number_id = null
+        this.active_id = id
+        const next_cursor = this.cursor_from_mouse(buf, text_x, this.input.mouse_x)
+        state.cursor = next_cursor
+        state.sel_anchor = next_cursor
+        state.sel_head = next_cursor
+      } else if (this.focused_input_id === id) {
+        this.focused_input_id = null
+      }
+    } else if (this.active_id === id && this.input.mouse_down) {
+      const next_cursor = this.cursor_from_mouse(buf, text_x, this.input.mouse_x)
+      state.cursor = next_cursor
+      state.sel_head = next_cursor
+    }
+    let value = buf
+    if (focused) {
+      if (this.input.typed_text) {
+        value = this.replace_selection(value, state, this.input.typed_text)
+      }
+      if (this.input.key_backspace) {
+        if (this.has_selection(state)) {
+          value = this.replace_selection(value, state, '')
+        } else if (state.cursor > 0) {
+          value = value.slice(0, state.cursor - 1) + value.slice(state.cursor)
+          state.cursor -= 1
+          state.sel_anchor = state.cursor
+          state.sel_head = state.cursor
+        }
+      }
+      if (this.input.key_delete) {
+        if (this.has_selection(state)) {
+          value = this.replace_selection(value, state, '')
+        } else if (state.cursor < value.length) {
+          value = value.slice(0, state.cursor) + value.slice(state.cursor + 1)
+        }
+      }
+      if (this.input.typed_text) {
+        state.sel_anchor = state.cursor
+        state.sel_head = state.cursor
+      }
+      if (this.input.key_left) this.move_cursor(state, Math.max(0, this.selection_start(state, true) - 1))
+      if (this.input.key_right) this.move_cursor(state, Math.min(value.length, this.selection_end(state, true) + 1))
+      if (this.input.key_home) this.move_cursor(state, 0)
+      if (this.input.key_end) this.move_cursor(state, value.length)
+      if (this.input.key_escape) this.focused_input_id = null
+    }
+    if (auto_focused) this.pending_focused_input_id = null
+
+    this.ui.fill_round_rect(x, y, w, h, w_radius * scale, this.color('panel_alt'))
+    this.ui.stroke_rect(x, y, w, h, 1, focused ? this.color('accent') : this.color('border'))
+    this.ui.push_clip(x + 1, y + 1, Math.max(0, w - 2), Math.max(0, h - 2))
+    const draw_text = value || placeholder
+    const draw_color = value ? this.color('text') : this.color('text_dim')
+    if (focused && value && this.has_selection(state)) {
+      const start = this.selection_start(state)
+      const end = this.selection_end(state)
+      const sx = text_x + this.ui.text_width(value.slice(0, start), w_font_px * scale / 2)
+      const ex = text_x + this.ui.text_width(value.slice(0, end), w_font_px * scale / 2)
+      this.ui.fill_rect(sx, y + 5 * scale, Math.max(1, ex - sx), Math.max(10 * scale, h - 10 * scale), this.color('selected'))
+    }
+    this.ui.draw_text(text_x, this.ui.text_v_center_y(y, h, w_font_px * scale / 2), draw_text, w_font_px * scale / 2, draw_color)
+    if (focused) {
+      const cursor_x = text_x + this.ui.text_width(value.slice(0, state.cursor), w_font_px * scale / 2)
+      this.ui.fill_rect(cursor_x, y + 6 * scale, 1.5 * scale, Math.max(10 * scale, h - 12 * scale), this.color('accent'))
+    }
+    this.ui.pop_clip()
+    return value
+  }
+
+  number_input(
+    id: string,
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    value: number,
+    state: ui_number_input_state,
+    options?: { min?: number; max?: number; step?: number; decimals?: number },
+  ): number {
+    if (!Number.isFinite(value)) value = 0
+    const decimals = options?.decimals ?? 2
+    const scale = window.devicePixelRatio || 1
+    const hover = this.point_in(x, y, w, h)
+    const focused = this.focused_number_id === id
+    const text_x = x + w_pad * scale
+    if (!focused && !state.draft) {
+      state.draft = value.toFixed(decimals)
+      state.cursor = state.draft.length
+      state.sel_anchor = state.cursor
+      state.sel_head = state.cursor
+    }
+    if (this.input.mouse_pressed) {
+      if (hover) {
+        this.focused_number_id = id
+        this.focused_input_id = null
+        this.active_id = id
+        const next_cursor = this.cursor_from_mouse(state.draft || value.toFixed(decimals), text_x, this.input.mouse_x)
+        state.cursor = next_cursor
+        state.sel_anchor = next_cursor
+        state.sel_head = next_cursor
+      } else if (this.focused_number_id === id) {
+        this.focused_number_id = null
+      }
+    } else if (this.active_id === id && this.input.mouse_down) {
+      const next_cursor = this.cursor_from_mouse(state.draft || value.toFixed(decimals), text_x, this.input.mouse_x)
+      state.cursor = next_cursor
+      state.sel_head = next_cursor
+    }
+
+    let next_value = value
+    let draft = focused ? state.draft : value.toFixed(decimals)
+    if (focused) {
+      if (this.input.typed_text) {
+        const filtered = [...this.input.typed_text].filter((ch) => /[0-9.\-]/.test(ch)).join('')
+        if (filtered) {
+          draft = this.replace_selection(draft, state, filtered)
+        }
+      }
+      if (this.input.key_backspace) {
+        if (this.has_selection(state)) {
+          draft = this.replace_selection(draft, state, '')
+        } else if (state.cursor > 0) {
+          draft = draft.slice(0, state.cursor - 1) + draft.slice(state.cursor)
+          state.cursor -= 1
+          state.sel_anchor = state.cursor
+          state.sel_head = state.cursor
+        }
+      }
+      if (this.input.key_delete) {
+        if (this.has_selection(state)) {
+          draft = this.replace_selection(draft, state, '')
+        } else if (state.cursor < draft.length) {
+          draft = draft.slice(0, state.cursor) + draft.slice(state.cursor + 1)
+        }
+      }
+      if (this.input.key_left) this.move_cursor(state, Math.max(0, this.selection_start(state, true) - 1))
+      if (this.input.key_right) this.move_cursor(state, Math.min(draft.length, this.selection_end(state, true) + 1))
+      if (this.input.key_home) this.move_cursor(state, 0)
+      if (this.input.key_end) this.move_cursor(state, draft.length)
+      if (this.input.wheel_y !== 0 && hover) {
+        const step = options?.step ?? 0.1
+        next_value += (this.input.wheel_y > 0 ? 1 : -1) * step
+        draft = next_value.toFixed(decimals)
+        state.cursor = draft.length
+        state.sel_anchor = state.cursor
+        state.sel_head = state.cursor
+      }
+      const parsed = Number.parseFloat(draft)
+      if (Number.isFinite(parsed)) {
+        next_value = parsed
+      }
+      if (this.input.key_enter || this.input.key_escape) {
+        if (Number.isFinite(next_value)) {
+          if (typeof options?.min === 'number') next_value = Math.max(options.min, next_value)
+          if (typeof options?.max === 'number') next_value = Math.min(options.max, next_value)
+          draft = next_value.toFixed(decimals)
+        } else {
+          next_value = value
+          draft = value.toFixed(decimals)
+        }
+        state.cursor = draft.length
+        this.focused_number_id = null
+      }
+    }
+
+    if (typeof options?.min === 'number') next_value = Math.max(options.min, next_value)
+    if (typeof options?.max === 'number') next_value = Math.min(options.max, next_value)
+    state.draft = focused ? draft : next_value.toFixed(decimals)
+
+    this.ui.fill_round_rect(x, y, w, h, w_radius * scale, this.color('panel_alt'))
+    this.ui.stroke_rect(x, y, w, h, 1, focused ? this.color('accent') : this.color('border'))
+    const text = state.draft || next_value.toFixed(decimals)
+    this.ui.push_clip(x + 1, y + 1, Math.max(0, w - 2), Math.max(0, h - 2))
+    if (focused && text && this.has_selection(state)) {
+      const start = this.selection_start(state)
+      const end = this.selection_end(state)
+      const sx = text_x + this.ui.text_width(text.slice(0, start), w_font_px * scale / 2)
+      const ex = text_x + this.ui.text_width(text.slice(0, end), w_font_px * scale / 2)
+      this.ui.fill_rect(sx, y + 5 * scale, Math.max(1, ex - sx), Math.max(10 * scale, h - 10 * scale), this.color('selected'))
+    }
+    this.ui.draw_text(text_x, this.ui.text_v_center_y(y, h, w_font_px * scale / 2), text, w_font_px * scale / 2, this.color('text'))
+    if (focused) {
+      const cursor_x = text_x + this.ui.text_width(text.slice(0, state.cursor), w_font_px * scale / 2)
+      this.ui.fill_rect(cursor_x, y + 6 * scale, 1.5 * scale, Math.max(10 * scale, h - 12 * scale), this.color('accent'))
+    }
+    this.ui.pop_clip()
+    return next_value
+  }
+
+  ui_color_picker(
+    id: string,
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    value: ui_color_rgba,
+    options?: { label?: string; popup_w?: number },
+  ): ui_color_rgba {
+    const scale = window.devicePixelRatio || 1
+    const popup_occluded =
+      this.open_color_picker_popup_rect != null &&
+      this.open_color_picker_popup_rect.id !== id &&
+      this.point_in_rect(
+        this.input.mouse_x,
+        this.input.mouse_y,
+        this.open_color_picker_popup_rect.x,
+        this.open_color_picker_popup_rect.y,
+        this.open_color_picker_popup_rect.w,
+        this.open_color_picker_popup_rect.h,
+      )
+    const hover = !popup_occluded && this.point_in(x, y, w, h)
+    const open = this.open_color_picker_id === id
+    if (hover && this.input.mouse_pressed) this.open_color_picker_id = open ? null : id
+
+    let current = this.color_picker_values.get(id)
+    if (!current || !open && !this.same_color(current, value)) {
+      current = this.normalize_color(value)
+      this.color_picker_values.set(id, current)
+    }
+    if (!current) {
+      current = this.normalize_color(value)
+      this.color_picker_values.set(id, current)
+    }
+
+    const bg = open ? this.color('active') : hover ? this.color('hover') : this.color('panel')
+    this.ui.fill_round_rect(x, y, w, h, w_radius * scale, bg)
+    this.ui.stroke_rect(x, y, w, h, 1, open ? this.color('accent') : this.color('border'))
+    this.draw_checkerboard(x + 1, y + 1, Math.max(0, w - 2), Math.max(0, h - 2), 4 * scale)
+    this.ui.fill_rect(x + 1, y + 1, Math.max(0, w - 2), Math.max(0, h - 2), packRgba(current.r, current.g, current.b, current.a))
+
+    const swatch_w = Math.min(24 * scale, Math.max(12 * scale, h - 4 * scale))
+    this.ui.fill_rect(x + 2 * scale, y + 2 * scale, swatch_w, Math.max(0, h - 4 * scale), packRgba(current.r, current.g, current.b, current.a))
+    this.ui.stroke_rect(x + 2 * scale, y + 2 * scale, swatch_w, Math.max(0, h - 4 * scale), 1, this.color('border_strong'))
+    const label = options?.label ?? 'Color'
+    const text_x = x + swatch_w + 8 * scale
+    this.ui.draw_text(text_x, this.ui.text_v_center_y(y, h, w_font_px * scale / 2), label, w_font_px * scale / 2, this.color('text'))
+
+    if (open) {
+      this.pending_color_picker = {
+        id,
+        x,
+        y,
+        w,
+        h,
+        color_ref: current,
+        popup_w: options?.popup_w,
+      }
+      const placement = this.color_picker_popup_placement(x, y, w, h, options?.popup_w)
+      this.open_color_picker_popup_rect = { id, ...placement }
+    }
+
+    return this.color_picker_values.get(id) ?? this.normalize_color(value)
+  }
+
+  private render_dropdown_popup(popup: dropdown_popup): void {
+    const scale = window.devicePixelRatio || 1
+    const popup_pad = 4 * scale
+    const placement = this.dropdown_popup_placement(popup.x, popup.y, popup.w, popup.h, popup.items)
+    const px = placement.x
+    const py = placement.y
+    const ph = placement.h
+    const safe_margin = w_popup_safe_margin * scale
+    const in_btn = this.point_in(popup.x, popup.y, popup.w, popup.h)
+    const in_pop = this.point_in(px, py, placement.w, ph)
+    const union_x = Math.min(popup.x, px) - safe_margin
+    const union_y = Math.min(popup.y, py) - safe_margin
+    const union_w = Math.max(popup.x + popup.w, px + placement.w) - Math.min(popup.x, px) + safe_margin * 2
+    const union_h = Math.max(popup.y + popup.h, py + ph) - Math.min(popup.y, py) + safe_margin * 2
+    const in_safe_zone = this.point_in_rect(this.input.mouse_x, this.input.mouse_y, union_x, union_y, union_w, union_h)
+    if (!in_safe_zone && !this.input.mouse_down) this.open_dropdown_id = null
+    if (this.input.mouse_pressed && !in_btn && !in_pop) this.open_dropdown_id = null
+    this.ui.fill_rect(px, py, placement.w, ph, this.color('panel'))
+    this.ui.stroke_rect(px, py, placement.w, ph, 1, this.color('border'))
+    let row_y = py + popup_pad
+    for (let i = 0; i < popup.items.length; i += 1) {
+      const hover = this.point_in(px + popup_pad, row_y, placement.w - popup_pad * 2, w_popup_item_h * scale)
+      const sel = popup.selected_ref.value === i
+      const bg = sel ? this.color('selected') : hover ? this.color('hover') : 0
+      if (bg) this.ui.fill_rect(px + popup_pad, row_y, placement.w - popup_pad * 2, w_popup_item_h * scale, bg)
+      this.ui.draw_text(px + w_pad * scale, this.ui.text_v_center_y(row_y, w_popup_item_h * scale, w_font_px * scale / 2), popup.items[i], w_font_px * scale / 2, sel ? this.color('text') : this.color('text_dim'))
+      if (hover && this.input.mouse_released) {
+        popup.selected_ref.value = i
+        this.dropdown_selections.set(popup.id, i)
+        this.open_dropdown_id = null
+      }
+      row_y += w_popup_item_h * scale
+    }
+  }
+
+  private render_color_picker_popup(popup: color_picker_popup): void {
+    const scale = window.devicePixelRatio || 1
+    const pad = 8 * scale
+    const preview_h = 22 * scale
+    const square_size = 154 * scale
+    const bar_w = 18 * scale
+    const input_h = 24 * scale
+    const input_gap = 6 * scale
+    const popup_w = popup.popup_w ?? Math.max(260 * scale, square_size + bar_w + pad * 3)
+    const title_h = 14 * scale
+    const channel_label_h = 11 * scale
+    const popup_h = pad * 2 + title_h + preview_h + 8 * scale + square_size + 10 * scale + channel_label_h + input_h + input_gap
+    const placement = this.color_picker_popup_placement(popup.x, popup.y, popup.w, popup.h, popup_w, popup_h)
+    const px = placement.x
+    const py = placement.y
+    const in_btn = this.point_in(popup.x, popup.y, popup.w, popup.h)
+    const in_pop = this.point_in(px, py, placement.w, placement.h)
+    const union_x = Math.min(popup.x, px) - w_popup_safe_margin * scale
+    const union_y = Math.min(popup.y, py) - w_popup_safe_margin * scale
+    const union_w = Math.max(popup.x + popup.w, px + placement.w) - Math.min(popup.x, px) + w_popup_safe_margin * scale * 2
+    const union_h = Math.max(popup.y + popup.h, py + placement.h) - Math.min(popup.y, py) + w_popup_safe_margin * scale * 2
+    const in_safe_zone = this.point_in_rect(this.input.mouse_x, this.input.mouse_y, union_x, union_y, union_w, union_h)
+    if (!in_safe_zone && !this.input.mouse_down) this.open_color_picker_id = null
+    if (this.input.mouse_pressed && !in_btn && !in_pop) this.open_color_picker_id = null
+
+    const theme_panel = this.color('panel')
+    this.ui.fill_rect(px, py, placement.w, placement.h, theme_panel)
+    this.ui.stroke_rect(px, py, placement.w, placement.h, 1, this.color('border'))
+
+    const title_y = py + pad
+    this.ui.draw_text(px + pad, this.ui.text_v_center_y(title_y, 12 * scale, 7 * scale), 'Color Picker', 7 * scale, this.color('text_dim'))
+
+    const preview_y = title_y + 14 * scale
+    this.draw_checkerboard(px + pad, preview_y, placement.w - pad * 2, preview_h, 4 * scale)
+    this.ui.fill_rect(px + pad, preview_y, placement.w - pad * 2, preview_h, packRgba(popup.color_ref.r, popup.color_ref.g, popup.color_ref.b, popup.color_ref.a))
+    this.ui.stroke_rect(px + pad, preview_y, placement.w - pad * 2, preview_h, 1, this.color('border_strong'))
+
+    const square_x = px + pad
+    const square_y = preview_y + preview_h + 8 * scale
+    const square_w = square_size
+    const square_h = square_size
+    const value = this.rgb_to_hsv(popup.color_ref.r, popup.color_ref.g, popup.color_ref.b)
+    this.draw_hue_saturation_square(square_x, square_y, square_w, square_h, value.v)
+    this.draw_value_bar(square_x + square_w + 8 * scale, square_y, bar_w, square_h, value.h, value.s, popup.color_ref.a)
+
+    const hs_hover = this.point_in(square_x, square_y, square_w, square_h)
+    const v_x = square_x + square_w + 8 * scale
+    const v_hover = this.point_in(v_x, square_y, bar_w, square_h)
+    if (this.input.mouse_pressed && hs_hover) this.active_id = `${popup.id}.hs`
+    if (this.input.mouse_pressed && v_hover) this.active_id = `${popup.id}.v`
+
+    if (this.active_id === `${popup.id}.hs` && this.input.mouse_down) {
+      const next_h = Math.max(0, Math.min(360, ((this.input.mouse_x - square_x) / Math.max(1, square_w)) * 360))
+      const next_s = 1 - Math.max(0, Math.min(1, (this.input.mouse_y - square_y) / Math.max(1, square_h)))
+      const rgb = this.hsv_to_rgb(next_h, next_s, value.v)
+      popup.color_ref.r = rgb.r
+      popup.color_ref.g = rgb.g
+      popup.color_ref.b = rgb.b
+    }
+    if (this.active_id === `${popup.id}.v` && this.input.mouse_down) {
+      const next_v = 1 - Math.max(0, Math.min(1, (this.input.mouse_y - square_y) / Math.max(1, square_h)))
+      const rgb = this.hsv_to_rgb(value.h, value.s, next_v)
+      popup.color_ref.r = rgb.r
+      popup.color_ref.g = rgb.g
+      popup.color_ref.b = rgb.b
+    }
+
+    const marker_x = square_x + (value.h / 360) * square_w
+    const marker_y = square_y + (1 - value.s) * square_h
+    this.ui.stroke_rect(marker_x - 3 * scale, marker_y - 3 * scale, 6 * scale, 6 * scale, 1, this.color('accent'))
+    const value_y = square_y + (1 - value.v) * square_h
+    this.ui.stroke_rect(v_x - 1 * scale, value_y - 2 * scale, bar_w + 2 * scale, 4 * scale, 1, this.color('accent'))
+
+    const input_y = square_y + square_h + 10 * scale
+    const col_gap = 6 * scale
+    const field_w = Math.max(0, (placement.w - pad * 2 - col_gap * 3) / 4)
+    const field_ids = [`${popup.id}.r`, `${popup.id}.g`, `${popup.id}.b`, `${popup.id}.a`]
+    const values = [popup.color_ref.r, popup.color_ref.g, popup.color_ref.b, popup.color_ref.a]
+    const labels = ['R', 'G', 'B', 'A']
+    for (let i = 0; i < 4; i += 1) {
+      const fx = px + pad + (field_w + col_gap) * i
+      this.ui.draw_text(fx, this.ui.text_v_center_y(input_y - 11 * scale, 10 * scale, 5.5 * scale), labels[i]!, 5.5 * scale, this.color('text_dim'))
+      values[i] = this.number_input(field_ids[i]!, fx, input_y, field_w, input_h, values[i]!, this.color_picker_number_state(field_ids[i]!), {
+        min: 0,
+        max: 1,
+        step: 0.01,
+        decimals: 3,
+      })
+    }
+    popup.color_ref.r = values[0]!
+    popup.color_ref.g = values[1]!
+    popup.color_ref.b = values[2]!
+    popup.color_ref.a = values[3]!
+  }
+
+  private point_in(x: number, y: number, w: number, h: number): boolean {
+    return this.input.mouse_x >= x && this.input.mouse_y >= y && this.input.mouse_x < x + w && this.input.mouse_y < y + h
+  }
+
+  private point_in_rect(px: number, py: number, x: number, y: number, w: number, h: number): boolean {
+    return px >= x && py >= y && px < x + w && py < y + h
+  }
+
+  private color_picker_number_state(id: string): ui_number_input_state {
+    let state = this.color_picker_number_inputs.get(id)
+    if (!state) {
+      state = { cursor: 0, sel_anchor: 0, sel_head: 0, draft: '' }
+      this.color_picker_number_inputs.set(id, state)
+    }
+    return state
+  }
+
+  private dropdown_popup_placement(x: number, y: number, w: number, h: number, items: string[]): popup_placement {
+    const scale = window.devicePixelRatio || 1
+    const popup_pad = 4 * scale
+    const popup_w = this.dropdown_popup_width(w, items)
+    const popup_h = items.length * w_popup_item_h * scale + popup_pad * 2
+    const gap = 2 * scale
+    const { width: canvas_w, height: canvas_h } = this.ui.canvas_size()
+
+    const bottom_y = y + h + gap
+    const top_y = y - popup_h - gap
+    let popup_y = bottom_y
+    if (bottom_y + popup_h > canvas_h && top_y >= 0) popup_y = top_y
+    popup_y = Math.max(0, Math.min(canvas_h - popup_h, popup_y))
+
+    const right_space = canvas_w - x
+    const left_space = x + w
+    let popup_x = x
+    if (right_space < popup_w && left_space >= popup_w) popup_x = x + w - popup_w
+    popup_x = Math.max(0, Math.min(canvas_w - popup_w, popup_x))
+
+    return { x: popup_x, y: popup_y, w: popup_w, h: popup_h }
+  }
+
+  private dropdown_popup_width(min_width: number, items: string[]): number {
+    const scale = window.devicePixelRatio || 1
+    let max_text_w = 0
+    for (const item of items) {
+      max_text_w = Math.max(max_text_w, this.ui.text_width(item, w_font_px * scale / 2))
+    }
+    const horizontal_pad = w_pad * scale * 2
+    const arrow_pad = 18 * scale
+    return Math.max(min_width, Math.ceil(max_text_w + horizontal_pad + arrow_pad))
+  }
+
+  private color_picker_popup_placement(x: number, y: number, w: number, h: number, popup_w?: number, popup_h?: number): popup_placement {
+    const scale = window.devicePixelRatio || 1
+    const width = popup_w ?? Math.max(260 * scale, 154 * scale + 18 * scale + 8 * scale * 3)
+    const height = popup_h ?? (8 * scale * 2 + 22 * scale + 8 * scale + 154 * scale + 10 * scale + 24 * scale)
+    const gap = 2 * scale
+    const { width: canvas_w, height: canvas_h } = this.ui.canvas_size()
+
+    const bottom_y = y + h + gap
+    const top_y = y - height - gap
+    let popup_y = bottom_y
+    if (bottom_y + height > canvas_h && top_y >= 0) popup_y = top_y
+    popup_y = Math.max(0, Math.min(canvas_h - height, popup_y))
+
+    const right_space = canvas_w - x
+    const left_space = x + w
+    let popup_x = x
+    if (right_space < width && left_space >= width) popup_x = x + w - width
+    popup_x = Math.max(0, Math.min(canvas_w - width, popup_x))
+
+    return { x: popup_x, y: popup_y, w: width, h: height }
+  }
+
+  private cursor_from_mouse(text: string, text_x: number, mouse_x: number): number {
+    const scale = window.devicePixelRatio || 1
+    if (!text.length) return 0
+    let prev_w = 0
+    for (let index = 0; index < text.length; index += 1) {
+      const next_w = this.ui.text_width(text.slice(0, index + 1), w_font_px * scale / 2)
+      const mid_x = text_x + (prev_w + next_w) * 0.5
+      if (mouse_x < mid_x) return index
+      prev_w = next_w
+    }
+    return text.length
+  }
+
+  private normalize_color(value: Partial<ui_color_rgba>): ui_color_rgba {
+    return {
+      r: Number.isFinite(value.r) ? value.r! : 0,
+      g: Number.isFinite(value.g) ? value.g! : 0,
+      b: Number.isFinite(value.b) ? value.b! : 0,
+      a: Number.isFinite(value.a) ? value.a! : 1,
+    }
+  }
+
+  private same_color(a: ui_color_rgba, b: ui_color_rgba): boolean {
+    const next = this.normalize_color(b)
+    return a.r === next.r && a.g === next.g && a.b === next.b && a.a === next.a
+  }
+
+  private draw_checkerboard(x: number, y: number, w: number, h: number, cell: number): void {
+    const dark = this.color('panel_alt')
+    const light = this.color('selected')
+    const cols = Math.ceil(w / Math.max(1, cell))
+    const rows = Math.ceil(h / Math.max(1, cell))
+    for (let row = 0; row < rows; row += 1) {
+      for (let col = 0; col < cols; col += 1) {
+        this.ui.fill_rect(x + col * cell, y + row * cell, Math.min(cell, x + w - (x + col * cell)), Math.min(cell, y + h - (y + row * cell)), (row + col) % 2 === 0 ? dark : light)
+      }
+    }
+  }
+
+  private draw_hue_saturation_square(x: number, y: number, w: number, h: number, value: number): void {
+    this.ui.draw_hsv_saturation_square(x, y, w, h, value)
+    this.ui.stroke_rect(x, y, w, h, 1, this.color('border_strong'))
+  }
+
+  private draw_value_bar(x: number, y: number, w: number, h: number, hue: number, saturation: number, alpha: number): void {
+    this.ui.draw_hsv_value_bar(x, y, w, h, hue, saturation, alpha)
+    this.ui.stroke_rect(x, y, w, h, 1, this.color('border_strong'))
+  }
+
+  private hsv_to_rgb(hue: number, saturation: number, value: number): ui_color_rgba {
+    const h = ((hue % 360) + 360) % 360
+    const s = Math.max(0, Math.min(1, saturation))
+    const v = Math.max(0, Math.min(1, value))
+    const c = v * s
+    const x = c * (1 - Math.abs(((h / 60) % 2) - 1))
+    const m = v - c
+    let r = 0
+    let g = 0
+    let b = 0
+    if (h < 60) {
+      r = c
+      g = x
+    } else if (h < 120) {
+      r = x
+      g = c
+    } else if (h < 180) {
+      g = c
+      b = x
+    } else if (h < 240) {
+      g = x
+      b = c
+    } else if (h < 300) {
+      r = x
+      b = c
+    } else {
+      r = c
+      b = x
+    }
+    return { r: r + m, g: g + m, b: b + m, a: 1 }
+  }
+
+  private rgb_to_hsv(r: number, g: number, b: number): { h: number; s: number; v: number } {
+    const max = Math.max(r, g, b)
+    const min = Math.min(r, g, b)
+    const delta = max - min
+    let h = 0
+    if (delta > 0) {
+      if (max === r) h = 60 * (((g - b) / delta) % 6)
+      else if (max === g) h = 60 * ((b - r) / delta + 2)
+      else h = 60 * ((r - g) / delta + 4)
+    }
+    if (h < 0) h += 360
+    const s = max <= 0 ? 0 : delta / max
+    return { h, s, v: max }
+  }
+
+  private selection_start(state: ui_input_text_state, collapse_to_cursor = false): number {
+    if (collapse_to_cursor && this.has_selection(state)) return Math.min(state.sel_anchor, state.sel_head)
+    return Math.min(state.sel_anchor, state.sel_head)
+  }
+
+  private selection_end(state: ui_input_text_state, collapse_to_cursor = false): number {
+    if (collapse_to_cursor && this.has_selection(state)) return Math.max(state.sel_anchor, state.sel_head)
+    return Math.max(state.sel_anchor, state.sel_head)
+  }
+
+  private has_selection(state: ui_input_text_state): boolean {
+    return state.sel_anchor !== state.sel_head
+  }
+
+  private move_cursor(state: ui_input_text_state, next: number): void {
+    state.cursor = next
+    state.sel_anchor = next
+    state.sel_head = next
+  }
+
+  private replace_selection(text: string, state: ui_input_text_state, insert: string): string {
+    const start = this.selection_start(state)
+    const end = this.selection_end(state)
+    const next = text.slice(0, start) + insert + text.slice(end)
+    const cursor = start + insert.length
+    state.cursor = cursor
+    state.sel_anchor = cursor
+    state.sel_head = cursor
+    return next
+  }
+
+  private color(slot: Parameters<typeof theme_color>[1]): number {
+    return pack_color(theme_color(this.theme, slot))
+  }
+}
+
+function pack_color(hex: string): number {
+  const raw = hex.trim().replace('#', '')
+  const parse = (start: number) => Number.parseInt(raw.slice(start, start + 2), 16)
+  if (raw.length === 6) {
+    const r = parse(0)
+    const g = parse(2)
+    const b = parse(4)
+    return (((255 & 255) << 24) | ((b & 255) << 16) | ((g & 255) << 8) | (r & 255)) >>> 0
+  }
+  if (raw.length === 8) {
+    const r = parse(0)
+    const g = parse(2)
+    const b = parse(4)
+    const a = parse(6)
+    return (((a & 255) << 24) | ((b & 255) << 16) | ((g & 255) << 8) | (r & 255)) >>> 0
+  }
+  return 0xffffffff
+}

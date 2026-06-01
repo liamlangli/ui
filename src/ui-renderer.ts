@@ -1,0 +1,984 @@
+import interFontJsonUrl from '../assets/Inter.json?url'
+import interFontPngUrl from '../assets/Inter.png?url'
+import uiShaderUrl from '../assets/ui.wgsl?url'
+import { clamp } from './math'
+
+export interface ui_draw_command {
+  vertex_offset: number
+  vertex_count: number
+  texture_id: number
+  clip_x: number
+  clip_y: number
+  clip_w: number
+  clip_h: number
+}
+
+type glyph_metric = {
+  width: number
+  height: number
+  x_offset: number
+  y_offset: number
+  x_advance: number
+  atlas_x: number
+  atlas_y: number
+}
+
+type font_atlas = {
+  width: number
+  height: number
+  font_size: number
+  line_height: number
+  glyphs: Map<number, glyph_metric>
+}
+
+type clip_rect = { x: number; y: number; w: number; h: number }
+
+type color_panel_texture = {
+  texture: GPUTexture
+  texture_id: number
+  width: number
+  height: number
+}
+
+const vertex_stride = 20
+const default_font_scale = 1.5
+const rr_corner_points = 4
+const rr_points = 8 + 4 * rr_corner_points
+const rr_cos = [0.9510565162951535, 0.8090169943749475, 0.5877852522924732, 0.3090169943749474]
+
+const color_panel_shader = /* wgsl */ `
+struct Params {
+  size : vec2f,
+  mode : f32,
+  pad0 : f32,
+  data : vec4f,
+}
+
+struct VOut {
+  @builtin(position) pos : vec4f,
+  @location(0) uv : vec2f,
+}
+
+@group(0) @binding(0) var<uniform> u : Params;
+
+@vertex
+fn vs_main(@builtin(vertex_index) vi : u32) -> VOut {
+  var quad = array<vec2f, 6>(
+    vec2f(0.0, 0.0),
+    vec2f(1.0, 0.0),
+    vec2f(0.0, 1.0),
+    vec2f(0.0, 1.0),
+    vec2f(1.0, 0.0),
+    vec2f(1.0, 1.0),
+  );
+  let uv = quad[vi];
+  var out : VOut;
+  out.pos = vec4f(uv * vec2f(2.0, -2.0) + vec2f(-1.0, 1.0), 0.0, 1.0);
+  out.uv = uv;
+  return out;
+}
+
+fn hsv_to_rgb(h : f32, s : f32, v : f32) -> vec3f {
+  let hh = ((h % 360.0) + 360.0) % 360.0;
+  let ss = clamp(s, 0.0, 1.0);
+  let vv = clamp(v, 0.0, 1.0);
+  let c = vv * ss;
+  let x = c * (1.0 - abs(((hh / 60.0) % 2.0) - 1.0));
+  let m = vv - c;
+  if (hh < 60.0) { return vec3f(c + m, x + m, m); }
+  if (hh < 120.0) { return vec3f(x + m, c + m, m); }
+  if (hh < 180.0) { return vec3f(m, c + m, x + m); }
+  if (hh < 240.0) { return vec3f(m, x + m, c + m); }
+  if (hh < 300.0) { return vec3f(x + m, m, c + m); }
+  return vec3f(c + m, m, x + m);
+}
+
+fn hash12(p : vec2f) -> f32 {
+  let h = dot(p, vec2f(127.1, 311.7));
+  return fract(sin(h) * 43758.5453123);
+}
+
+@fragment
+fn fs_main(v : VOut) -> @location(0) vec4f {
+  let uv = clamp(v.uv, vec2f(0.0), vec2f(1.0));
+  var color = vec3f(0.0);
+  var alpha = 1.0;
+  if (u.mode < 0.5) {
+    color = hsv_to_rgb(uv.x * 360.0, 1.0 - uv.y, u.data.x);
+  } else {
+    color = hsv_to_rgb(u.data.x, u.data.y, 1.0 - uv.y);
+    alpha = clamp(u.data.z, 0.0, 1.0);
+  }
+  let noise = (hash12(floor(uv * u.size)) - 0.5) / 255.0;
+  color = clamp(color + vec3f(noise), vec3f(0.0), vec3f(1.0));
+  return vec4f(color, alpha);
+}
+`
+
+async function load_text(url: string): Promise<string> {
+  const res = await fetch(url)
+  if (!res.ok) throw new Error(`fetch ${url}: ${res.status}`)
+  return res.text()
+}
+
+async function load_json<t>(url: string): Promise<t> {
+  const res = await fetch(url)
+  if (!res.ok) throw new Error(`fetch ${url}: ${res.status}`)
+  return res.json() as Promise<t>
+}
+
+async function load_image_bitmap_asset(url: string): Promise<ImageBitmap> {
+  const res = await fetch(url)
+  if (!res.ok) throw new Error(`fetch ${url}: ${res.status}`)
+  const blob = await res.blob()
+  return createImageBitmap(blob, { premultiplyAlpha: 'none', colorSpaceConversion: 'none' })
+}
+
+function glyph_map(doc: { chars: number[][]; width: number; height: number; line_height: number; size: number }): font_atlas {
+  const glyphs = new Map<number, glyph_metric>()
+  for (const [code, width, height, x_offset, y_offset, x_advance, atlas_x, atlas_y] of doc.chars) {
+    glyphs.set(code, { width, height, x_offset, y_offset, x_advance, atlas_x, atlas_y })
+  }
+  return {
+    width: doc.width,
+    height: doc.height,
+    font_size: doc.size,
+    line_height: doc.line_height,
+    glyphs,
+  }
+}
+
+function clip_intersect(a: clip_rect, b: clip_rect): clip_rect {
+  const x0 = Math.max(a.x, b.x)
+  const y0 = Math.max(a.y, b.y)
+  const x1 = Math.min(a.x + a.w, b.x + b.w)
+  const y1 = Math.min(a.y + a.h, b.y + b.h)
+  return {
+    x: x0,
+    y: y0,
+    w: Math.max(0, x1 - x0),
+    h: Math.max(0, y1 - y0),
+  }
+}
+
+function build_round_rect_points(
+  out: Float32Array,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  rtl: number,
+  rtr: number,
+  rbl: number,
+  rbr: number,
+): number {
+  const max_r = Math.min(w, h) * 0.5
+  rtl = clamp(rtl, 0, max_r)
+  rtr = clamp(rtr, 0, max_r)
+  rbl = clamp(rbl, 0, max_r)
+  rbr = clamp(rbr, 0, max_r)
+  let count = 0
+
+  const tl_x = x + rtl
+  const tl_y = y + rtl
+  const tr_x = x + w - rtr
+  const tr_y = y + rtr
+  const bl_x = x + rbl
+  const bl_y = y + h - rbl
+  const br_x = x + w - rbr
+  const br_y = y + h - rbr
+
+  count = write_round_rect_corner(out, count, tl_x, tl_y, -rtl, 0, 0, -rtl)
+  out[count * 2 + 0] = tl_x
+  out[count * 2 + 1] = y
+  count += 1
+  out[count * 2 + 0] = tr_x
+  out[count * 2 + 1] = y
+  count += 1
+  count = write_round_rect_corner(out, count, tr_x, tr_y, 0, -rtr, rtr, 0)
+  out[count * 2 + 0] = x + w
+  out[count * 2 + 1] = tr_y
+  count += 1
+  out[count * 2 + 0] = x + w
+  out[count * 2 + 1] = br_y
+  count += 1
+  count = write_round_rect_corner(out, count, br_x, br_y, rbr, 0, 0, rbr)
+  out[count * 2 + 0] = br_x
+  out[count * 2 + 1] = y + h
+  count += 1
+  out[count * 2 + 0] = bl_x
+  out[count * 2 + 1] = y + h
+  count += 1
+  count = write_round_rect_corner(out, count, bl_x, bl_y, 0, rbl, -rbl, 0)
+  out[count * 2 + 0] = x
+  out[count * 2 + 1] = bl_y
+  count += 1
+  out[count * 2 + 0] = x
+  out[count * 2 + 1] = tl_y
+  count += 1
+  return count
+}
+
+function write_round_rect_corner(out: Float32Array, count: number, cx: number, cy: number, cos_x: number, cos_y: number, sin_x: number, sin_y: number): number {
+  for (let i = 0; i < rr_corner_points; i += 1) {
+    const c = rr_cos[i] ?? 0
+    const s = rr_cos[rr_corner_points - 1 - i] ?? 0
+    out[count * 2 + 0] = cx + cos_x * c + sin_x * s
+    out[count * 2 + 1] = cy + cos_y * c + sin_y * s
+    count += 1
+  }
+  return count
+}
+
+function compact_closed_polyline_points(points: Float32Array, n: number): number {
+  const eps = 0.0001
+  let write = 0
+  for (let i = 0; i < n; i += 1) {
+    const px = points[i * 2 + 0] ?? 0
+    const py = points[i * 2 + 1] ?? 0
+    if (write > 0) {
+      const lx = points[(write - 1) * 2 + 0] ?? 0
+      const ly = points[(write - 1) * 2 + 1] ?? 0
+      if (Math.hypot(px - lx, py - ly) <= eps) continue
+    }
+    points[write * 2 + 0] = px
+    points[write * 2 + 1] = py
+    write += 1
+  }
+  if (write > 1) {
+    const fx = points[0] ?? 0
+    const fy = points[1] ?? 0
+    const lx = points[(write - 1) * 2 + 0] ?? 0
+    const ly = points[(write - 1) * 2 + 1] ?? 0
+    if (Math.hypot(fx - lx, fy - ly) <= eps) write -= 1
+  }
+  return write
+}
+
+export class ui_renderer {
+  private device: GPUDevice | null = null
+  private context: GPUCanvasContext | null = null
+  private format: GPUTextureFormat | null = null
+  private screen_buffer: GPUBuffer | null = null
+  private pipeline_image: GPURenderPipeline | null = null
+  private pipeline_sdf: GPURenderPipeline | null = null
+  private color_panel_pipeline: GPURenderPipeline | null = null
+  private bind_group_white: GPUBindGroup | null = null
+  private bind_group_font: GPUBindGroup | null = null
+  private readonly extra_bind_groups = new Map<number, GPUBindGroup>()
+  private vertex_buffer: GPUBuffer | null = null
+  private vertex_data = new ArrayBuffer(4096 * vertex_stride)
+  private view = new DataView(this.vertex_data)
+  private vertex_count = 0
+  private commands: ui_draw_command[] = []
+  private clip_stack: clip_rect[] = []
+  private current_texture_id = 1
+  private font_atlas: font_atlas | null = null
+  private canvas_width = 1
+  private canvas_height = 1
+  private bind_group_layout: GPUBindGroupLayout | null = null
+  private color_panel_bind_group_layout: GPUBindGroupLayout | null = null
+  private sampler: GPUSampler | null = null
+  private next_texture_id = 2
+  private color_panel_uniform: GPUBuffer | null = null
+  private color_square_texture: color_panel_texture | null = null
+  private color_value_texture: color_panel_texture | null = null
+  private readonly round_rect_points = new Float32Array(rr_points * 2)
+  private readonly round_rect_outer = new Float32Array(rr_points * 2)
+  private readonly round_rect_inner = new Float32Array(rr_points * 2)
+
+  constructor(private readonly canvas: HTMLCanvasElement) {}
+
+  async init(): Promise<void> {
+    if (!('gpu' in navigator)) throw new Error('WebGPU not supported')
+    const adapter = await navigator.gpu.requestAdapter()
+    if (!adapter) throw new Error('WebGPU adapter unavailable')
+    this.device = await adapter.requestDevice()
+    this.context = this.canvas.getContext('webgpu')
+    if (!this.context) throw new Error('WebGPU canvas context unavailable')
+    this.format = navigator.gpu.getPreferredCanvasFormat()
+
+    const [shader_code, font_doc, font_image] = await Promise.all([
+      load_text(uiShaderUrl),
+      load_json<{ chars: number[][]; width: number; height: number; line_height: number; size: number }>(interFontJsonUrl),
+      load_image_bitmap_asset(interFontPngUrl),
+    ])
+    this.font_atlas = glyph_map(font_doc)
+    this.screen_buffer = this.device.createBuffer({ label: 'ui.screenBuffer', size: 8, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST })
+
+    const shader_module = this.device.createShaderModule({ label: 'ui.shaderModule', code: shader_code })
+    const color_panel_module = this.device.createShaderModule({ label: 'ui.shaderModule.colorPanel', code: color_panel_shader })
+    const sampler = this.device.createSampler({ label: 'ui.linearSampler', magFilter: 'linear', minFilter: 'linear' })
+    this.sampler = sampler
+    const bind_group_layout = this.device.createBindGroupLayout({
+      label: 'ui.bindGroupLayout',
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: {} },
+        { binding: 2, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } },
+      ],
+    })
+    this.bind_group_layout = bind_group_layout
+    this.color_panel_bind_group_layout = this.device.createBindGroupLayout({
+      label: 'ui.bindGroupLayout.colorPanel',
+      entries: [{ binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } }],
+    })
+    const pipeline_layout = this.device.createPipelineLayout({ label: 'ui.pipelineLayout', bindGroupLayouts: [bind_group_layout] })
+    const color_panel_layout = this.device.createPipelineLayout({ label: 'ui.pipelineLayout.colorPanel', bindGroupLayouts: [this.color_panel_bind_group_layout] })
+    const vertex: GPUVertexBufferLayout = {
+      arrayStride: vertex_stride,
+      attributes: [
+        { shaderLocation: 0, offset: 0, format: 'float32x2' },
+        { shaderLocation: 1, offset: 8, format: 'float32x2' },
+        { shaderLocation: 2, offset: 16, format: 'unorm8x4' },
+      ],
+    }
+    const color_target: GPUColorTargetState = {
+      format: this.format,
+      blend: {
+        color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+        alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+      },
+    }
+    this.pipeline_image = this.device.createRenderPipeline({
+      label: 'ui.pipeline.image',
+      layout: pipeline_layout,
+      vertex: { module: shader_module, entryPoint: 'vs_main', buffers: [vertex] },
+      fragment: { module: shader_module, entryPoint: 'fs_image', targets: [color_target] },
+      primitive: { topology: 'triangle-list' },
+    })
+    this.pipeline_sdf = this.device.createRenderPipeline({
+      label: 'ui.pipeline.sdf',
+      layout: pipeline_layout,
+      vertex: { module: shader_module, entryPoint: 'vs_main', buffers: [vertex] },
+      fragment: { module: shader_module, entryPoint: 'fs_sdf', targets: [color_target] },
+      primitive: { topology: 'triangle-list' },
+    })
+    this.color_panel_pipeline = this.device.createRenderPipeline({
+      label: 'ui.pipeline.colorPanel',
+      layout: color_panel_layout,
+      vertex: { module: color_panel_module, entryPoint: 'vs_main' },
+      fragment: { module: color_panel_module, entryPoint: 'fs_main', targets: [{ format: 'rgba8unorm' }] },
+      primitive: { topology: 'triangle-list' },
+    })
+
+    const white_texture = this.device.createTexture({
+      label: 'ui.whiteTexture',
+      size: [1, 1, 1],
+      format: 'rgba8unorm',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    })
+    this.device.queue.writeTexture({ texture: white_texture }, new Uint8Array([255, 255, 255, 255]), { bytesPerRow: 4 }, { width: 1, height: 1, depthOrArrayLayers: 1 })
+    const font_texture = this.device.createTexture({
+      label: 'ui.fontTexture',
+      size: [font_image.width, font_image.height, 1],
+      format: 'rgba8unorm',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
+    })
+    this.device.queue.copyExternalImageToTexture({ source: font_image }, { texture: font_texture }, { width: font_image.width, height: font_image.height })
+
+    this.bind_group_white = this.device.createBindGroup({
+      label: 'ui.bindGroup.white',
+      layout: bind_group_layout,
+      entries: [
+        { binding: 0, resource: sampler },
+        { binding: 1, resource: white_texture.createView() },
+        { binding: 2, resource: { buffer: this.screen_buffer } },
+      ],
+    })
+    this.bind_group_font = this.device.createBindGroup({
+      label: 'ui.bindGroup.font',
+      layout: bind_group_layout,
+      entries: [
+        { binding: 0, resource: sampler },
+        { binding: 1, resource: font_texture.createView() },
+        { binding: 2, resource: { buffer: this.screen_buffer } },
+      ],
+    })
+    this.color_panel_uniform = this.device.createBuffer({
+      label: 'ui.buffer.colorPanel',
+      size: 32,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    })
+    this.resize()
+  }
+
+  resize(): void {
+    if (!this.device || !this.context || !this.format || !this.screen_buffer) return
+    const dpr = window.devicePixelRatio || 1
+    this.canvas_width = Math.max(1, Math.floor(this.canvas.clientWidth * dpr))
+    this.canvas_height = Math.max(1, Math.floor(this.canvas.clientHeight * dpr))
+    this.canvas.width = this.canvas_width
+    this.canvas.height = this.canvas_height
+    this.context.configure({ device: this.device, format: this.format, alphaMode: 'opaque' })
+    this.device.queue.writeBuffer(this.screen_buffer, 0, new Float32Array([this.canvas_width, this.canvas_height]))
+  }
+
+  begin_frame(): void {
+    this.vertex_count = 0
+    this.commands = []
+    this.clip_stack = [{ x: 0, y: 0, w: this.canvas_width, h: this.canvas_height }]
+    this.current_texture_id = 1
+  }
+
+  register_external_texture(texture: GPUTexture): number {
+    if (!this.device || !this.bind_group_layout || !this.sampler || !this.screen_buffer) throw new Error('UiRenderer not initialized')
+    const id = this.next_texture_id++
+    this.extra_bind_groups.set(id, this.device.createBindGroup({
+      label: `ui.bindGroup.external.${id}`,
+      layout: this.bind_group_layout,
+      entries: [
+        { binding: 0, resource: this.sampler },
+        { binding: 1, resource: texture.createView() },
+        { binding: 2, resource: { buffer: this.screen_buffer } },
+      ],
+    }))
+    return id
+  }
+
+  update_external_texture(texture_id: number, texture: GPUTexture): void {
+    if (!this.device || !this.bind_group_layout || !this.sampler || !this.screen_buffer) return
+    this.extra_bind_groups.set(texture_id, this.device.createBindGroup({
+      label: `ui.bindGroup.external.${texture_id}`,
+      layout: this.bind_group_layout,
+      entries: [
+        { binding: 0, resource: this.sampler },
+        { binding: 1, resource: texture.createView() },
+        { binding: 2, resource: { buffer: this.screen_buffer } },
+      ],
+    }))
+  }
+
+  draw_texture(texture_id: number, x: number, y: number, w: number, h: number): void {
+    if (w <= 0 || h <= 0) return
+    this.current_texture_id = texture_id
+    this.push_quad(x, y, x + w, y + h, 0, 0, 1, 1, 0xffffffff)
+  }
+
+  draw_texture_region(texture_id: number, x: number, y: number, w: number, h: number, u0: number, v0: number, u1: number, v1: number): void {
+    if (w <= 0 || h <= 0) return
+    this.current_texture_id = texture_id
+    this.push_quad(x, y, x + w, y + h, u0, v0, u1, v1, 0xffffffff)
+  }
+
+  draw_hsv_saturation_square(x: number, y: number, w: number, h: number, value: number): void {
+    const texture = this.ensure_color_panel_texture('square', Math.max(1, Math.round(w)), Math.max(1, Math.round(h)))
+    if (!texture || !this.device || !this.color_panel_pipeline || !this.color_panel_bind_group_layout || !this.color_panel_uniform) return
+    this.device.queue.writeBuffer(this.color_panel_uniform, 0, new Float32Array([texture.width, texture.height, 0, 0, value, 0, 0, 0]))
+    const encoder = this.device.createCommandEncoder({ label: 'ui.commandEncoder.colorSquare' })
+    const pass = encoder.beginRenderPass({
+      label: 'ui.renderPass.colorSquare',
+      colorAttachments: [{
+        view: texture.texture.createView({ label: 'ui.view.colorSquare' }),
+        clearValue: { r: 0, g: 0, b: 0, a: 0 },
+        loadOp: 'clear',
+        storeOp: 'store',
+      }],
+    })
+    pass.setPipeline(this.color_panel_pipeline)
+    pass.setBindGroup(0, this.device.createBindGroup({
+      label: 'ui.bindGroup.colorSquare',
+      layout: this.color_panel_bind_group_layout,
+      entries: [{ binding: 0, resource: { buffer: this.color_panel_uniform } }],
+    }))
+    pass.draw(6)
+    pass.end()
+    this.device.queue.submit([encoder.finish()])
+    this.draw_texture(texture.texture_id, x, y, w, h)
+  }
+
+  draw_hsv_value_bar(x: number, y: number, w: number, h: number, hue: number, saturation: number, alpha: number): void {
+    const texture = this.ensure_color_panel_texture('value', Math.max(1, Math.round(w)), Math.max(1, Math.round(h)))
+    if (!texture || !this.device || !this.color_panel_pipeline || !this.color_panel_bind_group_layout || !this.color_panel_uniform) return
+    this.device.queue.writeBuffer(this.color_panel_uniform, 0, new Float32Array([texture.width, texture.height, 1, 0, hue, saturation, alpha, 0]))
+    const encoder = this.device.createCommandEncoder({ label: 'ui.commandEncoder.colorValue' })
+    const pass = encoder.beginRenderPass({
+      label: 'ui.renderPass.colorValue',
+      colorAttachments: [{
+        view: texture.texture.createView({ label: 'ui.view.colorValue' }),
+        clearValue: { r: 0, g: 0, b: 0, a: 0 },
+        loadOp: 'clear',
+        storeOp: 'store',
+      }],
+    })
+    pass.setPipeline(this.color_panel_pipeline)
+    pass.setBindGroup(0, this.device.createBindGroup({
+      label: 'ui.bindGroup.colorValue',
+      layout: this.color_panel_bind_group_layout,
+      entries: [{ binding: 0, resource: { buffer: this.color_panel_uniform } }],
+    }))
+    pass.draw(6)
+    pass.end()
+    this.device.queue.submit([encoder.finish()])
+    this.draw_texture(texture.texture_id, x, y, w, h)
+  }
+
+  push_clip(x: number, y: number, w: number, h: number): void {
+    const next = clip_intersect(this.current_clip(), { x, y, w, h })
+    this.clip_stack.push(next)
+  }
+
+  pop_clip(): void {
+    if (this.clip_stack.length > 1) this.clip_stack.pop()
+  }
+
+  fill_rect(x: number, y: number, w: number, h: number, rgba: number): void {
+    if (w <= 0 || h <= 0) return
+    this.current_texture_id = 1
+    this.push_quad(x, y, x + w, y + h, this.white_u(), this.white_v(), this.white_u(), this.white_v(), rgba)
+  }
+
+  fill_round_rect(x: number, y: number, w: number, h: number, radius: number, rgba: number): void {
+    this.fill_round_rect_per_corner(x, y, w, h, radius, radius, radius, radius, rgba)
+  }
+
+  fill_round_rect_per_corner(x: number, y: number, w: number, h: number, rtl: number, rtr: number, rbl: number, rbr: number, rgba: number): void {
+    if (w <= 0 || h <= 0) return
+    if (rtl <= 0 && rtr <= 0 && rbl <= 0 && rbr <= 0) {
+      this.fill_rect(x, y, w, h, rgba)
+      return
+    }
+    const pts = this.round_rect_points
+    const n = compact_closed_polyline_points(pts, build_round_rect_points(pts, x, y, w, h, rtl, rtr, rbl, rbr))
+    if (n < 3) return
+    this.current_texture_id = 1
+    const u = this.white_u()
+    const v = this.white_v()
+    const x0 = pts[0]
+    const y0 = pts[1]
+    for (let i = 1; i < n - 1; i += 1) {
+      this.push_tri(x0, y0, pts[i * 2], pts[i * 2 + 1], pts[(i + 1) * 2], pts[(i + 1) * 2 + 1], u, v, rgba)
+    }
+  }
+
+  stroke_round_rect(x: number, y: number, w: number, h: number, radius: number, thickness: number, rgba: number): void {
+    this.stroke_round_rect_per_corner(x, y, w, h, radius, radius, radius, radius, thickness, rgba)
+  }
+
+  stroke_round_rect_per_corner(x: number, y: number, w: number, h: number, rtl: number, rtr: number, rbl: number, rbr: number, thickness: number, rgba: number): void {
+    if (w <= 0 || h <= 0 || thickness <= 0) return
+    if (rtl <= 0 && rtr <= 0 && rbl <= 0 && rbr <= 0) {
+      this.stroke_rect(x, y, w, h, thickness, rgba)
+      return
+    }
+    const pts = this.round_rect_points
+    const n = compact_closed_polyline_points(pts, build_round_rect_points(pts, x, y, w, h, rtl, rtr, rbl, rbr))
+    if (n < 2) return
+    this.current_texture_id = 1
+    this.push_closed_polyline_stroke(pts, n, Math.max(1, thickness), rgba, this.round_rect_outer, this.round_rect_inner)
+  }
+
+  fill_triangle(x0: number, y0: number, x1: number, y1: number, x2: number, y2: number, rgba: number): void {
+    this.current_texture_id = 1
+    const u = this.white_u()
+    const v = this.white_v()
+    this.push_tri(x0, y0, x1, y1, x2, y2, u, v, rgba)
+  }
+
+  fill_circle(cx: number, cy: number, radius: number, rgba: number): void {
+    if (radius <= 0) return
+    const steps = Math.max(12, Math.ceil(radius * 0.75))
+    this.current_texture_id = 1
+    const u = this.white_u()
+    const v = this.white_v()
+    let prev_x = cx + radius
+    let prev_y = cy
+    for (let i = 1; i <= steps; i += 1) {
+      const a = (i / steps) * Math.PI * 2
+      const x = cx + Math.cos(a) * radius
+      const y = cy + Math.sin(a) * radius
+      this.push_tri(cx, cy, prev_x, prev_y, x, y, u, v, rgba)
+      prev_x = x
+      prev_y = y
+    }
+  }
+
+  stroke_rect(x: number, y: number, w: number, h: number, thickness: number, rgba: number): void {
+    const t = Math.max(1, thickness)
+    this.fill_rect(x, y, w, t, rgba)
+    this.fill_rect(x, y + h - t, w, t, rgba)
+    this.fill_rect(x, y, t, h, rgba)
+    this.fill_rect(x + w - t, y, t, h, rgba)
+  }
+
+  stroke_line(x0: number, y0: number, x1: number, y1: number, thickness: number, rgba: number): void {
+    const dx = x1 - x0
+    const dy = y1 - y0
+    const len = Math.hypot(dx, dy)
+    if (len <= 0.0001) return
+    const t = Math.max(1, thickness)
+    const nx = -dy / len
+    const ny = dx / len
+    const hx = nx * (t * 0.5)
+    const hy = ny * (t * 0.5)
+    this.current_texture_id = 1
+    const u = this.white_u()
+    const v = this.white_v()
+    this.push_tri(x0 - hx, y0 - hy, x1 - hx, y1 - hy, x0 + hx, y0 + hy, u, v, rgba)
+    this.push_tri(x0 + hx, y0 + hy, x1 - hx, y1 - hy, x1 + hx, y1 + hy, u, v, rgba)
+  }
+
+  draw_text(x: number, y: number, text: string, font_px: number, rgba: number): void {
+    if (!text || !this.font_atlas) return
+    const effective_font_px = font_px * default_font_scale
+    const scale = effective_font_px / this.font_atlas.font_size
+    const inv_w = 1 / this.font_atlas.width
+    const inv_h = 1 / this.font_atlas.height
+    let cx = x
+    let cy = y
+    this.current_texture_id = 0
+    for (const ch of text) {
+      if (ch === '\n') {
+        cx = x
+        cy += this.font_atlas.line_height * scale
+        continue
+      }
+      const code = ch.codePointAt(0) ?? 32
+      const glyph = this.font_atlas.glyphs.get(code) ?? this.font_atlas.glyphs.get(32)
+      if (!glyph) continue
+      if (glyph.width <= 0 || glyph.height <= 0) {
+        cx += glyph.x_advance * scale
+        continue
+      }
+      const x0 = cx + glyph.x_offset * scale
+      const y0 = cy + glyph.y_offset * scale
+      const x1 = x0 + glyph.width * scale
+      const y1 = y0 + glyph.height * scale
+      this.push_quad(
+        x0,
+        y0,
+        x1,
+        y1,
+        glyph.atlas_x * inv_w,
+        glyph.atlas_y * inv_h,
+        (glyph.atlas_x + glyph.width) * inv_w,
+        (glyph.atlas_y + glyph.height) * inv_h,
+        rgba,
+      )
+      cx += glyph.x_advance * scale
+    }
+  }
+
+  wrap_text(text: string, font_px: number, max_w: number): string[] {
+    const normalized = text.replace(/\r/g, '')
+    if (!normalized) return ['']
+    const paragraphs = normalized.split('\n')
+    const lines: string[] = []
+    for (const paragraph of paragraphs) {
+      if (!paragraph) {
+        lines.push('')
+        continue
+      }
+      const words = paragraph.split(/\s+/).filter(Boolean)
+      let current = ''
+      for (const word of words) {
+        const candidate = current ? `${current} ${word}` : word
+        if (this.text_width(candidate, font_px) <= max_w) {
+          current = candidate
+          continue
+        }
+        if (current) lines.push(current)
+        if (this.text_width(word, font_px) <= max_w) {
+          current = word
+          continue
+        }
+        let chunk = ''
+        for (const ch of word) {
+          const next = `${chunk}${ch}`
+          if (chunk && this.text_width(next, font_px) > max_w) {
+            lines.push(chunk)
+            chunk = ch
+          } else {
+            chunk = next
+          }
+        }
+        current = chunk
+      }
+      if (current) lines.push(current)
+    }
+    return lines.length ? lines : ['']
+  }
+
+  draw_text_wrapped(x: number, y: number, w: number, text: string, font_px: number, rgba: number): number {
+    const lines = this.wrap_text(text, font_px, w)
+    const line_h = this.text_line_height(font_px)
+    for (let i = 0; i < lines.length; i += 1) {
+      this.draw_text(x, y + i * line_h, lines[i] ?? '', font_px, rgba)
+    }
+    return lines.length * line_h
+  }
+
+  text_line_height(font_px: number): number {
+    if (!this.font_atlas) return font_px
+    const effective_font_px = font_px * default_font_scale
+    return this.font_atlas.line_height * (effective_font_px / this.font_atlas.font_size)
+  }
+
+  text_v_center_y(y: number, h: number, font_px: number): number {
+    const line_h = this.text_line_height(font_px)
+    return y + (h - line_h) * 0.5 - font_px * default_font_scale * 0.03
+  }
+
+  text_width(text: string, font_px: number): number {
+    const effective_font_px = font_px * default_font_scale
+    if (!this.font_atlas) return text.length * effective_font_px * 0.55
+    const scale = effective_font_px / this.font_atlas.font_size
+    let width = 0
+    for (const ch of text) {
+      if (ch === '\n') break
+      const glyph = this.font_atlas.glyphs.get(ch.codePointAt(0) ?? 32) ?? this.font_atlas.glyphs.get(32)
+      if (glyph) width += glyph.x_advance * scale
+    }
+    return width
+  }
+
+  flush(clear_color: GPUColorDict): void {
+    if (!this.device || !this.context || !this.pipeline_image || !this.pipeline_sdf || !this.bind_group_white || !this.bind_group_font) return
+    const byte_length = Math.max(this.vertex_count * vertex_stride, vertex_stride)
+    if (!this.vertex_buffer || this.vertex_buffer.size < byte_length) {
+      this.vertex_buffer?.destroy()
+      this.vertex_buffer = this.device.createBuffer({
+        label: 'ui.vertexBuffer',
+        size: Math.max(byte_length, 4096),
+        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+      })
+    }
+    this.device.queue.writeBuffer(this.vertex_buffer, 0, this.vertex_data, 0, this.vertex_count * vertex_stride)
+    const encoder = this.device.createCommandEncoder({ label: 'ui.commandEncoder' })
+    const pass = encoder.beginRenderPass({
+      label: 'ui.renderPass',
+      colorAttachments: [
+        {
+          view: this.context.getCurrentTexture().createView({ label: 'ui.swapchainView' }),
+          clearValue: clear_color,
+          loadOp: 'clear',
+          storeOp: 'store',
+        },
+      ],
+    })
+    pass.setVertexBuffer(0, this.vertex_buffer)
+    for (const cmd of this.commands) {
+      if (cmd.clip_w <= 0 || cmd.clip_h <= 0) continue
+      pass.setScissorRect(cmd.clip_x, cmd.clip_y, cmd.clip_w, cmd.clip_h)
+      const bind_group = cmd.texture_id === 0 ? this.bind_group_font : cmd.texture_id === 1 ? this.bind_group_white : this.extra_bind_groups.get(cmd.texture_id)
+      if (!bind_group) continue
+      if (cmd.texture_id === 0) {
+        pass.setPipeline(this.pipeline_sdf)
+        pass.setBindGroup(0, bind_group)
+      } else {
+        pass.setPipeline(this.pipeline_image)
+        pass.setBindGroup(0, bind_group)
+      }
+      pass.draw(cmd.vertex_count, 1, cmd.vertex_offset)
+    }
+    pass.end()
+    this.device.queue.submit([encoder.finish()])
+  }
+
+  canvas_size(): { width: number; height: number } {
+    return { width: this.canvas_width, height: this.canvas_height }
+  }
+
+  gpu(): { device: GPUDevice | null; context: GPUCanvasContext | null; format: GPUTextureFormat | null } {
+    return { device: this.device, context: this.context, format: this.format }
+  }
+
+  private push_closed_polyline_stroke(points: Float32Array, n: number, thickness: number, color: number, outer: Float32Array, inner: Float32Array): void {
+    if (n < 2) return
+    let area = 0
+    for (let i = 0; i < n; i += 1) {
+      const j = (i + 1) % n
+      area += (points[i * 2 + 0] ?? 0) * (points[j * 2 + 1] ?? 0) - (points[j * 2 + 0] ?? 0) * (points[i * 2 + 1] ?? 0)
+    }
+    const normal_sign = area >= 0 ? 1 : -1
+    const half = thickness * 0.5
+
+    for (let i = 0; i < n; i += 1) {
+      this.write_closed_polyline_stroke_offset_vertex(points, n, normal_sign, i, half, outer)
+      this.write_closed_polyline_stroke_offset_vertex(points, n, normal_sign, i, -half, inner)
+    }
+
+    const u = this.white_u()
+    const v = this.white_v()
+    for (let i = 0; i < n; i += 1) {
+      const j = (i + 1) % n
+      const ox0 = outer[i * 2 + 0] ?? 0
+      const oy0 = outer[i * 2 + 1] ?? 0
+      const ox1 = outer[j * 2 + 0] ?? 0
+      const oy1 = outer[j * 2 + 1] ?? 0
+      const ix0 = inner[i * 2 + 0] ?? 0
+      const iy0 = inner[i * 2 + 1] ?? 0
+      const ix1 = inner[j * 2 + 0] ?? 0
+      const iy1 = inner[j * 2 + 1] ?? 0
+      this.push_tri(ox0, oy0, ox1, oy1, ix0, iy0, u, v, color)
+      this.push_tri(ix0, iy0, ox1, oy1, ix1, iy1, u, v, color)
+    }
+  }
+
+  private write_closed_polyline_stroke_offset_vertex(points: Float32Array, n: number, normal_sign: number, i: number, distance: number, out: Float32Array): void {
+    const pi = (i + n - 1) % n
+    const ni = (i + 1) % n
+    const px = points[i * 2 + 0] ?? 0
+    const py = points[i * 2 + 1] ?? 0
+    const prev_x = points[pi * 2 + 0] ?? px
+    const prev_y = points[pi * 2 + 1] ?? py
+    const next_x = points[ni * 2 + 0] ?? px
+    const next_y = points[ni * 2 + 1] ?? py
+    let d0x = px - prev_x
+    let d0y = py - prev_y
+    let d1x = next_x - px
+    let d1y = next_y - py
+    const d0l = Math.hypot(d0x, d0y)
+    const d1l = Math.hypot(d1x, d1y)
+    if (d0l <= 0.0001 || d1l <= 0.0001) {
+      out[i * 2 + 0] = px
+      out[i * 2 + 1] = py
+      return
+    }
+    d0x /= d0l
+    d0y /= d0l
+    d1x /= d1l
+    d1y /= d1l
+    const n0x = d0y * normal_sign
+    const n0y = -d0x * normal_sign
+    const n1x = d1y * normal_sign
+    const n1y = -d1x * normal_sign
+    let mx = n0x + n1x
+    let my = n0y + n1y
+    const ml = Math.hypot(mx, my)
+    if (ml <= 0.0001) {
+      out[i * 2 + 0] = px + n1x * distance
+      out[i * 2 + 1] = py + n1y * distance
+      return
+    }
+    mx /= ml
+    my /= ml
+    const denom = Math.max(0.2, Math.abs(mx * n1x + my * n1y))
+    const miter_len = Math.min(Math.abs(distance) / denom, Math.abs(distance) * 4)
+    const sign = distance < 0 ? -1 : 1
+    out[i * 2 + 0] = px + mx * miter_len * sign
+    out[i * 2 + 1] = py + my * miter_len * sign
+  }
+
+  private current_clip(): clip_rect {
+    return this.clip_stack[this.clip_stack.length - 1] ?? { x: 0, y: 0, w: this.canvas_width, h: this.canvas_height }
+  }
+
+  private ensure_vertices(extra_vertices: number): void {
+    const needed = (this.vertex_count + extra_vertices) * vertex_stride
+    if (needed <= this.vertex_data.byteLength) return
+    let next = this.vertex_data.byteLength
+    while (next < needed) next *= 2
+    const next_buffer = new ArrayBuffer(next)
+    new Uint8Array(next_buffer).set(new Uint8Array(this.vertex_data))
+    this.vertex_data = next_buffer
+    this.view = new DataView(this.vertex_data)
+  }
+
+  private push_vertex(x: number, y: number, u: number, v: number, color: number): void {
+    this.ensure_vertices(1)
+    const offset = this.vertex_count * vertex_stride
+    this.view.setFloat32(offset + 0, x, true)
+    this.view.setFloat32(offset + 4, y, true)
+    this.view.setFloat32(offset + 8, u, true)
+    this.view.setFloat32(offset + 12, v, true)
+    this.view.setUint32(offset + 16, color, true)
+    this.vertex_count += 1
+  }
+
+  private push_quad(x0: number, y0: number, x1: number, y1: number, u0: number, v0: number, u1: number, v1: number, color: number): void {
+    const clip = this.current_clip()
+    const cx0 = Math.max(x0, clip.x)
+    const cy0 = Math.max(y0, clip.y)
+    const cx1 = Math.min(x1, clip.x + clip.w)
+    const cy1 = Math.min(y1, clip.y + clip.h)
+    if (cx1 <= cx0 || cy1 <= cy0) return
+    const inv_w = 1 / Math.max(1e-6, x1 - x0)
+    const inv_h = 1 / Math.max(1e-6, y1 - y0)
+    const cu0 = u0 + (u1 - u0) * ((cx0 - x0) * inv_w)
+    const cv0 = v0 + (v1 - v0) * ((cy0 - y0) * inv_h)
+    const cu1 = u0 + (u1 - u0) * ((cx1 - x0) * inv_w)
+    const cv1 = v0 + (v1 - v0) * ((cy1 - y0) * inv_h)
+    const base = this.vertex_count
+    this.push_vertex(cx0, cy0, cu0, cv0, color)
+    this.push_vertex(cx1, cy0, cu1, cv0, color)
+    this.push_vertex(cx1, cy1, cu1, cv1, color)
+    this.push_vertex(cx0, cy0, cu0, cv0, color)
+    this.push_vertex(cx1, cy1, cu1, cv1, color)
+    this.push_vertex(cx0, cy1, cu0, cv1, color)
+    this.emit_command(base, 6)
+  }
+
+  private push_tri(x0: number, y0: number, x1: number, y1: number, x2: number, y2: number, u: number, v: number, color: number): void {
+    const clip = this.current_clip()
+    const min_x = Math.min(x0, x1, x2)
+    const min_y = Math.min(y0, y1, y2)
+    const max_x = Math.max(x0, x1, x2)
+    const max_y = Math.max(y0, y1, y2)
+    if (max_x <= clip.x || max_y <= clip.y || min_x >= clip.x + clip.w || min_y >= clip.y + clip.h) return
+    const base = this.vertex_count
+    this.push_vertex(x0, y0, u, v, color)
+    this.push_vertex(x1, y1, u, v, color)
+    this.push_vertex(x2, y2, u, v, color)
+    this.emit_command(base, 3)
+  }
+
+  private emit_command(vertex_offset: number, vertex_count: number): void {
+    const clip = this.current_clip()
+    if (clip.w <= 0 || clip.h <= 0) return
+    const cmd: ui_draw_command = {
+      vertex_offset,
+      vertex_count,
+      texture_id: this.current_texture_id,
+      clip_x: Math.floor(clip.x),
+      clip_y: Math.floor(clip.y),
+      clip_w: Math.ceil(clip.w),
+      clip_h: Math.ceil(clip.h),
+    }
+    const prev = this.commands[this.commands.length - 1]
+    if (
+      prev &&
+      prev.vertex_offset + prev.vertex_count === cmd.vertex_offset &&
+      prev.texture_id === cmd.texture_id &&
+      prev.clip_x === cmd.clip_x &&
+      prev.clip_y === cmd.clip_y &&
+      prev.clip_w === cmd.clip_w &&
+      prev.clip_h === cmd.clip_h
+    ) {
+      prev.vertex_count += cmd.vertex_count
+      return
+    }
+    this.commands.push(cmd)
+  }
+
+  private ensure_color_panel_texture(kind: 'square' | 'value', width: number, height: number): color_panel_texture | null {
+    if (!this.device) return null
+    const current = kind === 'square' ? this.color_square_texture : this.color_value_texture
+    if (current && current.width === width && current.height === height) return current
+    current?.texture.destroy()
+    const texture = this.device.createTexture({
+      label: `ui.texture.colorPanel.${kind}`,
+      size: [width, height, 1],
+      format: 'rgba8unorm',
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+    })
+    const next: color_panel_texture = {
+      texture,
+      texture_id: current?.texture_id ?? this.register_external_texture(texture),
+      width,
+      height,
+    }
+    if (current) this.update_external_texture(current.texture_id, texture)
+    if (kind === 'square') this.color_square_texture = next
+    else this.color_value_texture = next
+    return next
+  }
+
+  private white_u(): number {
+    return this.font_atlas ? 0.5 / this.font_atlas.width : 0
+  }
+
+  private white_v(): number {
+    return this.font_atlas ? 0.5 / this.font_atlas.height : 0
+  }
+}
