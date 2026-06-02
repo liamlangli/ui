@@ -70,6 +70,15 @@ type color_panel_texture = {
   height: number
 }
 
+export type ui_texture_filter = 'linear' | 'nearest'
+
+type data_texture = {
+  texture: GPUTexture
+  width: number
+  height: number
+  filter: ui_texture_filter
+}
+
 const vertex_stride = 20
 const default_font_scale = 1.5
 const latin_mono_font_texture_id = 0
@@ -375,6 +384,8 @@ export class ui_renderer {
   private bind_group_layout: GPUBindGroupLayout | null = null
   private color_panel_bind_group_layout: GPUBindGroupLayout | null = null
   private sampler: GPUSampler | null = null
+  private sampler_nearest: GPUSampler | null = null
+  private readonly data_textures = new Map<number, data_texture>()
   private next_texture_id = first_external_texture_id
   private color_panel_uniform: GPUBuffer | null = null
   private color_square_texture: color_panel_texture | null = null
@@ -407,6 +418,7 @@ export class ui_renderer {
     const color_panel_module = this.device.createShaderModule({ label: 'ui.shader_module.color_panel', code: color_panel_shader })
     const sampler = this.device.createSampler({ label: 'ui.linear_sampler', magFilter: 'linear', minFilter: 'linear' })
     this.sampler = sampler
+    this.sampler_nearest = this.device.createSampler({ label: 'ui.nearest_sampler', magFilter: 'nearest', minFilter: 'nearest' })
     const bind_group_layout = this.device.createBindGroupLayout({
       label: 'ui.bind_group_layout',
       entries: [
@@ -559,8 +571,96 @@ export class ui_renderer {
     }))
   }
 
-  draw_texture(texture_id: number, x: number, y: number, w: number, h: number): void {
+  /**
+   * Create an RGBA8 GPU texture that can be updated from CPU pixel data via
+   * {@link update_texture} and drawn with {@link draw_texture}. Returns an
+   * opaque texture id (the same id space as {@link register_external_texture}).
+   *
+   * `filter` controls sampling: `'nearest'` is the equivalent of CSS
+   * `image-rendering: pixelated`; `'linear'` (the default) smooths on scale.
+   * The contents are undefined until the first {@link update_texture} call.
+   */
+  create_texture(width: number, height: number, options?: { filter?: ui_texture_filter }): number {
+    if (!this.device) throw new Error('ui_renderer not initialized')
+    const w = Math.max(1, Math.floor(width))
+    const h = Math.max(1, Math.floor(height))
+    const filter = options?.filter ?? 'linear'
+    const texture = this.device.createTexture({
+      label: `ui.data_texture.${this.next_texture_id}`,
+      size: [w, h, 1],
+      format: 'rgba8unorm',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    })
+    const id = this.next_texture_id++
+    this.extra_bind_groups.set(id, this.create_data_texture_bind_group(id, texture, filter))
+    this.data_textures.set(id, { texture, width: w, height: h, filter })
+    return id
+  }
+
+  /**
+   * Upload RGBA pixel data (4 bytes/pixel, row-major, top-left origin) into a
+   * texture created by {@link create_texture}. This replaces the
+   * `ctx2d.putImageData` 2D-canvas path. Pass `width`/`height` to resize the
+   * underlying texture; otherwise the data must match the current size.
+   */
+  update_texture(texture_id: number, data: Uint8ClampedArray | Uint8Array, options?: { width?: number; height?: number }): void {
+    const entry = this.data_textures.get(texture_id)
+    if (!entry || !this.device) return
+    const w = Math.max(1, Math.floor(options?.width ?? entry.width))
+    const h = Math.max(1, Math.floor(options?.height ?? entry.height))
+    if (w !== entry.width || h !== entry.height) {
+      entry.texture.destroy()
+      entry.texture = this.device.createTexture({
+        label: `ui.data_texture.${texture_id}`,
+        size: [w, h, 1],
+        format: 'rgba8unorm',
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+      })
+      entry.width = w
+      entry.height = h
+      this.extra_bind_groups.set(texture_id, this.create_data_texture_bind_group(texture_id, entry.texture, entry.filter))
+    }
+    this.device.queue.writeTexture(
+      { texture: entry.texture },
+      data as unknown as GPUAllowSharedBufferSource,
+      { bytesPerRow: w * 4, rowsPerImage: h },
+      { width: w, height: h, depthOrArrayLayers: 1 },
+    )
+  }
+
+  /** Destroy a texture created by {@link create_texture} and release its bind group. */
+  destroy_texture(texture_id: number): void {
+    const entry = this.data_textures.get(texture_id)
+    if (!entry) return
+    entry.texture.destroy()
+    this.data_textures.delete(texture_id)
+    this.extra_bind_groups.delete(texture_id)
+  }
+
+  private create_data_texture_bind_group(id: number, texture: GPUTexture, filter: ui_texture_filter): GPUBindGroup {
+    if (!this.device || !this.bind_group_layout || !this.screen_buffer) throw new Error('ui_renderer not initialized')
+    const sampler = (filter === 'nearest' ? this.sampler_nearest : this.sampler) ?? this.sampler
+    if (!sampler) throw new Error('ui_renderer not initialized')
+    return this.device.createBindGroup({
+      label: `ui.bind_group.data.${id}`,
+      layout: this.bind_group_layout,
+      entries: [
+        { binding: 0, resource: sampler },
+        { binding: 1, resource: texture.createView() },
+        { binding: 2, resource: { buffer: this.screen_buffer } },
+      ],
+    })
+  }
+
+  draw_texture(texture_id: number, x: number, y: number, w: number, h: number, options?: { filter?: ui_texture_filter }): void {
     if (w <= 0 || h <= 0) return
+    if (options?.filter) {
+      const entry = this.data_textures.get(texture_id)
+      if (entry && entry.filter !== options.filter) {
+        entry.filter = options.filter
+        this.extra_bind_groups.set(texture_id, this.create_data_texture_bind_group(texture_id, entry.texture, entry.filter))
+      }
+    }
     this.current_texture_id = texture_id
     this.push_quad(x, y, x + w, y + h, 0, 0, 1, 1, 0xffffffff)
   }
@@ -830,6 +930,31 @@ export class ui_renderer {
   text_v_center_y(y: number, h: number, font_px: number, font_type: ui_font_primitive = FONT_MAIN): number {
     const line_h = this.text_line_height(font_px, font_type)
     return y + (h - line_h) * 0.5 - font_px * default_font_scale * 0.03
+  }
+
+  /**
+   * Measure a single line of text: its advance width and the line height for
+   * the given font. (`text_line_height` already exists for the height alone.)
+   */
+  measure_text(text: string, font_px: number, font_type: ui_font_primitive = FONT_MAIN): { w: number; h: number } {
+    return { w: this.text_width(text, font_px, font_type), h: this.text_line_height(font_px, font_type) }
+  }
+
+  /**
+   * Width of a single `'0'` glyph — for a monospace font this is the per-column
+   * advance, useful for laying out / hit-testing fixed-width text grids.
+   */
+  mono_char_width(font_px: number, font_type: ui_font_primitive = FONT_MONO): number {
+    return this.text_width('0', font_px, font_type)
+  }
+
+  /**
+   * How many monospace columns fit within `width` pixels. Returns at least 1.
+   */
+  columns_for_width(width: number, font_px: number, font_type: ui_font_primitive = FONT_MONO): number {
+    const cw = this.mono_char_width(font_px, font_type)
+    if (cw <= 0) return 1
+    return Math.max(1, Math.floor(width / cw))
   }
 
   text_width(text: string, font_px: number, font_type: ui_font_primitive = FONT_MAIN): number {

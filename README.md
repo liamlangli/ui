@@ -42,6 +42,51 @@ await renderer.load_chinese_font()
 
 `chinese_font` defaults to `true`.
 
+### Text view (selectable / copyable console)
+
+`ui_widgets.text_view` is a fully GPU-rendered, selectable and copyable
+scrollable monospace panel — a drop-in replacement for a DOM `<pre>` used as an
+output/console view. It supports mouse-drag selection, Shift+click extend,
+double-click word and triple-click line selection, wheel + scrollbar and
+keyboard (arrows / PageUp / PageDown) scrolling, Ctrl/Cmd+A select-all, and
+Ctrl/Cmd+C copy via `navigator.clipboard`.
+
+```ts
+import { create_text_view_state, text_view_selected_text } from '@liamlangli/ui'
+
+const log_state = create_text_view_state()
+const lines = [
+  { text: 'compiling…', color: '#9aa' },
+  { text: 'error: unexpected token', color: '#f55' },
+]
+
+// each frame, inside begin_frame()/end_frame():
+widgets.text_view('output', x, y, w, h, lines, log_state, { wrap: true })
+
+// read the current selection (e.g. for a context-menu "Copy"):
+const selected = text_view_selected_text(lines, log_state)
+
+// programmatic scroll:
+log_state.scroll_to_line = lines.length - 1 // applied next frame
+```
+
+Copy and select-all need the relevant modifier/navigation keys forwarded on the
+`ui_input_snapshot` (`ctrl`, `meta`, `key_a`, `key_c`, `key_up`, `key_down`,
+`key_page_up`, `key_page_down`).
+
+### CPU-updated textures
+
+For overlays driven by raw pixel data (e.g. a parse/token visualiser that used
+to live on a 2D `<canvas>` + `putImageData`), the renderer can create, update,
+and draw RGBA textures, including nearest-neighbour ("pixelated") sampling:
+
+```ts
+const tex = renderer.create_texture(w, h, { filter: 'nearest' })
+renderer.update_texture(tex, rgba /* Uint8ClampedArray | Uint8Array */)
+renderer.draw_texture(tex, x, y, w, h) // sampler chosen at create time
+renderer.destroy_texture(tex)
+```
+
 ## Peer dependencies
 
 - [`@webgpu/types`](https://www.npmjs.com/package/@webgpu/types) for `GPU*` typings.
