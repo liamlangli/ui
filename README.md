@@ -24,6 +24,24 @@ Chinese font atlas (`assets/ping_fang_sc_regular.{json,webp}`), and shader
 (`assets/ui.wgsl`) via Vite `?url` imports, so consumers are expected to build
 with Vite (or an equivalent bundler that understands the `?url` suffix).
 
+### Chinese font loading
+
+The Chinese (PingFang SC) atlas is several MB, so it never blocks startup:
+`init()` resolves as soon as the small Latin/monospace atlas is ready, and the
+Chinese atlas is fetched asynchronously in the background. Until it arrives the
+CJK slot is backed by a 1x1 transparent texture (CJK glyphs simply render
+blank), and once it loads the next frame picks it up automatically.
+
+```ts
+// Skip the Chinese atlas entirely (no background fetch):
+await renderer.init({ chinese_font: false })
+
+// Load it on demand later (resolves once the atlas is ready):
+await renderer.load_chinese_font()
+```
+
+`chinese_font` defaults to `true`.
+
 ## Peer dependencies
 
 - [`@webgpu/types`](https://www.npmjs.com/package/@webgpu/types) for `GPU*` typings.

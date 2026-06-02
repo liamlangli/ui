@@ -39,6 +39,19 @@ export const FONT_MONO = 'FONT_MONO' as const
 
 export type ui_font_primitive = typeof FONT_MAIN | typeof FONT_ZH | typeof FONT_MONO
 
+export interface ui_renderer_init_options {
+  /**
+   * Load the Chinese (PingFang SC) font atlas. Defaults to `true`.
+   *
+   * The Chinese atlas is large (several MB), so it is always fetched
+   * asynchronously and never blocks `init()`. Until it finishes loading the
+   * CJK slot is backed by a 1x1 transparent texture. Set this to `false` to
+   * skip loading it entirely; you can still load it later via
+   * `load_chinese_font()`.
+   */
+  chinese_font?: boolean
+}
+
 type font_face_doc = { chars: number[][]; line_height: number; size: number }
 type font_doc = font_face_doc & { pages?: string[]; width: number; height: number }
 type font_bundle_doc = {
@@ -356,6 +369,7 @@ export class ui_renderer {
   private clip_stack: clip_rect[] = []
   private current_texture_id = white_texture_id
   private readonly font_atlases = new Map<ui_font_primitive, font_atlas>()
+  private chinese_font_load: Promise<void> | null = null
   private canvas_width = 1
   private canvas_height = 1
   private bind_group_layout: GPUBindGroupLayout | null = null
@@ -371,7 +385,7 @@ export class ui_renderer {
 
   constructor(private readonly canvas: HTMLCanvasElement) {}
 
-  async init(): Promise<void> {
+  async init(options?: ui_renderer_init_options): Promise<void> {
     if (!('gpu' in navigator)) throw new Error('WebGPU not supported')
     const adapter = await navigator.gpu.requestAdapter()
     if (!adapter) throw new Error('WebGPU adapter unavailable')
@@ -380,18 +394,13 @@ export class ui_renderer {
     if (!this.context) throw new Error('WebGPU canvas context unavailable')
     this.format = navigator.gpu.getPreferredCanvasFormat()
 
-    const [shader_code, latin_mono_font_doc, cjk_font_doc] = await Promise.all([
+    const [shader_code, latin_mono_font_doc] = await Promise.all([
       load_text(ui_shader_url),
       load_json<font_bundle_doc>(latin_mono_font_json_url),
-      load_json<font_doc>(ping_fang_font_json_url),
     ])
-    const [latin_mono_font_image, cjk_font_image] = await Promise.all([
-      load_image_bitmap_asset(font_image_url(latin_mono_font_doc, 'latin_mono')),
-      load_image_bitmap_asset(font_image_url(cjk_font_doc, 'cjk')),
-    ])
+    const latin_mono_font_image = await load_image_bitmap_asset(font_image_url(latin_mono_font_doc, 'latin_mono'))
     this.font_atlases.set(FONT_MAIN, glyph_map(font_face(latin_mono_font_doc, FONT_MAIN), latin_mono_font_doc.width, latin_mono_font_doc.height))
     this.font_atlases.set(FONT_MONO, glyph_map(font_face(latin_mono_font_doc, FONT_MONO), latin_mono_font_doc.width, latin_mono_font_doc.height))
-    this.font_atlases.set(FONT_ZH, glyph_map(cjk_font_doc, cjk_font_doc.width, cjk_font_doc.height, { cjk_punctuation_fallbacks: true }))
     this.screen_buffer = this.device.createBuffer({ label: 'ui.screen_buffer', size: 8, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST })
 
     const shader_module = this.device.createShaderModule({ label: 'ui.shader_module', code: shader_code })
@@ -467,13 +476,41 @@ export class ui_renderer {
       ],
     })
     this.font_bind_groups.set(latin_mono_font_texture_id, this.create_texture_bind_group('ui.font_texture.latin_mono', latin_mono_font_image, sampler, bind_group_layout))
-    this.font_bind_groups.set(cjk_font_texture_id, this.create_texture_bind_group('ui.font_texture.cjk', cjk_font_image, sampler, bind_group_layout))
+    this.font_bind_groups.set(cjk_font_texture_id, this.create_placeholder_font_bind_group('ui.font_texture.cjk.placeholder', sampler, bind_group_layout))
     this.color_panel_uniform = this.device.createBuffer({
       label: 'ui.buffer.color_panel',
       size: 32,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
     this.resize()
+
+    // The Chinese atlas is large, so load it off the critical path. The CJK
+    // slot keeps its transparent placeholder until the real atlas arrives.
+    if (options?.chinese_font ?? true) void this.load_chinese_font()
+  }
+
+  /**
+   * Asynchronously load the Chinese (PingFang SC) font atlas and swap it in
+   * once ready. Safe to call multiple times — concurrent and repeat calls
+   * share the same in-flight load. Resolves when the atlas is available (or
+   * immediately if it has already loaded).
+   */
+  load_chinese_font(): Promise<void> {
+    if (this.font_atlases.has(FONT_ZH)) return Promise.resolve()
+    if (this.chinese_font_load) return this.chinese_font_load
+    this.chinese_font_load = this.fetch_chinese_font().catch((err) => {
+      this.chinese_font_load = null
+      throw err
+    })
+    return this.chinese_font_load
+  }
+
+  private async fetch_chinese_font(): Promise<void> {
+    const cjk_font_doc = await load_json<font_doc>(ping_fang_font_json_url)
+    const cjk_font_image = await load_image_bitmap_asset(font_image_url(cjk_font_doc, 'cjk'))
+    if (!this.device || !this.sampler || !this.bind_group_layout || !this.screen_buffer) return
+    this.font_atlases.set(FONT_ZH, glyph_map(cjk_font_doc, cjk_font_doc.width, cjk_font_doc.height, { cjk_punctuation_fallbacks: true }))
+    this.font_bind_groups.set(cjk_font_texture_id, this.create_texture_bind_group('ui.font_texture.cjk', cjk_font_image, this.sampler, this.bind_group_layout))
   }
 
   resize(): void {
@@ -853,6 +890,26 @@ export class ui_renderer {
     }
     pass.end()
     this.device.queue.submit([encoder.finish()])
+  }
+
+  private create_placeholder_font_bind_group(label: string, sampler: GPUSampler, layout: GPUBindGroupLayout): GPUBindGroup {
+    if (!this.device || !this.screen_buffer) throw new Error('ui_renderer not initialized')
+    const texture = this.device.createTexture({
+      label,
+      size: [1, 1, 1],
+      format: 'rgba8unorm',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    })
+    this.device.queue.writeTexture({ texture }, new Uint8Array([0, 0, 0, 0]), { bytesPerRow: 4 }, { width: 1, height: 1, depthOrArrayLayers: 1 })
+    return this.device.createBindGroup({
+      label: label.replace('texture', 'bind_group'),
+      layout,
+      entries: [
+        { binding: 0, resource: sampler },
+        { binding: 1, resource: texture.createView() },
+        { binding: 2, resource: { buffer: this.screen_buffer } },
+      ],
+    })
   }
 
   private create_texture_bind_group(label: string, image: ImageBitmap, sampler: GPUSampler, layout: GPUBindGroupLayout): GPUBindGroup {
