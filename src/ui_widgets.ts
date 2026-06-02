@@ -1,6 +1,6 @@
 import { theme_color } from './theme'
 import type { theme_definition } from './types'
-import { ui_renderer } from './ui_renderer'
+import { FONT_MONO, ui_renderer } from './ui_renderer'
 
 export interface ui_input_snapshot {
   mouse_x: number
@@ -20,6 +20,18 @@ export interface ui_input_snapshot {
   key_end: boolean
   shift: boolean
   gizmo_manipulating: boolean
+  /** Ctrl modifier — used for Ctrl+C / Ctrl+A in the text view. Optional for back-compat. */
+  ctrl?: boolean
+  /** Cmd / Meta modifier (macOS) — used for Cmd+C / Cmd+A in the text view. */
+  meta?: boolean
+  key_up?: boolean
+  key_down?: boolean
+  key_page_up?: boolean
+  key_page_down?: boolean
+  /** `a` key — combined with ctrl/meta for select-all in the text view. */
+  key_a?: boolean
+  /** `c` key — combined with ctrl/meta for copy in the text view. */
+  key_c?: boolean
 }
 
 export interface ui_scroll_state {
@@ -48,6 +60,98 @@ export interface ui_color_rgba {
   g: number
   b: number
   a: number
+}
+
+/** A single line of content for {@link ui_widgets.text_view}. */
+export interface ui_text_view_line {
+  text: string
+  /** Per-line color: a packed `0xAABBGGRR` number, a `#rrggbb`/`#rrggbbaa` string, or undefined for the theme text color. */
+  color?: number | string
+}
+
+/** A caret / selection endpoint within a {@link ui_widgets.text_view}, as a logical `{ line, col }`. */
+export interface ui_text_pos {
+  line: number
+  col: number
+}
+
+/** Persistent per-frame state for a {@link ui_widgets.text_view}. Create with {@link create_text_view_state}. */
+export interface ui_text_view_state {
+  /** Vertical scroll offset in pixels (readable + writable). */
+  scroll_top: number
+  /** Selection anchor (where the drag/selection began). */
+  anchor: ui_text_pos
+  /** Selection focus (the moving end / caret). */
+  focus: ui_text_pos
+  /** Whether the panel currently holds keyboard focus. */
+  focused: boolean
+  /** When set, the next frame scrolls to bring this logical line into view, then clears it. */
+  scroll_to_line: number | null
+  /** Internal: timestamp of the last click, for double/triple-click detection. */
+  last_click_ms: number
+  /** Internal: line of the last click. */
+  last_click_line: number
+  /** Internal: column of the last click. */
+  last_click_col: number
+  /** Internal: consecutive-click streak (1 = single, 2 = double/word, 3 = triple/line). */
+  click_streak: number
+}
+
+export interface ui_text_view_options {
+  /** Logical font size (multiplied by devicePixelRatio internally). Defaults to 13. */
+  font_px?: number
+  /** Soft-wrap long lines to the panel width (char-level, like `pre-wrap` + `break-word`). Defaults to false. */
+  wrap?: boolean
+  /** Draw a rounded panel background + border. Defaults to true. */
+  background?: boolean
+  /** Extra vertical padding added to each line, in logical px. Defaults to 2. */
+  line_pad?: number
+  /** Disable selection / clipboard / focus (pure read-only viewer). Defaults to false. */
+  read_only?: boolean
+}
+
+export function create_text_view_state(): ui_text_view_state {
+  return {
+    scroll_top: 0,
+    anchor: { line: 0, col: 0 },
+    focus: { line: 0, col: 0 },
+    focused: false,
+    scroll_to_line: null,
+    last_click_ms: 0,
+    last_click_line: -1,
+    last_click_col: -1,
+    click_streak: 0,
+  }
+}
+
+type text_view_vrow = { line: number; start: number; end: number }
+
+function text_pos_le(a: ui_text_pos, b: ui_text_pos): boolean {
+  return a.line < b.line || (a.line === b.line && a.col <= b.col)
+}
+
+function normalize_text_sel(a: ui_text_pos, b: ui_text_pos): [ui_text_pos, ui_text_pos] {
+  return text_pos_le(a, b) ? [a, b] : [b, a]
+}
+
+function has_text_selection(state: ui_text_view_state): boolean {
+  return state.anchor.line !== state.focus.line || state.anchor.col !== state.focus.col
+}
+
+function is_word_char(ch: string): boolean {
+  return /[\w$]/.test(ch)
+}
+
+/** Extract the currently selected text from a {@link ui_widgets.text_view}, joined with `\n` (empty if no selection). */
+export function text_view_selected_text(lines: ui_text_view_line[], state: ui_text_view_state): string {
+  if (!has_text_selection(state)) return ''
+  const [start, end] = normalize_text_sel(state.anchor, state.focus)
+  const line_text = (i: number): string => lines[i]?.text ?? ''
+  if (start.line === end.line) return line_text(start.line).slice(start.col, end.col)
+  const parts: string[] = [line_text(start.line).slice(start.col)]
+  for (let i = start.line + 1; i < end.line; i += 1) parts.push(line_text(i))
+  parts.push(line_text(end.line).slice(0, end.col))
+  return parts.join('\n')
 }
 
 const w_font_px = 15
@@ -95,6 +199,14 @@ export function create_empty_ui_input(): ui_input_snapshot {
     key_end: false,
     shift: false,
     gizmo_manipulating: false,
+    ctrl: false,
+    meta: false,
+    key_up: false,
+    key_down: false,
+    key_page_up: false,
+    key_page_down: false,
+    key_a: false,
+    key_c: false,
   }
 }
 
@@ -664,6 +776,271 @@ export class ui_widgets {
     }
 
     return this.color_picker_values.get(id) ?? this.normalize_color(value)
+  }
+
+  /**
+   * Selectable, copyable, scrollable monospace text panel — the WebGPU
+   * replacement for a DOM `<pre>` used as an output/console view.
+   *
+   * Supports mouse-drag selection, Shift+click extend, double-click word and
+   * triple-click line selection, wheel + scrollbar scrolling, keyboard
+   * scrolling (arrows / PageUp / PageDown) while focused, Ctrl/Cmd+A
+   * select-all and Ctrl/Cmd+C copy (via `navigator.clipboard`). Selection is
+   * tracked in `state` as logical `{ line, col }` endpoints; read the selected
+   * string with {@link text_view_selected_text}.
+   */
+  text_view(
+    id: string,
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    lines: ui_text_view_line[],
+    state: ui_text_view_state,
+    options?: ui_text_view_options,
+  ): void {
+    const scale = window.devicePixelRatio || 1
+    const read_only = options?.read_only === true
+    const fpx = (options?.font_px ?? 13) * scale
+    const wrap = options?.wrap === true
+    const pad = w_pad * scale
+    const line_pad = (options?.line_pad ?? 2) * scale
+    const scrollbar_w = w_scrollbar_w * scale
+    const char_w = Math.max(1, this.ui.mono_char_width(fpx, FONT_MONO))
+    const line_h = this.ui.text_line_height(fpx, FONT_MONO) + line_pad
+
+    if (options?.background !== false) {
+      this.ui.fill_round_rect(x, y, w, h, w_radius * scale, this.color('panel'))
+      this.ui.stroke_round_rect(x, y, w, h, w_radius * scale, 1, this.color('border'))
+    }
+
+    const text_x = x + pad
+    const text_top = y + line_pad * 0.5
+    const view_h = Math.max(0, h - line_pad)
+    // Always reserve the scrollbar gutter so wrapping/clipping doesn't reflow when it appears.
+    const content_w = Math.max(char_w, w - pad - scrollbar_w - pad)
+    const max_cols = wrap ? Math.max(1, Math.floor(content_w / char_w)) : Number.POSITIVE_INFINITY
+
+    // Build the visual-row model (one entry per rendered row).
+    const vrows: text_view_vrow[] = []
+    for (let li = 0; li < lines.length; li += 1) {
+      const len = lines[li]?.text.length ?? 0
+      if (!wrap || len <= max_cols) {
+        vrows.push({ line: li, start: 0, end: len })
+        continue
+      }
+      for (let s = 0; s < len; s += max_cols) vrows.push({ line: li, start: s, end: Math.min(len, s + max_cols) })
+    }
+    if (vrows.length === 0) vrows.push({ line: 0, start: 0, end: 0 })
+
+    const content_h = vrows.length * line_h
+    const max_scroll = Math.max(0, content_h - view_h)
+
+    // Map a logical {line, col} to the visual-row index it lands on.
+    const vrow_for_pos = (line: number, col: number): number => {
+      let last_on_line = 0
+      for (let i = 0; i < vrows.length; i += 1) {
+        const vr = vrows[i]!
+        if (vr.line !== line) continue
+        if (col >= vr.start && col <= vr.end) return i
+        last_on_line = i
+      }
+      return last_on_line
+    }
+
+    // Apply a requested scroll-to-line before computing visibility.
+    if (state.scroll_to_line != null) {
+      const target = Math.max(0, Math.min(lines.length - 1, state.scroll_to_line))
+      const vi = vrow_for_pos(target, 0)
+      state.scroll_top = Math.max(0, Math.min(max_scroll, vi * line_h))
+      state.scroll_to_line = null
+    }
+
+    const text_area = { x, y, w: w - scrollbar_w, h }
+    const hover_area = this.point_in(text_area.x, text_area.y, text_area.w, text_area.h)
+    const hover_panel = this.point_in(x, y, w, h)
+
+    // Hit-test the mouse to a logical {line, col}.
+    const hit_test = (mx: number, my: number): ui_text_pos => {
+      const rel_y = my - text_top + state.scroll_top
+      const vi = Math.max(0, Math.min(vrows.length - 1, Math.floor(rel_y / line_h)))
+      const vr = vrows[vi]!
+      const rel_x = mx - text_x
+      const span = vr.end - vr.start
+      const col_in_row = Math.max(0, Math.min(span, Math.round(rel_x / char_w)))
+      return { line: vr.line, col: vr.start + col_in_row }
+    }
+
+    if (!read_only) {
+      // Mouse: focus, click streaks, drag selection.
+      if (this.input.mouse_pressed) {
+        if (hover_area) {
+          this.focused_input_id = id
+          this.focused_number_id = null
+          this.active_id = id
+          state.focused = true
+          const pos = hit_test(this.input.mouse_x, this.input.mouse_y)
+          const now = (typeof performance !== 'undefined' ? performance.now() : Date.now())
+          const same_spot = state.last_click_line === pos.line && Math.abs(state.last_click_col - pos.col) <= 1
+          const streak = now - state.last_click_ms < 400 && same_spot ? state.click_streak + 1 : 1
+          state.click_streak = streak
+          state.last_click_ms = now
+          state.last_click_line = pos.line
+          state.last_click_col = pos.col
+          if (streak >= 3) {
+            const len = lines[pos.line]?.text.length ?? 0
+            state.anchor = { line: pos.line, col: 0 }
+            state.focus = { line: pos.line, col: len }
+          } else if (streak === 2) {
+            const [ws, we] = this.word_bounds(lines[pos.line]?.text ?? '', pos.col)
+            state.anchor = { line: pos.line, col: ws }
+            state.focus = { line: pos.line, col: we }
+          } else if (this.input.shift) {
+            state.focus = pos
+          } else {
+            state.anchor = pos
+            state.focus = pos
+          }
+        } else if (state.focused) {
+          state.focused = false
+          this.focused_input_id = this.focused_input_id === id ? null : this.focused_input_id
+        }
+      } else if (this.active_id === id && this.input.mouse_down) {
+        state.focus = hit_test(this.input.mouse_x, this.input.mouse_y)
+      }
+      state.focused = this.focused_input_id === id
+    }
+
+    // Wheel scroll while hovering the panel.
+    if (hover_panel && this.input.wheel_y !== 0) {
+      state.scroll_top = Math.max(0, Math.min(max_scroll, state.scroll_top - this.input.wheel_y * 20 * scale))
+    }
+
+    // Keyboard while focused: scrolling + select-all + copy.
+    if (state.focused && !read_only) {
+      if (this.input.key_up) state.scroll_top -= line_h
+      if (this.input.key_down) state.scroll_top += line_h
+      if (this.input.key_page_up) state.scroll_top -= view_h
+      if (this.input.key_page_down) state.scroll_top += view_h
+      if (this.input.key_home && (this.input.ctrl || this.input.meta)) state.scroll_top = 0
+      if (this.input.key_end && (this.input.ctrl || this.input.meta)) state.scroll_top = max_scroll
+      state.scroll_top = Math.max(0, Math.min(max_scroll, state.scroll_top))
+      if ((this.input.ctrl || this.input.meta) && this.input.key_a) {
+        const last = Math.max(0, lines.length - 1)
+        state.anchor = { line: 0, col: 0 }
+        state.focus = { line: last, col: lines[last]?.text.length ?? 0 }
+      }
+      if ((this.input.ctrl || this.input.meta) && this.input.key_c && has_text_selection(state)) {
+        const text = text_view_selected_text(lines, state)
+        if (text && typeof navigator !== 'undefined' && navigator.clipboard) void navigator.clipboard.writeText(text)
+      }
+    }
+    state.scroll_top = Math.max(0, Math.min(max_scroll, state.scroll_top))
+
+    // Render text + selection.
+    this.ui.push_clip(text_area.x, y, text_area.w, h)
+    const selecting = has_text_selection(state)
+    const [sel_start, sel_end] = selecting ? normalize_text_sel(state.anchor, state.focus) : [state.focus, state.focus]
+    const text_color = this.color('text')
+    const sel_color = this.color('selected')
+    const first_vi = Math.max(0, Math.floor(state.scroll_top / line_h) - 1)
+    const last_vi = Math.min(vrows.length - 1, Math.ceil((state.scroll_top + view_h) / line_h))
+    for (let vi = first_vi; vi <= last_vi; vi += 1) {
+      const vr = vrows[vi]!
+      const row_y = text_top + vi * line_h - state.scroll_top
+      const line = lines[vr.line]
+      if (selecting && vr.line >= sel_start.line && vr.line <= sel_end.line) {
+        const line_sel_start = vr.line === sel_start.line ? sel_start.col : 0
+        const line_len = line?.text.length ?? 0
+        const line_sel_end = vr.line === sel_end.line ? sel_end.col : line_len
+        let c0 = Math.max(vr.start, line_sel_start)
+        let c1 = Math.min(vr.end, line_sel_end)
+        if (c1 >= c0) {
+          let sw = (c1 - c0) * char_w
+          // Show the trailing newline as selected on fully-covered intermediate rows.
+          const is_line_last_row = vr.end >= line_len
+          if (vr.line < sel_end.line && is_line_last_row) sw += char_w * 0.5
+          this.ui.fill_rect(text_x + (c0 - vr.start) * char_w, row_y, Math.max(1, sw), line_h, sel_color)
+        }
+      }
+      if (line && vr.end > vr.start) {
+        const slice = line.text.slice(vr.start, vr.end)
+        const col = this.resolve_text_view_color(line.color, text_color)
+        this.ui.draw_text(text_x, this.ui.text_v_center_y(row_y, line_h, fpx, FONT_MONO), slice, fpx, col, FONT_MONO)
+      }
+    }
+
+    // Caret (when focused with an empty selection).
+    if (state.focused && !selecting && !read_only) {
+      const vi = vrow_for_pos(state.focus.line, state.focus.col)
+      const vr = vrows[vi]
+      if (vr) {
+        const caret_x = text_x + (state.focus.col - vr.start) * char_w
+        const caret_y = text_top + vi * line_h - state.scroll_top
+        const blink = (typeof performance !== 'undefined' ? performance.now() : Date.now()) % 1000 < 600
+        if (blink) this.ui.fill_rect(caret_x, caret_y + 2 * scale, Math.max(1, 1.5 * scale), line_h - 4 * scale, this.color('accent'))
+      }
+    }
+    this.ui.pop_clip()
+
+    // Scrollbar.
+    if (content_h > view_h) {
+      const sb_x = x + w - scrollbar_w - 2 * scale
+      const sb_y = y + 2 * scale
+      const sb_h = h - 4 * scale
+      const thumb_h = Math.max(w_scrollbar_min * scale, sb_h * (view_h / content_h))
+      const travel = Math.max(1, sb_h - thumb_h)
+      const sb_id = `${id}.sb`
+      const t_now = max_scroll > 0 ? state.scroll_top / max_scroll : 0
+      const thumb_y = sb_y + t_now * travel
+      if (this.input.mouse_pressed) {
+        if (this.point_in(sb_x, thumb_y, scrollbar_w, thumb_h)) {
+          this.active_id = sb_id
+        } else if (this.point_in(sb_x, sb_y, scrollbar_w, sb_h)) {
+          const click_t = Math.max(0, Math.min(1, (this.input.mouse_y - sb_y - thumb_h * 0.5) / travel))
+          state.scroll_top = Math.round(click_t * max_scroll)
+          this.active_id = sb_id
+        }
+      }
+      if (this.active_id === sb_id && this.input.mouse_down) {
+        const drag_t = Math.max(0, Math.min(1, (this.input.mouse_y - sb_y - thumb_h * 0.5) / travel))
+        state.scroll_top = Math.round(drag_t * max_scroll)
+      }
+      const t2 = max_scroll > 0 ? state.scroll_top / max_scroll : 0
+      const thumb_y2 = sb_y + t2 * travel
+      const thumb_hot = this.active_id === sb_id || this.point_in(sb_x, thumb_y2, scrollbar_w, thumb_h)
+      this.ui.fill_round_rect(sb_x, sb_y, scrollbar_w, sb_h, scrollbar_w * 0.5, this.color('panel_alt'))
+      this.ui.fill_round_rect(sb_x + 1, thumb_y2 + 1, scrollbar_w - 2, thumb_h - 2, (scrollbar_w - 2) * 0.5, thumb_hot ? this.color('text_dim') : this.color('selected'))
+    }
+  }
+
+  /** Read the current selection of a {@link text_view}, joined with `\n`. */
+  get_text_view_selected_text(lines: ui_text_view_line[], state: ui_text_view_state): string {
+    return text_view_selected_text(lines, state)
+  }
+
+  private resolve_text_view_color(color: number | string | undefined, fallback: number): number {
+    if (typeof color === 'number') return color >>> 0
+    if (typeof color === 'string') return pack_color(color)
+    return fallback
+  }
+
+  private word_bounds(text: string, col: number): [number, number] {
+    const len = text.length
+    if (len === 0) return [0, 0]
+    const i = Math.min(col, len - 1)
+    const seed = text[i] ?? ''
+    // Select a run of the same class as the seed: word chars, whitespace, or punctuation.
+    const test = /\s/.test(seed)
+      ? (ch: string) => /\s/.test(ch)
+      : is_word_char(seed)
+        ? is_word_char
+        : (ch: string) => !is_word_char(ch) && !/\s/.test(ch)
+    let start = i
+    let end = i + 1
+    while (start > 0 && test(text[start - 1] ?? '')) start -= 1
+    while (end < len && test(text[end] ?? '')) end += 1
+    return [start, end]
   }
 
   private render_dropdown_popup(popup: dropdown_popup): void {
