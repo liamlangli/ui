@@ -1,5 +1,5 @@
 import latin_mono_font_json_url from '../assets/latin_mono.json?url'
-import latin_mono_font_image_url from '../assets/latin_mono.png?url'
+import latin_mono_font_image_url from '../assets/latin_mono.webp?url'
 import ping_fang_font_json_url from '../assets/ping_fang_sc_regular.json?url'
 import ping_fang_font_image_url from '../assets/ping_fang_sc_regular.webp?url'
 import ui_shader_url from '../assets/ui.wgsl?url'
@@ -96,7 +96,7 @@ const cjk_punctuation_aliases: [number, number][] = [
   [0xff1f, 0x3f],
 ]
 const font_page_urls: Record<string, string> = {
-  'latin_mono.png': latin_mono_font_image_url,
+  'latin_mono.webp': latin_mono_font_image_url,
   'ping_fang_sc_regular.webp': ping_fang_font_image_url,
 }
 

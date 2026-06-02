@@ -19,7 +19,7 @@ await renderer.init()
 const widgets = new ui_widgets(renderer)
 ```
 
-The renderer loads its Latin/monospace font atlas (`assets/latin_mono.{json,png}`),
+The renderer loads its Latin/monospace font atlas (`assets/latin_mono.{json,webp}`),
 Chinese font atlas (`assets/ping_fang_sc_regular.{json,webp}`), and shader
 (`assets/ui.wgsl`) via Vite `?url` imports, so consumers are expected to build
 with Vite (or an equivalent bundler that understands the `?url` suffix).
