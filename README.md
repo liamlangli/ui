@@ -8,14 +8,14 @@ It bundles the pieces needed to build a browser-native editor UI on top of WebGP
 - **`ui_widgets`** — an immediate-mode widget layer (buttons, toggles, sliders, dropdowns, text/number inputs, color pickers, scroll regions, menus) drawn through `ui_renderer`.
 - **`dock`** — a docking layout engine: split/leaf trees, tab drag-and-drop, drop targets, and (de)serialization.
 - **`theme`** — palette/CSS-variable theming with `load_theme`, `apply_theme`, `theme_color`, `theme_rgba`, `pack_color`, and `hex_to_normalized_rgba`.
-- **`plugins`** — opt-in, higher-level drop-in components (`dock_system`, `file_browser`, `im_dialog`) packaged so other projects can reuse them piecemeal. See [Plugins](#plugins).
+- **`plugins`** — opt-in, higher-level drop-in components (`dock_system`, `file_browser`, `im_dialog`, `code_editor`) packaged so other projects can reuse them piecemeal. See [Plugins](#plugins).
 
 ## Live preview
 
 An interactive playground lives in [`preview/`](preview) and is wired up with
 Vite. It boots the renderer and lays the whole demo out inside the `dock_system`
-plugin (Explorer, Widgets gallery, Console, About, and a Chat panel) — every
-pixel is drawn on the GPU.
+plugin (Explorer, an Editor, Widgets gallery, Console, About, and a Chat panel)
+— every pixel is drawn on the GPU.
 
 ```bash
 npm install
@@ -43,7 +43,7 @@ drawing and input handling and takes your `ui_renderer` (+ `ui_widgets` where
 needed), a `theme_definition`, and the per-frame `ui_input_snapshot`.
 
 ```ts
-import { dock_system, file_browser, im_dialog } from '@liamlangli/ui/plugins'
+import { code_editor, dock_system, file_browser, im_dialog } from '@liamlangli/ui/plugins'
 ```
 
 ### `dock_system` — docking workspace
@@ -101,6 +101,46 @@ if (ev.sent) messages.push({ author: 'Me', side: 'right', text: ev.sent, timesta
 ```
 
 CJK works once the Chinese atlas has loaded (see [Chinese font loading](#chinese-font-loading)).
+
+### `code_editor` — editable code surface
+
+A GPU-rendered, editable code editor: a line-number gutter, selection
+highlight, blinking caret, mouse selection (click / drag / double-click word /
+triple-click line) and full keyboard editing (typing, Backspace/Delete, Enter
+with auto-indent, Tab→spaces, arrows, Home/End, PageUp/PageDown, Ctrl/Cmd+A,
+Ctrl/Cmd+C). You own the text model (`text_buffer`) and the view state
+(`code_editor_state`).
+
+Syntax highlighting is **pluggable and language-agnostic**: pass a per-line
+`tokenize` function returning `{ kind, text }` tokens — the toolkit ships a
+neutral default palette and never bakes in a language. Wire a real tokenizer
+(regex, a language server, a WASM lexer, …) from the host.
+
+```ts
+import { code_editor, create_code_editor_state, text_buffer } from '@liamlangli/ui/plugins'
+import type { editor_token } from '@liamlangli/ui/plugins'
+
+const buf = new text_buffer('fn main() {}')
+const ed = create_code_editor_state()
+
+function my_tokenize(line: string): editor_token[] {
+  // → [{ kind: 'keyword', text: 'fn' }, { kind: 'whitespace', text: ' ' }, …]
+}
+
+// each frame, between renderer.begin_frame() and renderer.flush():
+const ev = code_editor(renderer, theme, input, x, y, w, h, buf, ed, {
+  tokenize: my_tokenize,           // omit for plain (unhighlighted) text
+  // token_colors: { keyword: '#c678dd' }, read_only, font_px, tab_size, highlights, …
+})
+if (ev.changed) recompile(buf.get_text())
+```
+
+The host forwards the same `ui_input_snapshot` the other plugins use; typed
+characters arrive on `typed_text` and editing/navigation keys on the
+`key_*` / `ctrl` / `meta` / `shift` flags (see [Text view](#text-view-selectable--copyable-console)
+for the full list). Token `kind`s are `keyword`, `type`, `number`, `string`,
+`comment`, `operator`, `identifier`, `punctuation`, `function`, `whitespace`,
+`plain`.
 
 ## Usage
 

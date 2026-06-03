@@ -1,8 +1,9 @@
 // @liamlangli/ui — interactive preview / playground.
 //
 // Boots the WebGPU renderer and lays the whole demo out inside the `dock_system`
-// plugin: an Explorer (file_browser), a Widgets gallery, a Console (text_view),
-// an About panel, and a Chat panel (im_dialog). Everything is drawn on the GPU.
+// plugin: an Explorer (file_browser), an Editor (code_editor), a Widgets
+// gallery, a Console (text_view), an About panel, and a Chat panel (im_dialog).
+// Everything is drawn on the GPU.
 
 import {
   apply_theme,
@@ -29,6 +30,11 @@ import {
   create_file_browser_state,
   im_dialog,
   create_im_dialog_state,
+  code_editor,
+  create_code_editor_state,
+  text_buffer,
+  type editor_token,
+  type editor_token_kind,
   type file_node,
   type im_message,
 } from '../src/index'
@@ -58,9 +64,10 @@ function build_layout(): dock_layout {
           axis: 'vertical',
           ratio: 0.64,
           left: leaf('leaf-main', [
+            { id: 'editor', title: 'Editor' },
             { id: 'gallery', title: 'Widgets' },
             { id: 'about', title: 'About' },
-          ], 'gallery'),
+          ], 'editor'),
           right: leaf('leaf-console', [
             { id: 'console', title: 'Console' },
             { id: 'metrics', title: 'Metrics' },
@@ -112,6 +119,7 @@ const about_lines: ui_text_view_line[] = [
   { text: 'Plugins on show:', color: '#4c8bf5' },
   { text: '  • dock_system  — drag tabs to reorder / split, drag splitters', color: '#9aa3b0' },
   { text: '  • file_browser — the Explorer panel on the left', color: '#9aa3b0' },
+  { text: '  • code_editor  — the Editor tab (type, select, syntax-highlight)', color: '#9aa3b0' },
   { text: '  • im_dialog    — the Chat panel on the right', color: '#9aa3b0' },
   { text: '' },
   { text: 'Try: drag the "Widgets" tab onto another panel edge to split.', color: '#5fb878' },
@@ -152,6 +160,49 @@ const file_state = create_file_browser_state()
 const chat_state = create_im_dialog_state()
 const console_state = create_text_view_state()
 const about_state = create_text_view_state()
+
+// --- code_editor demo -------------------------------------------------------
+const editor_buffer = new text_buffer(
+  [
+    '// code_editor — a GPU-rendered editable text surface.',
+    '// Click to place the caret, drag to select, type to edit.',
+    '',
+    'function fib(n: number): number {',
+    '  if (n < 2) return n',
+    '  return fib(n - 1) + fib(n - 2)',
+    '}',
+    '',
+    'const seq = []',
+    'for (let i = 0; i < 10; i++) {',
+    '  seq.push(fib(i))',
+    '}',
+    'console.log(seq) // [0, 1, 1, 2, 3, 5, 8, ...]',
+  ].join('\n'),
+)
+const editor_state = create_code_editor_state()
+
+// A tiny, dependency-free tokenizer just to exercise the pluggable highlighting
+// — real consumers pass their own (e.g. a language-server / WASM tokenizer).
+const DEMO_KEYWORDS = new Set(['function', 'const', 'let', 'var', 'return', 'if', 'else', 'for', 'while', 'number', 'string', 'boolean'])
+function demo_tokenize(line: string): editor_token[] {
+  const out: editor_token[] = []
+  const ci = line.indexOf('//')
+  const code = ci >= 0 ? line.slice(0, ci) : line
+  const re = /(\s+)|([A-Za-z_$][\w$]*)|(\d+(?:\.\d+)?)|("[^"]*"|'[^']*')|([(){}\[\].,;:])|([+\-*/<>=!&|%]+)/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(code))) {
+    let kind: editor_token_kind = 'plain'
+    if (m[1]) kind = 'whitespace'
+    else if (m[2]) kind = DEMO_KEYWORDS.has(m[2]) ? 'keyword' : 'identifier'
+    else if (m[3]) kind = 'number'
+    else if (m[4]) kind = 'string'
+    else if (m[5]) kind = 'punctuation'
+    else if (m[6]) kind = 'operator'
+    out.push({ kind, text: m[0] })
+  }
+  if (ci >= 0) out.push({ kind: 'comment', text: line.slice(ci) })
+  return out
+}
 
 const gallery = {
   toggle_a: true,
@@ -264,6 +315,9 @@ async function main(): Promise<void> {
       switch (panel.tab.id) {
         case 'files':
           render_files(renderer, widgets, theme, snapshot, px, py, pw, ph)
+          break
+        case 'editor':
+          code_editor(renderer, theme, snapshot, px, py, pw, ph, editor_buffer, editor_state, { tokenize: demo_tokenize })
           break
         case 'gallery':
           render_gallery(renderer, widgets, theme, px, py, pw, ph, scale)
