@@ -620,7 +620,7 @@ export class ui_widgets {
     this.ui.fill_round_rect(x, y, w, h, w_radius * scale, this.color('panel_alt'))
     this.ui.stroke_round_rect(x, y, w, h, w_radius * scale, 1, focused ? this.color('accent') : this.color('border'))
     this.ui.push_clip(x + 1, y + 1, Math.max(0, w - 2), Math.max(0, h - 2))
-    const draw_text = value || placeholder
+    const draw_text = value || (focused ? '' : placeholder)
     const draw_color = value ? this.color('text') : this.color('text_dim')
     const composition = focused ? this.input.ime_composition ?? '' : ''
     if (focused && value && this.has_selection(state)) {

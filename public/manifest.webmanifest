@@ -1,0 +1,17 @@
+{
+  "name": "@liamlangli/ui WebGPU UI Toolkit Preview",
+  "short_name": "liamlangli/ui",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#16181d",
+  "theme_color": "#16181d",
+  "icons": [
+    {
+      "src": "/app-icon.png",
+      "sizes": "1024x1024",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
