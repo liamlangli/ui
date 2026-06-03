@@ -52,6 +52,14 @@ export interface im_dialog_options {
   placeholder?: string
   /** Optional header title bar. */
   title?: string
+  /** Shows a header typing status and a temporary incoming typing bubble. */
+  is_typing?: boolean
+  /** Display name / avatar seed for the temporary typing bubble. */
+  typing_author?: string
+  /** Avatar fill colour (`#rrggbb`) for the temporary typing bubble. */
+  typing_avatar_color?: string
+  /** Single character / emoji drawn inside the temporary typing avatar. */
+  typing_avatar?: string
   /** Max bubble width as a fraction of the panel width. Defaults to 0.72. */
   bubble_max_frac?: number
 }
@@ -102,6 +110,11 @@ function point_in(input: ui_input_snapshot, x: number, y: number, w: number, h: 
   return input.mouse_x >= x && input.mouse_y >= y && input.mouse_x < x + w && input.mouse_y < y + h
 }
 
+function white_alpha(alpha: number): number {
+  const a = Math.max(0, Math.min(255, Math.round(alpha * 255)))
+  return (((a << 24) | 0x00ffffff) >>> 0)
+}
+
 type laid_message = {
   msg: im_message
   lines: string[]
@@ -128,6 +141,7 @@ export function im_dialog(
   const font_px = (options?.font_px ?? 13.5) * scale
   const show_input = options?.show_input ?? true
   const title = options?.title
+  const is_typing = options?.is_typing ?? false
   const bubble_max_frac = options?.bubble_max_frac ?? 0.72
   const col = (slot: Parameters<typeof theme_color>[1]) => pack(theme_color(theme, slot))
   const event: im_dialog_event = {}
@@ -141,11 +155,17 @@ export function im_dialog(
 
   // --- Regions -----------------------------------------------------------
   let cy = y
-  if (title) {
+  if (title || is_typing) {
     const title_h = 30 * scale
     ui.fill_rect(x, y, w, title_h, col('panel_alt'))
     ui.fill_rect(x, y + title_h - 1 * scale, w, 1 * scale, col('border'))
-    ui.draw_text(x + pad, ui.text_v_center_y(y, title_h, 13 * scale), title, 13 * scale, col('text'))
+    if (title) ui.draw_text(x + pad, ui.text_v_center_y(y, title_h, 13 * scale), title, 13 * scale, col('text'))
+    if (is_typing) {
+      const label = 'typing…'
+      const label_font = 11.5 * scale
+      const label_w = ui.text_width(label, label_font, FONT_MAIN)
+      ui.draw_text(x + w - pad - label_w, ui.text_v_center_y(y, title_h, label_font), label, label_font, col('text_dim'))
+    }
     cy += title_h
   }
   const input_h = show_input ? 44 * scale : 0
@@ -171,11 +191,22 @@ export function im_dialog(
     laid.push({ msg, lines, bubble_w, bubble_h, total_h, has_meta })
     content_h += total_h
   }
+  const typing_msg: im_message = {
+    author: options?.typing_author ?? 'typing',
+    side: 'left',
+    text: '',
+    avatar: options?.typing_avatar,
+    avatar_color: options?.typing_avatar_color,
+  }
+  const typing_bubble_w = 56 * scale
+  const typing_bubble_h = Math.max(32 * scale, line_h + bubble_pad * 1.35)
+  const typing_total_h = typing_bubble_h + gap
+  if (is_typing) content_h += typing_total_h
   content_h += pad - gap
 
   // --- Scroll ------------------------------------------------------------
   const max_off = Math.max(0, content_h - list_h)
-  if (messages.length !== state.last_count) {
+  if (messages.length !== state.last_count || is_typing) {
     if (state.stick_to_bottom) state.scroll.offset_y = max_off
     state.last_count = messages.length
   }
@@ -184,6 +215,7 @@ export function im_dialog(
   }
   state.scroll.offset_y = Math.max(0, Math.min(max_off, state.scroll.offset_y))
   state.stick_to_bottom = max_off - state.scroll.offset_y < 4 * scale
+  if (is_typing) ui.request_render(2)
 
   // --- Render messages ---------------------------------------------------
   ui.fill_rect(list_x, list_y, list_w, list_h, col('bg'))
@@ -207,6 +239,18 @@ export function im_dialog(
       })
     }
     draw_y += item.total_h
+  }
+  if (is_typing && draw_y + typing_total_h >= list_y && draw_y <= list_y + list_h) {
+    render_typing_bubble(ui, typing_msg, draw_y, performance.now(), {
+      list_x,
+      pad,
+      avatar_r,
+      gap,
+      bubble_w: typing_bubble_w,
+      bubble_h: typing_bubble_h,
+      scale,
+      col,
+    })
   }
   ui.pop_clip()
 
@@ -234,6 +278,47 @@ export function im_dialog(
   }
 
   return event
+}
+
+function render_typing_bubble(
+  ui: ui_renderer,
+  msg: im_message,
+  draw_y: number,
+  now_ms: number,
+  g: {
+    list_x: number
+    pad: number
+    avatar_r: number
+    gap: number
+    bubble_w: number
+    bubble_h: number
+    scale: number
+    col: (slot: Parameters<typeof theme_color>[1]) => number
+  },
+): void {
+  const { list_x, pad, avatar_r, gap, bubble_w, bubble_h, scale, col } = g
+  const avatar_d = avatar_r * 2
+  const radius = 9 * scale
+  const ax = list_x + pad
+  const bx = ax + avatar_d + gap
+  const bubble_top = draw_y
+
+  ui.fill_circle(ax + avatar_r, bubble_top + avatar_r, avatar_r, avatar_color_for(msg), 1)
+  draw_avatar_glyph(ui, msg, ax + avatar_r, bubble_top + avatar_r, avatar_r, 13.5 * scale)
+  ui.fill_round_rect(bx, bubble_top, bubble_w, bubble_h, radius, col('panel_alt'))
+  ui.stroke_round_rect(bx, bubble_top, bubble_w, bubble_h, radius, 1, col('border'))
+
+  const dot_r = 3.2 * scale
+  const dot_gap = 9 * scale
+  const total_w = dot_gap * 2 + dot_r * 2
+  const start_x = bx + (bubble_w - total_w) * 0.5
+  const cy = bubble_top + bubble_h * 0.5
+  const phase = (now_ms % 1200) / 1200
+  for (let i = 0; i < 3; i += 1) {
+    const t = (phase + i * 0.18) % 1
+    const alpha = 0.35 + 0.65 * (0.5 + Math.sin(t * Math.PI * 2) * 0.5)
+    ui.fill_circle(start_x + i * dot_gap + dot_r, cy, dot_r, white_alpha(alpha), 1 * scale)
+  }
 }
 
 function render_bubble(

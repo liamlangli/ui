@@ -96,6 +96,8 @@ const messages: im_message[] = [
 const ev = im_dialog(renderer, widgets, theme, input, x, y, w, h, messages, chat, {
   title: 'Ada · online',
   placeholder: 'Message Ada…',
+  is_typing: adaIsTyping,
+  typing_author: 'Ada',
 })
 if (ev.sent) messages.push({ author: 'Me', side: 'right', text: ev.sent, timestamp: Date.now() })
 ```

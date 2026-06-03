@@ -158,6 +158,7 @@ const auto_replies = [
 const dock = new dock_system(build_layout())
 const file_state = create_file_browser_state()
 const chat_state = create_im_dialog_state()
+let chat_is_typing = false
 const console_state = create_text_view_state()
 const about_state = create_text_view_state()
 
@@ -373,12 +374,21 @@ function render_chat(
   w: number,
   h: number,
 ): void {
-  const ev = im_dialog(renderer, widgets, theme, snapshot, x, y, w, h, chat_messages, chat_state, { title: 'Ada · online', placeholder: 'Message Ada…' })
+  const ev = im_dialog(renderer, widgets, theme, snapshot, x, y, w, h, chat_messages, chat_state, {
+    title: 'Ada · online',
+    placeholder: 'Message Ada…',
+    is_typing: chat_is_typing,
+    typing_author: 'Ada',
+  })
   if (ev.sent) {
     chat_messages.push({ author: 'Me', side: 'right', text: ev.sent, timestamp: Date.now() })
+    chat_is_typing = true
+    renderer.request_render()
     const reply = auto_replies[Math.floor(Math.random() * auto_replies.length)]
     window.setTimeout(() => {
+      chat_is_typing = false
       chat_messages.push({ author: 'Ada', side: 'left', text: reply, timestamp: Date.now() })
+      renderer.request_render()
     }, 600 + Math.random() * 700)
   }
 }
