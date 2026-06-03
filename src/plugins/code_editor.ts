@@ -446,6 +446,11 @@ export function code_editor(
   const code_x = x + gutter_w
   const code_w = Math.max(char_w, w - gutter_w)
   const scrollbar_w = 8 * scale
+  if (!read_only) {
+    const regions = input.native_text_regions ?? []
+    regions.push({ id: 'code_editor', x: code_x, y, w: code_w, h, mode: 'multiline' })
+    input.native_text_regions = regions
+  }
 
   const visible_rows = Math.max(1, Math.floor(h / line_h))
   const content_h = line_count * line_h

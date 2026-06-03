@@ -2,7 +2,7 @@
 // the toolkit consumes. Coordinates are reported in *physical* pixels
 // (clientX * devicePixelRatio) to match the renderer's coordinate space.
 
-import { create_empty_ui_input, type ui_input_snapshot, type ui_native_text_input } from '../src/index'
+import { create_empty_ui_input, type ui_input_snapshot, type ui_native_text_input, type ui_native_text_region } from '../src/index'
 
 export class input_collector {
   private state: ui_input_snapshot = create_empty_ui_input()
@@ -21,6 +21,7 @@ export class input_collector {
   private composition = ''
   private pending_composition_commit = ''
   private composition_commit_seen = false
+  private native_regions: ui_native_text_region[] = []
 
   constructor(private readonly canvas: HTMLCanvasElement, private readonly on_event: () => void = () => {}) {
     const dpr = () => window.devicePixelRatio || 1
@@ -64,6 +65,8 @@ export class input_collector {
       this.state.mouse_y = (e.clientY - rect.top) * dpr()
       this.state.mouse_down = true
       this.pressed = true
+      const region = this.hit_native_text_region(this.state.mouse_x, this.state.mouse_y)
+      if (region) this.focus_native_text_region(region)
       wake()
     })
     canvas.addEventListener('pointerup', () => {
@@ -177,6 +180,7 @@ export class input_collector {
   /** Clear per-frame edges/deltas. Call once per frame after drawing. */
   end_frame(): void {
     this.sync_native_text_input(this.state.native_text_input ?? null)
+    this.native_regions = [...(this.state.native_text_regions ?? [])]
     this.pressed = false
     this.released = false
     this.wheel = 0
@@ -204,5 +208,29 @@ export class input_collector {
     this.ime.inputMode = request.mode === 'numeric' ? 'decimal' : 'text'
     this.native_active = true
     if (document.activeElement !== this.ime) this.ime.focus({ preventScroll: true })
+  }
+
+  private focus_native_text_region(region: ui_native_text_region): void {
+    this.position_native_text_region(region)
+    this.ime.inputMode = region.mode === 'numeric' ? 'decimal' : 'text'
+    this.native_active = true
+    this.ime.focus({ preventScroll: true })
+  }
+
+  private position_native_text_region(region: ui_native_text_region): void {
+    const scale = window.devicePixelRatio || 1
+    const rect = this.canvas.getBoundingClientRect()
+    this.ime.style.left = `${rect.left + region.x / scale}px`
+    this.ime.style.top = `${rect.top + region.y / scale}px`
+    this.ime.style.width = `${Math.max(1, region.w / scale)}px`
+    this.ime.style.height = `${Math.max(1, region.h / scale)}px`
+  }
+
+  private hit_native_text_region(x: number, y: number): ui_native_text_region | null {
+    for (let i = this.native_regions.length - 1; i >= 0; i -= 1) {
+      const region = this.native_regions[i]!
+      if (x >= region.x && y >= region.y && x < region.x + region.w && y < region.y + region.h) return region
+    }
+    return null
   }
 }

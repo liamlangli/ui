@@ -39,19 +39,27 @@ export interface ui_input_snapshot {
    * position a hidden native input/textarea for IME.
    */
   native_text_input?: ui_native_text_input | null
+  /**
+   * Text-capable hit regions from the previous render. Hosts can use this to
+   * focus a hidden native input synchronously during pointerdown on mobile.
+   */
+  native_text_regions?: ui_native_text_region[]
 }
 
-export interface ui_native_text_input {
+export interface ui_native_text_region {
   id: string
   x: number
   y: number
   w: number
   h: number
+  mode?: 'text' | 'numeric' | 'multiline'
+}
+
+export interface ui_native_text_input extends ui_native_text_region {
   value: string
   cursor: number
   selection_start: number
   selection_end: number
-  mode?: 'text' | 'numeric' | 'multiline'
 }
 
 export interface ui_scroll_state {
@@ -229,6 +237,7 @@ export function create_empty_ui_input(): ui_input_snapshot {
     key_c: false,
     ime_composition: '',
     native_text_input: null,
+    native_text_regions: [],
   }
 }
 
@@ -288,6 +297,7 @@ export class ui_widgets {
     if (this.open_color_picker_id == null) this.open_color_picker_popup_rect = null
     if (!input.mouse_down && this.active_id) this.active_id = null
     input.native_text_input = null
+    input.native_text_regions = []
   }
 
   end_frame(): void {
@@ -550,6 +560,7 @@ export class ui_widgets {
 
   input_field(id: string, x: number, y: number, w: number, h: number, buf: string, placeholder: string, state: ui_input_text_state): string {
     const scale = window.devicePixelRatio || 1
+    this.register_native_text_region(id, x, y, w, h, 'text')
     const hover = this.point_in(x, y, w, h)
     const auto_focused = this.pending_focused_input_id === id
     const focused = this.focused_input_id === id
@@ -647,6 +658,7 @@ export class ui_widgets {
     if (!Number.isFinite(value)) value = 0
     const decimals = options?.decimals ?? 2
     const scale = window.devicePixelRatio || 1
+    this.register_native_text_region(id, x, y, w, h, 'numeric')
     const hover = this.point_in(x, y, w, h)
     const focused = this.focused_number_id === id
     const text_x = x + w_pad * scale
@@ -1447,6 +1459,12 @@ export class ui_widgets {
       selection_end: this.selection_end(state),
       mode,
     }
+  }
+
+  private register_native_text_region(id: string, x: number, y: number, w: number, h: number, mode: ui_native_text_region['mode']): void {
+    const regions = this.input.native_text_regions ?? []
+    regions.push({ id, x, y, w, h, mode })
+    this.input.native_text_regions = regions
   }
 
   private replace_selection(text: string, state: ui_input_text_state, insert: string): string {
