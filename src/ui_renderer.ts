@@ -461,14 +461,6 @@ export class ui_renderer {
   private chinese_font_load: Promise<void> | null = null
   private canvas_width = 1
   private canvas_height = 1
-  // Display-cutout insets in physical pixels (notch, rounded corners, home
-  // indicator). Resolve to 0 on desktop, so the safe rect equals the full
-  // canvas there. See `read_safe_area_insets` / `safe_rect`.
-  private safe_inset_top = 0
-  private safe_inset_right = 0
-  private safe_inset_bottom = 0
-  private safe_inset_left = 0
-  private safe_area_probe: HTMLElement | null = null
   private bind_group_layout: GPUBindGroupLayout | null = null
   private color_panel_bind_group_layout: GPUBindGroupLayout | null = null
   private sampler: GPUSampler | null = null
@@ -623,9 +615,13 @@ export class ui_renderer {
   resize(): void {
     if (!this.device || !this.context || !this.format || !this.screen_buffer) return
     const dpr = window.devicePixelRatio || 1
+    // `clientWidth/clientHeight` already exclude the device safe area: the
+    // canvas element is inset via `env(safe-area-inset-*)` CSS, so its own box
+    // never covers the notch / rounded corners / home indicator. Everything the
+    // renderer reports (canvas_size / safe_rect) is therefore the corrected,
+    // safe drawable surface, and no draw-time clipping is needed.
     this.canvas_width = Math.max(1, Math.floor(this.canvas.clientWidth * dpr))
     this.canvas_height = Math.max(1, Math.floor(this.canvas.clientHeight * dpr))
-    this.read_safe_area_insets(dpr)
     this.canvas.width = this.canvas_width
     this.canvas.height = this.canvas_height
     this.context.configure({ device: this.device, format: this.format, alphaMode: 'opaque' })
@@ -653,7 +649,7 @@ export class ui_renderer {
   begin_frame(): void {
     this.vertex_count = 0
     this.commands = []
-    this.clip_stack = [this.safe_rect()]
+    this.clip_stack = [{ x: 0, y: 0, w: this.canvas_width, h: this.canvas_height }]
     this.current_texture_id = white_texture_id
   }
 
@@ -1278,49 +1274,16 @@ export class ui_renderer {
   }
 
   /**
-   * The drawable region inside the device safe area, in physical pixels.
-   *
-   * On mobile the OS reserves the screen edges for the notch / display cutout,
-   * the rounded corners, and the home indicator. Drawing there gets clipped or
-   * overdrawn by system chrome, so all systems should lay out within this rect
-   * rather than the raw `canvas_size()`. `begin_frame` also seeds the clip
-   * stack with it as a backstop, so anything that slips outside is scissored
-   * away. On desktop the safe-area insets are 0 and this equals the full
-   * canvas.
+   * The safe drawable rect, in physical pixels, that all systems should lay out
+   * within. The canvas element is inset to the device safe area via
+   * `env(safe-area-inset-*)` CSS, so its own box never covers the notch /
+   * rounded corners / home indicator — meaning the corrected canvas *is* the
+   * safe area. Origin is therefore `(0, 0)` and the size matches the canvas.
+   * Exposed as a named rect (with x/y) so layout code can reference the safe
+   * surface explicitly rather than the raw viewport.
    */
   safe_rect(): ui_rect {
-    const x = this.safe_inset_left
-    const y = this.safe_inset_top
-    const w = Math.max(0, this.canvas_width - this.safe_inset_left - this.safe_inset_right)
-    const h = Math.max(0, this.canvas_height - this.safe_inset_top - this.safe_inset_bottom)
-    return { x, y, w, h }
-  }
-
-  /**
-   * Read the `env(safe-area-inset-*)` values and cache them in physical pixels.
-   * The CSS env() values are only exposed to JS via computed style, so we keep
-   * an off-screen probe element whose padding is bound to them and sample it.
-   * Requires `<meta name="viewport" content="...,viewport-fit=cover">` for the
-   * insets to be non-zero on devices with a cutout.
-   */
-  private read_safe_area_insets(dpr: number): void {
-    if (typeof document === 'undefined' || !document.body) return
-    let probe = this.safe_area_probe
-    if (!probe) {
-      probe = document.createElement('div')
-      probe.setAttribute('aria-hidden', 'true')
-      probe.style.cssText =
-        'position:fixed;top:0;left:0;width:0;height:0;visibility:hidden;pointer-events:none;' +
-        'padding-top:env(safe-area-inset-top);padding-right:env(safe-area-inset-right);' +
-        'padding-bottom:env(safe-area-inset-bottom);padding-left:env(safe-area-inset-left);'
-      document.body.appendChild(probe)
-      this.safe_area_probe = probe
-    }
-    const cs = getComputedStyle(probe)
-    this.safe_inset_top = Math.max(0, parseFloat(cs.paddingTop) || 0) * dpr
-    this.safe_inset_right = Math.max(0, parseFloat(cs.paddingRight) || 0) * dpr
-    this.safe_inset_bottom = Math.max(0, parseFloat(cs.paddingBottom) || 0) * dpr
-    this.safe_inset_left = Math.max(0, parseFloat(cs.paddingLeft) || 0) * dpr
+    return { x: 0, y: 0, w: this.canvas_width, h: this.canvas_height }
   }
 
   renderer_stats(): ui_renderer_stats {
