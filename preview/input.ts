@@ -33,22 +33,28 @@ export class input_collector {
     this.ime.autocomplete = 'off'
     this.ime.spellcheck = false
     this.ime.wrap = 'off'
+    this.ime.readOnly = false
     Object.assign(this.ime.style, {
       position: 'fixed',
       left: '0px',
       top: '0px',
-      width: '1px',
-      height: '1px',
-      opacity: '0',
+      width: '24px',
+      height: '24px',
+      opacity: '0.01',
       color: 'transparent',
+      caretColor: 'transparent',
       background: 'transparent',
       border: '0',
       outline: '0',
       padding: '0',
+      margin: '0',
       resize: 'none',
       overflow: 'hidden',
       pointerEvents: 'none',
-      zIndex: '-1',
+      zIndex: '2147483647',
+      fontSize: '16px',
+      lineHeight: '20px',
+      transform: 'translateZ(0)',
     } satisfies Partial<CSSStyleDeclaration>)
     canvas.insertAdjacentElement('afterend', this.ime)
 
@@ -59,7 +65,6 @@ export class input_collector {
       wake()
     })
     canvas.addEventListener('pointerdown', (e) => {
-      canvas.setPointerCapture(e.pointerId)
       const rect = canvas.getBoundingClientRect()
       this.state.mouse_x = (e.clientX - rect.left) * dpr()
       this.state.mouse_y = (e.clientY - rect.top) * dpr()
@@ -67,7 +72,28 @@ export class input_collector {
       this.pressed = true
       const region = this.hit_native_text_region(this.state.mouse_x, this.state.mouse_y)
       if (region) this.focus_native_text_region(region)
+      canvas.setPointerCapture(e.pointerId)
       wake()
+    })
+    canvas.addEventListener(
+      'touchstart',
+      (e) => {
+        const touch = e.changedTouches[0]
+        if (!touch) return
+        const rect = canvas.getBoundingClientRect()
+        const x = (touch.clientX - rect.left) * dpr()
+        const y = (touch.clientY - rect.top) * dpr()
+        const region = this.hit_native_text_region(x, y)
+        if (region) this.focus_native_text_region(region)
+      },
+      { passive: true },
+    )
+    canvas.addEventListener('mousedown', (e) => {
+      const rect = canvas.getBoundingClientRect()
+      const x = (e.clientX - rect.left) * dpr()
+      const y = (e.clientY - rect.top) * dpr()
+      const region = this.hit_native_text_region(x, y)
+      if (region) this.focus_native_text_region(region)
     })
     canvas.addEventListener('pointerup', () => {
       this.state.mouse_down = false
@@ -199,22 +225,17 @@ export class input_collector {
       return
     }
 
-    const scale = window.devicePixelRatio || 1
-    const rect = this.canvas.getBoundingClientRect()
-    this.ime.style.left = `${rect.left + request.x / scale}px`
-    this.ime.style.top = `${rect.top + request.y / scale}px`
-    this.ime.style.width = `${Math.max(1, request.w / scale)}px`
-    this.ime.style.height = `${Math.max(1, request.h / scale)}px`
+    this.position_native_text_region(request)
     this.ime.inputMode = request.mode === 'numeric' ? 'decimal' : 'text'
     this.native_active = true
-    if (document.activeElement !== this.ime) this.ime.focus({ preventScroll: true })
+    if (document.activeElement !== this.ime) this.focus_ime()
   }
 
   private focus_native_text_region(region: ui_native_text_region): void {
     this.position_native_text_region(region)
     this.ime.inputMode = region.mode === 'numeric' ? 'decimal' : 'text'
     this.native_active = true
-    this.ime.focus({ preventScroll: true })
+    this.focus_ime()
   }
 
   private position_native_text_region(region: ui_native_text_region): void {
@@ -224,6 +245,20 @@ export class input_collector {
     this.ime.style.top = `${rect.top + region.y / scale}px`
     this.ime.style.width = `${Math.max(1, region.w / scale)}px`
     this.ime.style.height = `${Math.max(1, region.h / scale)}px`
+  }
+
+  private focus_ime(): void {
+    try {
+      this.ime.focus({ preventScroll: true })
+    } catch {
+      this.ime.focus()
+    }
+    try {
+      const end = this.ime.value.length
+      this.ime.setSelectionRange(end, end)
+    } catch {
+      /* Some mobile browsers restrict selection on hidden-ish controls. */
+    }
   }
 
   private hit_native_text_region(x: number, y: number): ui_native_text_region | null {
