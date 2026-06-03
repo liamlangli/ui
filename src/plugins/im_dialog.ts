@@ -267,7 +267,7 @@ function render_bubble(
     const ax = list_x + list_w - pad - avatar_d
     const bx = ax - gap - item.bubble_w
     // Avatar
-    ui.fill_circle(ax + avatar_r, bubble_top + avatar_r, avatar_r, avatar_color_for(item.msg))
+    ui.fill_circle(ax + avatar_r, bubble_top + avatar_r, avatar_r, avatar_color_for(item.msg), 1)
     draw_avatar_glyph(ui, item.msg, ax + avatar_r, bubble_top + avatar_r, avatar_r, font_px)
     // Meta (timestamp) right-aligned over the bubble
     if (item.has_meta) {
@@ -283,7 +283,7 @@ function render_bubble(
   } else {
     const ax = list_x + pad
     const bx = ax + avatar_d + gap
-    ui.fill_circle(ax + avatar_r, bubble_top + avatar_r, avatar_r, avatar_color_for(item.msg))
+    ui.fill_circle(ax + avatar_r, bubble_top + avatar_r, avatar_r, avatar_color_for(item.msg), 1)
     draw_avatar_glyph(ui, item.msg, ax + avatar_r, bubble_top + avatar_r, avatar_r, font_px)
     if (item.has_meta) {
       const author = item.msg.author ?? ''

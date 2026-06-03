@@ -154,7 +154,7 @@ export function text_view_selected_text(lines: ui_text_view_line[], state: ui_te
   return parts.join('\n')
 }
 
-const w_font_px = 15
+const w_font_px = 12
 const w_row_h = 28
 const w_radius = 3
 const w_scrollbar_w = 7
@@ -289,7 +289,7 @@ export class ui_widgets {
     const border = active ? this.color('accent') : this.color('border_strong')
     this.ui.fill_rect(x, y, w, h, bg)
     this.ui.stroke_rect(x, y, w, h, 1, border)
-    const font_px = w_font_px * scale / 2
+    const font_px = w_font_px * scale
     const text_w = this.ui.text_width(label, font_px)
     this.ui.draw_text(x + Math.max(0, (w - text_w) * 0.5), this.ui.text_v_center_y(y, h, font_px), label, font_px, this.color('text'))
     return hover && this.input.mouse_pressed
@@ -405,10 +405,10 @@ export class ui_widgets {
     const label = options?.display_label ?? items[effective_selected] ?? 'Select...'
     const arrow_reserve = options?.show_arrow === false ? 0 : 18 * scale
     this.ui.push_clip(x + 1, y + 1, Math.max(0, w - 2 - arrow_reserve), Math.max(0, h - 2))
-    this.ui.draw_text(x + w_pad * scale, this.ui.text_v_center_y(y, h, w_font_px * scale / 2), label, w_font_px * scale / 2, items[selected] ? this.color('text') : this.color('text_dim'))
+    this.ui.draw_text(x + w_pad * scale, this.ui.text_v_center_y(y, h, w_font_px * scale), label, w_font_px * scale, items[selected] ? this.color('text') : this.color('text_dim'))
     this.ui.pop_clip()
     if (options?.show_arrow !== false) {
-      this.ui.draw_text(x + w - 14 * scale, this.ui.text_v_center_y(y, h, w_font_px * scale / 2), 'v', w_font_px * scale / 2, this.color('text_dim'))
+      this.ui.draw_text(x + w - 14 * scale, this.ui.text_v_center_y(y, h, w_font_px * scale), 'v', w_font_px * scale, this.color('text_dim'))
     }
     const ref = { value: effective_selected }
     if (this.open_dropdown_id === id) {
@@ -580,13 +580,13 @@ export class ui_widgets {
     if (focused && value && this.has_selection(state)) {
       const start = this.selection_start(state)
       const end = this.selection_end(state)
-      const sx = text_x + this.ui.text_width(value.slice(0, start), w_font_px * scale / 2)
-      const ex = text_x + this.ui.text_width(value.slice(0, end), w_font_px * scale / 2)
+      const sx = text_x + this.ui.text_width(value.slice(0, start), w_font_px * scale)
+      const ex = text_x + this.ui.text_width(value.slice(0, end), w_font_px * scale)
       this.ui.fill_rect(sx, y + 5 * scale, Math.max(1, ex - sx), Math.max(10 * scale, h - 10 * scale), this.color('selected'))
     }
-    this.ui.draw_text(text_x, this.ui.text_v_center_y(y, h, w_font_px * scale / 2), draw_text, w_font_px * scale / 2, draw_color)
+    this.ui.draw_text(text_x, this.ui.text_v_center_y(y, h, w_font_px * scale), draw_text, w_font_px * scale, draw_color)
     if (focused) {
-      const cursor_x = text_x + this.ui.text_width(value.slice(0, state.cursor), w_font_px * scale / 2)
+      const cursor_x = text_x + this.ui.text_width(value.slice(0, state.cursor), w_font_px * scale)
       this.ui.fill_rect(cursor_x, y + 6 * scale, 1.5 * scale, Math.max(10 * scale, h - 12 * scale), this.color('accent'))
     }
     this.ui.pop_clip()
@@ -700,13 +700,13 @@ export class ui_widgets {
     if (focused && text && this.has_selection(state)) {
       const start = this.selection_start(state)
       const end = this.selection_end(state)
-      const sx = text_x + this.ui.text_width(text.slice(0, start), w_font_px * scale / 2)
-      const ex = text_x + this.ui.text_width(text.slice(0, end), w_font_px * scale / 2)
+      const sx = text_x + this.ui.text_width(text.slice(0, start), w_font_px * scale)
+      const ex = text_x + this.ui.text_width(text.slice(0, end), w_font_px * scale)
       this.ui.fill_rect(sx, y + 5 * scale, Math.max(1, ex - sx), Math.max(10 * scale, h - 10 * scale), this.color('selected'))
     }
-    this.ui.draw_text(text_x, this.ui.text_v_center_y(y, h, w_font_px * scale / 2), text, w_font_px * scale / 2, this.color('text'))
+    this.ui.draw_text(text_x, this.ui.text_v_center_y(y, h, w_font_px * scale), text, w_font_px * scale, this.color('text'))
     if (focused) {
-      const cursor_x = text_x + this.ui.text_width(text.slice(0, state.cursor), w_font_px * scale / 2)
+      const cursor_x = text_x + this.ui.text_width(text.slice(0, state.cursor), w_font_px * scale)
       this.ui.fill_rect(cursor_x, y + 6 * scale, 1.5 * scale, Math.max(10 * scale, h - 12 * scale), this.color('accent'))
     }
     this.ui.pop_clip()
@@ -759,7 +759,7 @@ export class ui_widgets {
     this.ui.stroke_rect(x + 2 * scale, y + 2 * scale, swatch_w, Math.max(0, h - 4 * scale), 1, this.color('border_strong'))
     const label = options?.label ?? 'Color'
     const text_x = x + swatch_w + 8 * scale
-    this.ui.draw_text(text_x, this.ui.text_v_center_y(y, h, w_font_px * scale / 2), label, w_font_px * scale / 2, this.color('text'))
+    this.ui.draw_text(text_x, this.ui.text_v_center_y(y, h, w_font_px * scale), label, w_font_px * scale, this.color('text'))
 
     if (open) {
       this.pending_color_picker = {
@@ -1068,7 +1068,7 @@ export class ui_widgets {
       const sel = popup.selected_ref.value === i
       const bg = sel ? this.color('selected') : hover ? this.color('hover') : 0
       if (bg) this.ui.fill_rect(px + popup_pad, row_y, placement.w - popup_pad * 2, w_popup_item_h * scale, bg)
-      this.ui.draw_text(px + w_pad * scale, this.ui.text_v_center_y(row_y, w_popup_item_h * scale, w_font_px * scale / 2), popup.items[i], w_font_px * scale / 2, sel ? this.color('text') : this.color('text_dim'))
+      this.ui.draw_text(px + w_pad * scale, this.ui.text_v_center_y(row_y, w_popup_item_h * scale, w_font_px * scale), popup.items[i], w_font_px * scale, sel ? this.color('text') : this.color('text_dim'))
       if (hover && this.input.mouse_released) {
         popup.selected_ref.value = i
         this.dropdown_selections.set(popup.id, i)
@@ -1217,7 +1217,7 @@ export class ui_widgets {
     const scale = window.devicePixelRatio || 1
     let max_text_w = 0
     for (const item of items) {
-      max_text_w = Math.max(max_text_w, this.ui.text_width(item, w_font_px * scale / 2))
+      max_text_w = Math.max(max_text_w, this.ui.text_width(item, w_font_px * scale))
     }
     const horizontal_pad = w_pad * scale * 2
     const arrow_pad = 18 * scale
@@ -1251,7 +1251,7 @@ export class ui_widgets {
     if (!text.length) return 0
     let prev_w = 0
     for (let index = 0; index < text.length; index += 1) {
-      const next_w = this.ui.text_width(text.slice(0, index + 1), w_font_px * scale / 2)
+      const next_w = this.ui.text_width(text.slice(0, index + 1), w_font_px * scale)
       const mid_x = text_x + (prev_w + next_w) * 0.5
       if (mouse_x < mid_x) return index
       prev_w = next_w

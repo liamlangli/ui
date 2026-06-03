@@ -80,7 +80,11 @@ type data_texture = {
 }
 
 const vertex_stride = 20
-const default_font_scale = 1.5
+const default_font_scale = 1
+const default_round_rect_feather = 1
+const circle_min_sector_count = 12
+const circle_max_sector_count = 96
+const circle_curve_error_px = 0.125
 const latin_mono_font_texture_id = 0
 const white_texture_id = 1
 const cjk_font_texture_id = 2
@@ -359,6 +363,27 @@ function compact_closed_polyline_points(points: Float32Array, n: number): number
   return write
 }
 
+function transparent_color(color: number): number {
+  return color & 0x00ffffff
+}
+
+function expand_point_from_center(x: number, y: number, cx: number, cy: number, distance: number): { x: number; y: number } {
+  const dx = x - cx
+  const dy = y - cy
+  const len = Math.hypot(dx, dy)
+  if (len <= 0.0001) return { x, y }
+  return { x: x + (dx / len) * distance, y: y + (dy / len) * distance }
+}
+
+function circle_sector_count(radius: number): number {
+  const r = Math.max(0, radius)
+  if (r <= 0) return 0
+  const error = Math.min(circle_curve_error_px, r)
+  const sector_angle = 2 * Math.acos(Math.max(-1, Math.min(1, 1 - error / r)))
+  const sectors = sector_angle > 0 ? Math.ceil((Math.PI * 2) / sector_angle) : circle_max_sector_count
+  return Math.min(circle_max_sector_count, Math.max(circle_min_sector_count, sectors))
+}
+
 export class ui_renderer {
   private device: GPUDevice | null = null
   private context: GPUCanvasContext | null = null
@@ -393,6 +418,8 @@ export class ui_renderer {
   private readonly round_rect_points = new Float32Array(rr_points * 2)
   private readonly round_rect_outer = new Float32Array(rr_points * 2)
   private readonly round_rect_inner = new Float32Array(rr_points * 2)
+  private readonly round_rect_feather_outer = new Float32Array(rr_points * 2)
+  private readonly round_rect_feather_inner = new Float32Array(rr_points * 2)
 
   constructor(private readonly canvas: HTMLCanvasElement) {}
 
@@ -732,20 +759,37 @@ export class ui_renderer {
     if (this.clip_stack.length > 1) this.clip_stack.pop()
   }
 
-  fill_rect(x: number, y: number, w: number, h: number, rgba: number): void {
+  set_cursor(cursor: string | null): void {
+    this.canvas.style.cursor = cursor ?? ''
+  }
+
+  fill_rect(x: number, y: number, w: number, h: number, rgba: number, feather = 0): void {
     if (w <= 0 || h <= 0) return
     this.current_texture_id = white_texture_id
-    this.push_quad(x, y, x + w, y + h, this.white_u(), this.white_v(), this.white_u(), this.white_v(), rgba)
+    const u = this.white_u()
+    const v = this.white_v()
+    this.push_quad(x, y, x + w, y + h, u, v, u, v, rgba)
+    const f = Math.max(0, feather)
+    if (f <= 0) return
+    const transparent = transparent_color(rgba)
+    this.push_quad_colored(x, y - f, x + w, y, u, v, u, v, transparent, transparent, rgba, rgba)
+    this.push_quad_colored(x, y + h, x + w, y + h + f, u, v, u, v, rgba, rgba, transparent, transparent)
+    this.push_quad_colored(x - f, y, x, y + h, u, v, u, v, transparent, rgba, rgba, transparent)
+    this.push_quad_colored(x + w, y, x + w + f, y + h, u, v, u, v, rgba, transparent, transparent, rgba)
+    this.push_quad_colored(x - f, y - f, x, y, u, v, u, v, transparent, transparent, rgba, transparent)
+    this.push_quad_colored(x + w, y - f, x + w + f, y, u, v, u, v, transparent, transparent, transparent, rgba)
+    this.push_quad_colored(x - f, y + h, x, y + h + f, u, v, u, v, transparent, rgba, transparent, transparent)
+    this.push_quad_colored(x + w, y + h, x + w + f, y + h + f, u, v, u, v, rgba, transparent, transparent, transparent)
   }
 
-  fill_round_rect(x: number, y: number, w: number, h: number, radius: number, rgba: number): void {
-    this.fill_round_rect_per_corner(x, y, w, h, radius, radius, radius, radius, rgba)
+  fill_round_rect(x: number, y: number, w: number, h: number, radius: number, rgba: number, feather = default_round_rect_feather): void {
+    this.fill_round_rect_per_corner(x, y, w, h, radius, radius, radius, radius, rgba, feather)
   }
 
-  fill_round_rect_per_corner(x: number, y: number, w: number, h: number, rtl: number, rtr: number, rbl: number, rbr: number, rgba: number): void {
+  fill_round_rect_per_corner(x: number, y: number, w: number, h: number, rtl: number, rtr: number, rbl: number, rbr: number, rgba: number, feather = default_round_rect_feather): void {
     if (w <= 0 || h <= 0) return
     if (rtl <= 0 && rtr <= 0 && rbl <= 0 && rbr <= 0) {
-      this.fill_rect(x, y, w, h, rgba)
+      this.fill_rect(x, y, w, h, rgba, feather)
       return
     }
     const pts = this.round_rect_points
@@ -759,35 +803,49 @@ export class ui_renderer {
     for (let i = 1; i < n - 1; i += 1) {
       this.push_tri(x0, y0, pts[i * 2], pts[i * 2 + 1], pts[(i + 1) * 2], pts[(i + 1) * 2 + 1], u, v, rgba)
     }
+    const f = Math.max(0, feather)
+    if (f > 0) this.push_closed_polyline_fill_feather(pts, n, f, rgba, this.round_rect_outer)
   }
 
-  stroke_round_rect(x: number, y: number, w: number, h: number, radius: number, thickness: number, rgba: number): void {
-    this.stroke_round_rect_per_corner(x, y, w, h, radius, radius, radius, radius, thickness, rgba)
+  stroke_round_rect(x: number, y: number, w: number, h: number, radius: number, thickness: number, rgba: number, feather = default_round_rect_feather): void {
+    this.stroke_round_rect_per_corner(x, y, w, h, radius, radius, radius, radius, thickness, rgba, feather)
   }
 
-  stroke_round_rect_per_corner(x: number, y: number, w: number, h: number, rtl: number, rtr: number, rbl: number, rbr: number, thickness: number, rgba: number): void {
+  stroke_round_rect_per_corner(x: number, y: number, w: number, h: number, rtl: number, rtr: number, rbl: number, rbr: number, thickness: number, rgba: number, feather = default_round_rect_feather): void {
     if (w <= 0 || h <= 0 || thickness <= 0) return
     if (rtl <= 0 && rtr <= 0 && rbl <= 0 && rbr <= 0) {
-      this.stroke_rect(x, y, w, h, thickness, rgba)
+      this.stroke_rect(x, y, w, h, thickness, rgba, feather)
       return
     }
     const pts = this.round_rect_points
     const n = compact_closed_polyline_points(pts, build_round_rect_points(pts, x, y, w, h, rtl, rtr, rbl, rbr))
     if (n < 2) return
     this.current_texture_id = white_texture_id
-    this.push_closed_polyline_stroke(pts, n, Math.max(1, thickness), rgba, this.round_rect_outer, this.round_rect_inner)
+    this.push_closed_polyline_stroke(pts, n, Math.max(1, thickness), rgba, this.round_rect_outer, this.round_rect_inner, Math.max(0, feather), this.round_rect_feather_outer, this.round_rect_feather_inner)
   }
 
-  fill_triangle(x0: number, y0: number, x1: number, y1: number, x2: number, y2: number, rgba: number): void {
+  fill_triangle(x0: number, y0: number, x1: number, y1: number, x2: number, y2: number, rgba: number, feather = 0): void {
     this.current_texture_id = white_texture_id
     const u = this.white_u()
     const v = this.white_v()
     this.push_tri(x0, y0, x1, y1, x2, y2, u, v, rgba)
+    const f = Math.max(0, feather)
+    if (f <= 0) return
+    const cx = (x0 + x1 + x2) / 3
+    const cy = (y0 + y1 + y2) / 3
+    const e0 = expand_point_from_center(x0, y0, cx, cy, f)
+    const e1 = expand_point_from_center(x1, y1, cx, cy, f)
+    const e2 = expand_point_from_center(x2, y2, cx, cy, f)
+    const transparent = transparent_color(rgba)
+    this.push_quad_points_colored(x0, y0, x1, y1, e1.x, e1.y, e0.x, e0.y, u, v, rgba, rgba, transparent, transparent)
+    this.push_quad_points_colored(x1, y1, x2, y2, e2.x, e2.y, e1.x, e1.y, u, v, rgba, rgba, transparent, transparent)
+    this.push_quad_points_colored(x2, y2, x0, y0, e0.x, e0.y, e2.x, e2.y, u, v, rgba, rgba, transparent, transparent)
   }
 
-  fill_circle(cx: number, cy: number, radius: number, rgba: number): void {
+  fill_circle(cx: number, cy: number, radius: number, rgba: number, feather = 1): void {
     if (radius <= 0) return
-    const steps = Math.max(12, Math.ceil(radius * 0.75))
+    const f = Math.max(0, feather)
+    const steps = circle_sector_count(radius + f)
     this.current_texture_id = white_texture_id
     const u = this.white_u()
     const v = this.white_v()
@@ -801,22 +859,44 @@ export class ui_renderer {
       prev_x = x
       prev_y = y
     }
+    if (f <= 0) return
+    const transparent = transparent_color(rgba)
+    let inner_prev_x = cx + radius
+    let inner_prev_y = cy
+    let outer_prev_x = cx + radius + f
+    let outer_prev_y = cy
+    for (let i = 1; i <= steps; i += 1) {
+      const a = (i / steps) * Math.PI * 2
+      const ca = Math.cos(a)
+      const sa = Math.sin(a)
+      const inner_x = cx + ca * radius
+      const inner_y = cy + sa * radius
+      const outer_x = cx + ca * (radius + f)
+      const outer_y = cy + sa * (radius + f)
+      this.push_quad_points_colored(inner_prev_x, inner_prev_y, inner_x, inner_y, outer_x, outer_y, outer_prev_x, outer_prev_y, u, v, rgba, rgba, transparent, transparent)
+      inner_prev_x = inner_x
+      inner_prev_y = inner_y
+      outer_prev_x = outer_x
+      outer_prev_y = outer_y
+    }
   }
 
-  stroke_rect(x: number, y: number, w: number, h: number, thickness: number, rgba: number): void {
+  stroke_rect(x: number, y: number, w: number, h: number, thickness: number, rgba: number, feather = 0): void {
     const t = Math.max(1, thickness)
-    this.fill_rect(x, y, w, t, rgba)
-    this.fill_rect(x, y + h - t, w, t, rgba)
-    this.fill_rect(x, y, t, h, rgba)
-    this.fill_rect(x + w - t, y, t, h, rgba)
+    this.fill_rect(x, y, w, t, rgba, feather)
+    this.fill_rect(x, y + h - t, w, t, rgba, feather)
+    this.fill_rect(x, y, t, h, rgba, feather)
+    this.fill_rect(x + w - t, y, t, h, rgba, feather)
   }
 
-  stroke_line(x0: number, y0: number, x1: number, y1: number, thickness: number, rgba: number): void {
+  stroke_line(x0: number, y0: number, x1: number, y1: number, thickness: number, rgba: number, feather = 0): void {
     const dx = x1 - x0
     const dy = y1 - y0
     const len = Math.hypot(dx, dy)
     if (len <= 0.0001) return
     const t = Math.max(1, thickness)
+    const ux = dx / len
+    const uy = dy / len
     const nx = -dy / len
     const ny = dx / len
     const hx = nx * (t * 0.5)
@@ -826,6 +906,15 @@ export class ui_renderer {
     const v = this.white_v()
     this.push_tri(x0 - hx, y0 - hy, x1 - hx, y1 - hy, x0 + hx, y0 + hy, u, v, rgba)
     this.push_tri(x0 + hx, y0 + hy, x1 - hx, y1 - hy, x1 + hx, y1 + hy, u, v, rgba)
+    const f = Math.max(0, feather)
+    if (f <= 0) return
+    const transparent = transparent_color(rgba)
+    const ox = nx * (t * 0.5 + f)
+    const oy = ny * (t * 0.5 + f)
+    this.push_quad_points_colored(x0 - hx, y0 - hy, x1 - hx, y1 - hy, x1 - ox, y1 - oy, x0 - ox, y0 - oy, u, v, rgba, rgba, transparent, transparent)
+    this.push_quad_points_colored(x1 + hx, y1 + hy, x0 + hx, y0 + hy, x0 + ox, y0 + oy, x1 + ox, y1 + oy, u, v, rgba, rgba, transparent, transparent)
+    this.push_quad_points_colored(x0 + hx, y0 + hy, x0 - hx, y0 - hy, x0 - hx - ux * f, y0 - hy - uy * f, x0 + hx - ux * f, y0 + hy - uy * f, u, v, rgba, rgba, transparent, transparent)
+    this.push_quad_points_colored(x1 - hx, y1 - hy, x1 + hx, y1 + hy, x1 + hx + ux * f, y1 + hy + uy * f, x1 - hx + ux * f, y1 - hy + uy * f, u, v, rgba, rgba, transparent, transparent)
   }
 
   draw_text(x: number, y: number, text: string, font_px: number, rgba: number, font_type: ui_font_primitive = FONT_MAIN): void {
@@ -1086,23 +1175,57 @@ export class ui_renderer {
     return { device: this.device, context: this.context, format: this.format }
   }
 
-  private push_closed_polyline_stroke(points: Float32Array, n: number, thickness: number, color: number, outer: Float32Array, inner: Float32Array): void {
-    if (n < 2) return
-    let area = 0
+  private push_closed_polyline_fill_feather(points: Float32Array, n: number, feather: number, color: number, outer: Float32Array): void {
+    if (n < 2 || feather <= 0) return
+    const normal_sign = this.closed_polyline_normal_sign(points, n)
+    for (let i = 0; i < n; i += 1) {
+      this.write_closed_polyline_stroke_offset_vertex(points, n, normal_sign, i, feather, outer)
+    }
+
+    const u = this.white_u()
+    const v = this.white_v()
+    const transparent = transparent_color(color)
     for (let i = 0; i < n; i += 1) {
       const j = (i + 1) % n
-      area += (points[i * 2 + 0] ?? 0) * (points[j * 2 + 1] ?? 0) - (points[j * 2 + 0] ?? 0) * (points[i * 2 + 1] ?? 0)
+      const ix0 = points[i * 2 + 0] ?? 0
+      const iy0 = points[i * 2 + 1] ?? 0
+      const ix1 = points[j * 2 + 0] ?? 0
+      const iy1 = points[j * 2 + 1] ?? 0
+      const ox0 = outer[i * 2 + 0] ?? 0
+      const oy0 = outer[i * 2 + 1] ?? 0
+      const ox1 = outer[j * 2 + 0] ?? 0
+      const oy1 = outer[j * 2 + 1] ?? 0
+      this.push_quad_points_colored(ix0, iy0, ix1, iy1, ox1, oy1, ox0, oy0, u, v, color, color, transparent, transparent)
     }
-    const normal_sign = area >= 0 ? 1 : -1
+  }
+
+  private push_closed_polyline_stroke(
+    points: Float32Array,
+    n: number,
+    thickness: number,
+    color: number,
+    outer: Float32Array,
+    inner: Float32Array,
+    feather = 0,
+    feather_outer?: Float32Array,
+    feather_inner?: Float32Array,
+  ): void {
+    if (n < 2) return
+    const normal_sign = this.closed_polyline_normal_sign(points, n)
     const half = thickness * 0.5
 
     for (let i = 0; i < n; i += 1) {
       this.write_closed_polyline_stroke_offset_vertex(points, n, normal_sign, i, half, outer)
       this.write_closed_polyline_stroke_offset_vertex(points, n, normal_sign, i, -half, inner)
+      if (feather > 0 && feather_outer && feather_inner) {
+        this.write_closed_polyline_stroke_offset_vertex(points, n, normal_sign, i, half + feather, feather_outer)
+        this.write_closed_polyline_stroke_offset_vertex(points, n, normal_sign, i, -half - feather, feather_inner)
+      }
     }
 
     const u = this.white_u()
     const v = this.white_v()
+    const transparent = transparent_color(color)
     for (let i = 0; i < n; i += 1) {
       const j = (i + 1) % n
       const ox0 = outer[i * 2 + 0] ?? 0
@@ -1115,7 +1238,28 @@ export class ui_renderer {
       const iy1 = inner[j * 2 + 1] ?? 0
       this.push_tri(ox0, oy0, ox1, oy1, ix0, iy0, u, v, color)
       this.push_tri(ix0, iy0, ox1, oy1, ix1, iy1, u, v, color)
+      if (feather > 0 && feather_outer && feather_inner) {
+        const fox0 = feather_outer[i * 2 + 0] ?? 0
+        const foy0 = feather_outer[i * 2 + 1] ?? 0
+        const fox1 = feather_outer[j * 2 + 0] ?? 0
+        const foy1 = feather_outer[j * 2 + 1] ?? 0
+        const fix0 = feather_inner[i * 2 + 0] ?? 0
+        const fiy0 = feather_inner[i * 2 + 1] ?? 0
+        const fix1 = feather_inner[j * 2 + 0] ?? 0
+        const fiy1 = feather_inner[j * 2 + 1] ?? 0
+        this.push_quad_points_colored(ox0, oy0, ox1, oy1, fox1, foy1, fox0, foy0, u, v, color, color, transparent, transparent)
+        this.push_quad_points_colored(ix1, iy1, ix0, iy0, fix0, fiy0, fix1, fiy1, u, v, color, color, transparent, transparent)
+      }
     }
+  }
+
+  private closed_polyline_normal_sign(points: Float32Array, n: number): number {
+    let area = 0
+    for (let i = 0; i < n; i += 1) {
+      const j = (i + 1) % n
+      area += (points[i * 2 + 0] ?? 0) * (points[j * 2 + 1] ?? 0) - (points[j * 2 + 0] ?? 0) * (points[i * 2 + 1] ?? 0)
+    }
+    return area >= 0 ? 1 : -1
   }
 
   private write_closed_polyline_stroke_offset_vertex(points: Float32Array, n: number, normal_sign: number, i: number, distance: number, out: Float32Array): void {
@@ -1187,6 +1331,73 @@ export class ui_renderer {
     this.view.setFloat32(offset + 12, v, true)
     this.view.setUint32(offset + 16, color, true)
     this.vertex_count += 1
+  }
+
+  private push_quad_colored(
+    x0: number,
+    y0: number,
+    x1: number,
+    y1: number,
+    u0: number,
+    v0: number,
+    u1: number,
+    v1: number,
+    c00: number,
+    c10: number,
+    c11: number,
+    c01: number,
+  ): void {
+    this.push_quad_points_colored(x0, y0, x1, y0, x1, y1, x0, y1, u0, v0, c00, c10, c11, c01, u1, v1)
+  }
+
+  private push_quad_points_colored(
+    x0: number,
+    y0: number,
+    x1: number,
+    y1: number,
+    x2: number,
+    y2: number,
+    x3: number,
+    y3: number,
+    u: number,
+    v: number,
+    c0: number,
+    c1: number,
+    c2: number,
+    c3: number,
+    u1 = u,
+    v1 = v,
+  ): void {
+    this.push_tri_colored(x0, y0, x1, y1, x2, y2, u, v, c0, c1, c2)
+    this.push_tri_colored(x0, y0, x2, y2, x3, y3, u, v, c0, c2, c3, u1, v1)
+  }
+
+  private push_tri_colored(
+    x0: number,
+    y0: number,
+    x1: number,
+    y1: number,
+    x2: number,
+    y2: number,
+    u: number,
+    v: number,
+    c0: number,
+    c1: number,
+    c2: number,
+    u1 = u,
+    v1 = v,
+  ): void {
+    const clip = this.current_clip()
+    const min_x = Math.min(x0, x1, x2)
+    const min_y = Math.min(y0, y1, y2)
+    const max_x = Math.max(x0, x1, x2)
+    const max_y = Math.max(y0, y1, y2)
+    if (max_x <= clip.x || max_y <= clip.y || min_x >= clip.x + clip.w || min_y >= clip.y + clip.h) return
+    const base = this.vertex_count
+    this.push_vertex(x0, y0, u, v, c0)
+    this.push_vertex(x1, y1, u1, v, c1)
+    this.push_vertex(x2, y2, u1, v1, c2)
+    this.emit_command(base, 3)
   }
 
   private push_quad(x0: number, y0: number, x1: number, y1: number, u0: number, v0: number, u1: number, v1: number, color: number): void {

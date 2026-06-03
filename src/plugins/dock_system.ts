@@ -111,6 +111,7 @@ export class dock_system {
 
     const frame = compute_dock_frame(this.layout.root, x, y, w, h, scale)
     const col = (slot: Parameters<typeof theme_color>[1]) => pack(theme_color(theme, slot))
+    let cursor_split_axis: 'horizontal' | 'vertical' | null = null
 
     // --- Splitter resize ---------------------------------------------------
     if (!input.mouse_down) {
@@ -119,6 +120,7 @@ export class dock_system {
     if (this.dragging_split_id) {
       const split = frame.splits.find((s) => s.split_id === this.dragging_split_id)
       if (split) {
+        cursor_split_axis = split.axis
         const ratio =
           split.axis === 'horizontal'
             ? (input.mouse_x - split.parent_x - this.split_grab_offset) / Math.max(1, split.parent_w)
@@ -129,12 +131,17 @@ export class dock_system {
       for (const split of frame.splits) {
         if (point_in(input, split.x, split.y, split.w, split.h)) {
           this.dragging_split_id = split.split_id
+          cursor_split_axis = split.axis
           this.split_grab_offset =
             split.axis === 'horizontal' ? input.mouse_x - split.x : input.mouse_y - split.y
           break
         }
       }
     }
+    if (!cursor_split_axis && !this.drag.active) {
+      cursor_split_axis = frame.splits.find((split) => point_in(input, split.x, split.y, split.w, split.h))?.axis ?? null
+    }
+    ui.set_cursor(cursor_split_axis === 'horizontal' ? 'col-resize' : cursor_split_axis === 'vertical' ? 'row-resize' : null)
 
     // --- Panels ------------------------------------------------------------
     for (const leaf of frame.leaves) {
