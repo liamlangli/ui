@@ -1138,54 +1138,62 @@ export class ui_renderer {
 
   flush(clear_color: GPUColorDict): void {
     if (!this.device || !this.context || !this.pipeline_image || !this.pipeline_sdf || !this.bind_group_white) return
-    const byte_length = Math.max(this.vertex_count * vertex_stride, vertex_stride)
-    if (this.render_mode_ === 'adaptive' && this.pending_render_frames <= 0) {
-      this.last_frame_stats = this.capture_stats(this.vertex_buffer?.size ?? byte_length)
-      return
-    }
-    if (this.render_mode_ === 'adaptive') this.pending_render_frames -= 1
-    if (!this.vertex_buffer || this.vertex_buffer.size < byte_length) {
-      let next_size = Math.max(this.vertex_buffer?.size ?? 0, 4096)
-      while (next_size < byte_length) next_size *= 2
-      this.vertex_buffer?.destroy()
-      this.vertex_buffer = this.device.createBuffer({
-        label: 'ui.vertex_buffer',
-        size: next_size,
-        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-      })
-    }
-    this.last_frame_stats = this.capture_stats(byte_length)
-    this.device.queue.writeBuffer(this.vertex_buffer, 0, this.vertex_data, 0, this.vertex_count * vertex_stride)
-    const encoder = this.device.createCommandEncoder({ label: 'ui.command_encoder' })
-    const pass = encoder.beginRenderPass({
-      label: 'ui.render_pass',
-      colorAttachments: [
-        {
-          view: this.context.getCurrentTexture().createView({ label: 'ui.swapchain_view' }),
-          clearValue: clear_color,
-          loadOp: 'clear',
-          storeOp: 'store',
-        },
-      ],
-    })
-    pass.setVertexBuffer(0, this.vertex_buffer)
-    for (const cmd of this.commands) {
-      if (cmd.clip_w <= 0 || cmd.clip_h <= 0) continue
-      pass.setScissorRect(cmd.clip_x, cmd.clip_y, cmd.clip_w, cmd.clip_h)
-      const font_bind_group = this.font_bind_groups.get(cmd.texture_id)
-      const bind_group = font_bind_group ?? (cmd.texture_id === white_texture_id ? this.bind_group_white : this.extra_bind_groups.get(cmd.texture_id))
-      if (!bind_group) continue
-      if (font_bind_group) {
-        pass.setPipeline(this.pipeline_sdf)
-        pass.setBindGroup(0, bind_group)
-      } else {
-        pass.setPipeline(this.pipeline_image)
-        pass.setBindGroup(0, bind_group)
+    const vertex_byte_length = this.vertex_count * vertex_stride
+    const byte_length = Math.max(vertex_byte_length, vertex_stride)
+    const should_render = this.render_mode_ !== 'adaptive' || this.pending_render_frames > 0
+    if (should_render) {
+      if (this.render_mode_ === 'adaptive') this.pending_render_frames -= 1
+      // Grow the GPU vertex buffer only here, right before we render. The CPU
+      // side buffer is grown per primitive during the frame, never per vertex.
+      if (!this.vertex_buffer || this.vertex_buffer.size < byte_length) {
+        let next_size = Math.max(this.vertex_buffer?.size ?? 0, 4096)
+        while (next_size < byte_length) next_size *= 2
+        this.vertex_buffer?.destroy()
+        this.vertex_buffer = this.device.createBuffer({
+          label: 'ui.vertex_buffer',
+          size: next_size,
+          usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+        })
       }
-      pass.draw(cmd.vertex_count, 1, cmd.vertex_offset)
+      this.last_frame_stats = this.capture_stats(byte_length)
+      this.device.queue.writeBuffer(this.vertex_buffer, 0, this.vertex_data, 0, vertex_byte_length)
+      const encoder = this.device.createCommandEncoder({ label: 'ui.command_encoder' })
+      const pass = encoder.beginRenderPass({
+        label: 'ui.render_pass',
+        colorAttachments: [
+          {
+            view: this.context.getCurrentTexture().createView({ label: 'ui.swapchain_view' }),
+            clearValue: clear_color,
+            loadOp: 'clear',
+            storeOp: 'store',
+          },
+        ],
+      })
+      pass.setVertexBuffer(0, this.vertex_buffer)
+      for (const cmd of this.commands) {
+        if (cmd.clip_w <= 0 || cmd.clip_h <= 0) continue
+        pass.setScissorRect(cmd.clip_x, cmd.clip_y, cmd.clip_w, cmd.clip_h)
+        const font_bind_group = this.font_bind_groups.get(cmd.texture_id)
+        const bind_group = font_bind_group ?? (cmd.texture_id === white_texture_id ? this.bind_group_white : this.extra_bind_groups.get(cmd.texture_id))
+        if (!bind_group) continue
+        if (font_bind_group) {
+          pass.setPipeline(this.pipeline_sdf)
+          pass.setBindGroup(0, bind_group)
+        } else {
+          pass.setPipeline(this.pipeline_image)
+          pass.setBindGroup(0, bind_group)
+        }
+        pass.draw(cmd.vertex_count, 1, cmd.vertex_offset)
+      }
+      pass.end()
+      this.device.queue.submit([encoder.finish()])
+    } else {
+      this.last_frame_stats = this.capture_stats(this.vertex_buffer?.size ?? byte_length)
     }
-    pass.end()
-    this.device.queue.submit([encoder.finish()])
+    // Reset the frame buffers regardless of whether we rendered, so a skipped
+    // frame never leaves stale geometry behind for the next one.
+    this.vertex_count = 0
+    this.commands = []
   }
 
   private create_placeholder_font_bind_group(label: string, sampler: GPUSampler, layout: GPUBindGroupLayout): GPUBindGroup {
@@ -1425,7 +1433,6 @@ export class ui_renderer {
   }
 
   private push_vertex(x: number, y: number, u: number, v: number, color: number): void {
-    this.ensure_vertices(1)
     const offset = this.vertex_count * vertex_stride
     this.view.setFloat32(offset + 0, x, true)
     this.view.setFloat32(offset + 4, y, true)
@@ -1495,6 +1502,7 @@ export class ui_renderer {
     const max_x = Math.max(x0, x1, x2)
     const max_y = Math.max(y0, y1, y2)
     if (max_x <= clip.x || max_y <= clip.y || min_x >= clip.x + clip.w || min_y >= clip.y + clip.h) return
+    this.ensure_vertices(3)
     const base = this.vertex_count
     this.push_vertex(x0, y0, u, v, c0)
     this.push_vertex(x1, y1, u1, v, c1)
@@ -1515,6 +1523,7 @@ export class ui_renderer {
     const cv0 = v0 + (v1 - v0) * ((cy0 - y0) * inv_h)
     const cu1 = u0 + (u1 - u0) * ((cx1 - x0) * inv_w)
     const cv1 = v0 + (v1 - v0) * ((cy1 - y0) * inv_h)
+    this.ensure_vertices(6)
     const base = this.vertex_count
     this.push_vertex(cx0, cy0, cu0, cv0, color)
     this.push_vertex(cx1, cy0, cu1, cv0, color)
@@ -1532,6 +1541,7 @@ export class ui_renderer {
     const max_x = Math.max(x0, x1, x2)
     const max_y = Math.max(y0, y1, y2)
     if (max_x <= clip.x || max_y <= clip.y || min_x >= clip.x + clip.w || min_y >= clip.y + clip.h) return
+    this.ensure_vertices(3)
     const base = this.vertex_count
     this.push_vertex(x0, y0, u, v, color)
     this.push_vertex(x1, y1, u, v, color)
