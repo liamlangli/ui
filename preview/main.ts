@@ -10,11 +10,14 @@ import {
   ui_renderer,
   ui_widgets,
   hex_to_normalized_rgba,
+  pack_color,
   create_text_view_state,
+  FONT_MONO,
   type theme_definition,
   type dock_layout,
   type ui_color_rgba,
   type ui_input_text_state,
+  type ui_renderer_stats,
   type ui_scroll_state,
   type ui_text_view_line,
   // plugins
@@ -55,7 +58,10 @@ function build_layout(): dock_layout {
             { id: 'gallery', title: 'Widgets' },
             { id: 'about', title: 'About' },
           ], 'gallery'),
-          right: leaf('leaf-console', [{ id: 'console', title: 'Console' }], 'console'),
+          right: leaf('leaf-console', [
+            { id: 'console', title: 'Console' },
+            { id: 'metrics', title: 'Metrics' },
+          ], 'metrics'),
         },
         right: leaf('leaf-chat', [{ id: 'chat', title: 'Chat' }], 'chat'),
       },
@@ -157,6 +163,17 @@ const gallery = {
   clicks: 0,
 }
 
+type metric_sample = {
+  fps: number
+  cpu_ms: number
+  stats: ui_renderer_stats
+}
+
+const metrics = {
+  samples: [] as metric_sample[],
+  last_frame_start_ms: performance.now(),
+}
+
 async function main(): Promise<void> {
   const renderer = new ui_renderer(canvas)
   await renderer.init()
@@ -172,6 +189,9 @@ async function main(): Promise<void> {
   const clear = hex_to_normalized_rgba(theme.palette.bg)
 
   function frame(): void {
+    const frame_start_ms = performance.now()
+    const frame_delta_ms = frame_start_ms - metrics.last_frame_start_ms
+    metrics.last_frame_start_ms = frame_start_ms
     const snapshot = input.begin_frame()
     const { width, height } = renderer.canvas_size()
     const scale = window.devicePixelRatio || 1
@@ -199,6 +219,9 @@ async function main(): Promise<void> {
         case 'console':
           widgets.text_view('console_view', px + 6 * scale, py + 6 * scale, pw - 12 * scale, ph - 12 * scale, console_lines, console_state, { wrap: true })
           break
+        case 'metrics':
+          render_metrics(renderer, theme, px, py, pw, ph, scale)
+          break
         case 'chat':
           render_chat(renderer, widgets, theme, snapshot, px, py, pw, ph)
           break
@@ -207,6 +230,7 @@ async function main(): Promise<void> {
 
     widgets.end_frame()
     renderer.flush(clear)
+    record_metric_sample(frame_delta_ms > 0 ? 1000 / frame_delta_ms : 0, performance.now() - frame_start_ms, renderer.renderer_stats())
     input.end_frame()
     requestAnimationFrame(frame)
   }
@@ -292,6 +316,211 @@ function render_gallery(
 
   cy = widgets.section(cx, cy, col_w, 'COLOR') + 6 * scale
   gallery.color = widgets.ui_color_picker('g_col', cx, cy, 180 * scale, 28 * scale, gallery.color)
+}
+
+function record_metric_sample(fps: number, cpu_ms: number, stats: ui_renderer_stats): void {
+  metrics.samples.push({ fps, cpu_ms, stats })
+  if (metrics.samples.length > 180) metrics.samples.splice(0, metrics.samples.length - 180)
+}
+
+function render_metrics(
+  renderer: ui_renderer,
+  theme: theme_definition,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  scale: number,
+): void {
+  const col = (hex: string) => pack_color(hex)
+  const slot = (name: keyof theme_definition['palette']) => pack_color(theme.palette[name])
+  const pad = 14 * scale
+  const font = 11.5 * scale
+  const mono = 11 * scale
+  const samples = metrics.samples
+  const latest = samples[samples.length - 1]
+  const stats = latest?.stats ?? renderer.renderer_stats()
+  const fps = latest?.fps ?? 0
+  const cpu = latest?.cpu_ms ?? 0
+
+  renderer.fill_rect(x, y, w, h, slot('panel'))
+  renderer.draw_text(x + pad, y + 10 * scale, 'Renderer Metrics', 13 * scale, slot('text'))
+
+  const summary_y = y + 34 * scale
+  const summary = [
+    `FPS ${fps.toFixed(1)}`,
+    `CPU/frame ${cpu.toFixed(2)} ms`,
+    `Canvas ${stats.canvas_width} x ${stats.canvas_height}`,
+    `Primitives ${format_count(stats.primitive_count)}`,
+  ]
+  draw_summary_row(renderer, theme, summary, x + pad, summary_y, Math.max(0, w - pad * 2), 26 * scale, scale)
+
+  const chart_x = x + pad
+  const chart_y = summary_y + 38 * scale
+  const content_w = Math.max(40 * scale, w - pad * 2)
+  const two_col = content_w >= 520 * scale
+  const col_gap = 18 * scale
+  const chart_w = two_col ? Math.max(220 * scale, content_w * 0.58) : content_w
+  const chart_h = Math.max(72 * scale, Math.min(136 * scale, h - (chart_y - y) - 22 * scale))
+  const fps_max = nice_chart_max(Math.max(90, max_metric(samples, 'fps') * 1.15))
+  const cpu_max = nice_chart_max(Math.max(16.7, max_metric(samples, 'cpu_ms') * 1.25))
+  draw_chart_frame(renderer, theme, chart_x, chart_y, chart_w, chart_h, scale)
+  draw_line_series(renderer, samples.map((sample) => sample.fps), fps_max, chart_x, chart_y, chart_w, chart_h, col('#5fb878'), 2 * scale)
+  draw_line_series(renderer, samples.map((sample) => sample.cpu_ms), cpu_max, chart_x, chart_y, chart_w, chart_h, col('#d8a24a'), 2 * scale)
+  draw_chart_label(renderer, theme, chart_x, chart_y, chart_w, scale, `FPS max ${fps_max.toFixed(0)}`, '#5fb878', 'left')
+  draw_chart_label(renderer, theme, chart_x, chart_y, chart_w, scale, `CPU max ${cpu_max.toFixed(cpu_max < 20 ? 1 : 0)} ms`, '#d8a24a', 'right')
+
+  const buffer_x = two_col ? chart_x + chart_w + col_gap : chart_x
+  const buffer_w = two_col ? Math.max(160 * scale, x + w - pad - buffer_x) : content_w
+  let cy = two_col ? chart_y : chart_y + chart_h + 18 * scale
+  renderer.draw_text(buffer_x, cy, 'Buffers', font, slot('text_dim'))
+  cy += 20 * scale
+  cy = draw_buffer_bar(renderer, theme, buffer_x, cy, buffer_w, 'Primitive buffer', stats.primitive_buffer_bytes_used, stats.primitive_buffer_bytes_total, scale)
+  cy = draw_buffer_bar(renderer, theme, buffer_x, cy, buffer_w, 'Index buffer', stats.index_buffer_bytes_used, stats.index_buffer_bytes_total, scale)
+  cy = draw_buffer_bar(renderer, theme, buffer_x, cy, buffer_w, 'Vertex buffer', stats.vertex_buffer_bytes_used, stats.vertex_buffer_bytes_total, scale)
+
+  const detail_y = cy + 4 * scale
+  const detail = `Draw commands ${format_count(stats.draw_commands)}   Vertices ${format_count(stats.vertex_count)}   Textures ${format_count(stats.texture_count)}`
+  renderer.push_clip(buffer_x, detail_y, buffer_w, Math.max(0, y + h - detail_y - 2 * scale))
+  renderer.draw_text(buffer_x, detail_y, detail, mono, slot('text_dim'), FONT_MONO)
+  renderer.pop_clip()
+}
+
+function draw_summary_row(
+  renderer: ui_renderer,
+  theme: theme_definition,
+  items: string[],
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  scale: number,
+): void {
+  const cell_gap = 8 * scale
+  const cell_w = Math.max(1, (w - cell_gap * (items.length - 1)) / items.length)
+  for (let i = 0; i < items.length; i += 1) {
+    const px = x + i * (cell_w + cell_gap)
+    renderer.fill_rect(px, y, cell_w, h, pack_color(theme.palette.panel_alt))
+    renderer.stroke_rect(px, y, cell_w, h, 1, pack_color(theme.palette.border))
+    renderer.push_clip(px + 7 * scale, y, Math.max(0, cell_w - 14 * scale), h)
+    renderer.draw_text(px + 7 * scale, renderer.text_v_center_y(y, h, 10.5 * scale), items[i] ?? '', 10.5 * scale, pack_color(theme.palette.text), FONT_MONO)
+    renderer.pop_clip()
+  }
+}
+
+function draw_chart_frame(renderer: ui_renderer, theme: theme_definition, x: number, y: number, w: number, h: number, scale: number): void {
+  renderer.fill_rect(x, y, w, h, pack_color(theme.palette.track))
+  renderer.stroke_rect(x, y, w, h, 1, pack_color(theme.palette.border))
+  const grid = pack_color('#3a414d66')
+  for (let i = 1; i < 4; i += 1) {
+    const gy = y + (h * i) / 4
+    renderer.stroke_line(x, gy, x + w, gy, 1, grid)
+  }
+  for (let i = 1; i < 6; i += 1) {
+    const gx = x + (w * i) / 6
+    renderer.stroke_line(gx, y, gx, y + h, 1, grid)
+  }
+  renderer.draw_text(x + 8 * scale, y + h - 18 * scale, 'last 180 frames', 9.5 * scale, pack_color(theme.palette.text_dim), FONT_MONO)
+}
+
+function draw_chart_label(
+  renderer: ui_renderer,
+  theme: theme_definition,
+  x: number,
+  y: number,
+  w: number,
+  scale: number,
+  label: string,
+  color: string,
+  align: 'left' | 'right',
+): void {
+  const font = 9.5 * scale
+  const dot = 6 * scale
+  const label_w = renderer.text_width(label, font, FONT_MONO)
+  const px = align === 'left' ? x + 8 * scale : x + w - label_w - 18 * scale
+  renderer.fill_rect(px, y + 8 * scale, dot, dot, pack_color(color))
+  renderer.draw_text(px + dot + 5 * scale, y + 4 * scale, label, font, pack_color(theme.palette.text_dim), FONT_MONO)
+}
+
+function draw_line_series(
+  renderer: ui_renderer,
+  values: number[],
+  max_value: number,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  color: number,
+  thickness: number,
+): void {
+  if (values.length < 2 || max_value <= 0) return
+  const count = values.length
+  const step = w / Math.max(1, count - 1)
+  let prev_x = x
+  let prev_y = y + h - (Math.max(0, Math.min(1, values[0] / max_value)) * h)
+  for (let i = 1; i < count; i += 1) {
+    const px = x + i * step
+    const py = y + h - (Math.max(0, Math.min(1, values[i] / max_value)) * h)
+    renderer.stroke_line(prev_x, prev_y, px, py, thickness, color, 0.5)
+    prev_x = px
+    prev_y = py
+  }
+}
+
+function draw_buffer_bar(
+  renderer: ui_renderer,
+  theme: theme_definition,
+  x: number,
+  y: number,
+  w: number,
+  label: string,
+  used: number,
+  total: number,
+  scale: number,
+): number {
+  const font = 10.5 * scale
+  const value_font = 9.5 * scale
+  const row_h = 34 * scale
+  const bar_h = 7 * scale
+  const text_color = pack_color(theme.palette.text)
+  const dim = pack_color(theme.palette.text_dim)
+  const ratio = total > 0 ? Math.max(0, Math.min(1, used / total)) : 0
+  const value = total > 0 ? `${format_bytes(used)} / ${format_bytes(total)} (${Math.round(ratio * 100)}%)` : `${format_bytes(used)} / not allocated`
+  renderer.draw_text(x, y, label, font, text_color, FONT_MONO)
+  renderer.push_clip(x, y + 12 * scale, w, 11 * scale)
+  renderer.draw_text(x, y + 12 * scale, value, value_font, dim, FONT_MONO)
+  renderer.pop_clip()
+  const bar_y = y + 25 * scale
+  renderer.fill_rect(x, bar_y, w, bar_h, pack_color(theme.palette.track))
+  renderer.fill_rect(x, bar_y, w * ratio, bar_h, total > 0 ? pack_color(theme.palette.accent) : pack_color(theme.palette.ghost))
+  renderer.stroke_rect(x, bar_y, w, bar_h, 1, pack_color(theme.palette.border))
+  return y + row_h
+}
+
+function max_metric(samples: metric_sample[], key: 'fps' | 'cpu_ms'): number {
+  let max = 0
+  for (const sample of samples) max = Math.max(max, sample[key])
+  return max
+}
+
+function nice_chart_max(value: number): number {
+  if (value <= 0) return 1
+  const exp = 10 ** Math.floor(Math.log10(value))
+  const n = value / exp
+  const nice = n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10
+  return nice * exp
+}
+
+function format_bytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MiB`
+}
+
+function format_count(value: number): string {
+  if (value < 1000) return `${value}`
+  if (value < 1000000) return `${(value / 1000).toFixed(1)}k`
+  return `${(value / 1000000).toFixed(1)}m`
 }
 
 main().catch((err) => {

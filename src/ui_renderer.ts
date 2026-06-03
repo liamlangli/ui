@@ -15,6 +15,21 @@ export interface ui_draw_command {
   clip_h: number
 }
 
+export interface ui_renderer_stats {
+  canvas_width: number
+  canvas_height: number
+  draw_commands: number
+  vertex_count: number
+  primitive_count: number
+  primitive_buffer_bytes_used: number
+  primitive_buffer_bytes_total: number
+  vertex_buffer_bytes_used: number
+  vertex_buffer_bytes_total: number
+  index_buffer_bytes_used: number
+  index_buffer_bytes_total: number
+  texture_count: number
+}
+
 type glyph_metric = {
   width: number
   height: number
@@ -420,6 +435,7 @@ export class ui_renderer {
   private readonly round_rect_inner = new Float32Array(rr_points * 2)
   private readonly round_rect_feather_outer = new Float32Array(rr_points * 2)
   private readonly round_rect_feather_inner = new Float32Array(rr_points * 2)
+  private last_frame_stats: ui_renderer_stats | null = null
 
   constructor(private readonly canvas: HTMLCanvasElement) {}
 
@@ -1073,6 +1089,7 @@ export class ui_renderer {
         usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
       })
     }
+    this.last_frame_stats = this.capture_stats(byte_length)
     this.device.queue.writeBuffer(this.vertex_buffer, 0, this.vertex_data, 0, this.vertex_count * vertex_stride)
     const encoder = this.device.createCommandEncoder({ label: 'ui.command_encoder' })
     const pass = encoder.beginRenderPass({
@@ -1171,8 +1188,30 @@ export class ui_renderer {
     return { width: this.canvas_width, height: this.canvas_height }
   }
 
+  renderer_stats(): ui_renderer_stats {
+    return this.last_frame_stats ?? this.capture_stats(Math.max(this.vertex_count * vertex_stride, vertex_stride))
+  }
+
   gpu(): { device: GPUDevice | null; context: GPUCanvasContext | null; format: GPUTextureFormat | null } {
     return { device: this.device, context: this.context, format: this.format }
+  }
+
+  private capture_stats(vertex_buffer_bytes_used: number): ui_renderer_stats {
+    const primitive_buffer_bytes_used = this.vertex_count * vertex_stride
+    return {
+      canvas_width: this.canvas_width,
+      canvas_height: this.canvas_height,
+      draw_commands: this.commands.length,
+      vertex_count: this.vertex_count,
+      primitive_count: Math.floor(this.vertex_count / 3),
+      primitive_buffer_bytes_used,
+      primitive_buffer_bytes_total: this.vertex_data.byteLength,
+      vertex_buffer_bytes_used,
+      vertex_buffer_bytes_total: this.vertex_buffer?.size ?? 0,
+      index_buffer_bytes_used: 0,
+      index_buffer_bytes_total: 0,
+      texture_count: this.font_bind_groups.size + this.extra_bind_groups.size + (this.bind_group_white ? 1 : 0),
+    }
   }
 
   private push_closed_polyline_fill_feather(points: Float32Array, n: number, feather: number, color: number, outer: Float32Array): void {
