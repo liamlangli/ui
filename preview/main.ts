@@ -7,6 +7,8 @@
 import {
   apply_theme,
   load_theme,
+  lerp_theme,
+  default_themes,
   ui_renderer,
   ui_widgets,
   hex_to_normalized_rgba,
@@ -14,6 +16,7 @@ import {
   create_text_view_state,
   FONT_MONO,
   type theme_definition,
+  type theme_preset,
   type dock_layout,
   type ui_color_rgba,
   type ui_input_text_state,
@@ -174,19 +177,64 @@ const metrics = {
   last_frame_start_ms: performance.now(),
 }
 
+// --- Theme switching with a linear cross-fade ------------------------------
+const theme_ctrl = {
+  presets: [] as theme_preset[],
+  index: 0,
+  from: null as theme_definition | null,
+  to: null as theme_definition | null,
+  start_ms: 0,
+  duration_ms: 360,
+  current: null as theme_definition | null,
+  applied: null as theme_definition | null,
+}
+
+function init_themes(base: theme_preset): void {
+  // The loaded JSON theme leads the list; the built-ins follow (skipping any
+  // that share its name so we don't list the default twice).
+  theme_ctrl.presets = [base, ...default_themes.filter((p) => p.name !== base.name)]
+  theme_ctrl.from = base.theme
+  theme_ctrl.to = base.theme
+  theme_ctrl.current = base.theme
+  theme_ctrl.index = 0
+}
+
+function transition_theme_to(index: number, now: number): void {
+  const preset = theme_ctrl.presets[index]
+  if (!preset || index === theme_ctrl.index) return
+  // Start from whatever is on screen right now so mid-transition switches stay smooth.
+  theme_ctrl.from = theme_ctrl.current ?? preset.theme
+  theme_ctrl.to = preset.theme
+  theme_ctrl.start_ms = now
+  theme_ctrl.index = index
+}
+
+function tick_theme(now: number): theme_definition {
+  const from = theme_ctrl.from!
+  const to = theme_ctrl.to!
+  const t = theme_ctrl.duration_ms <= 0 ? 1 : Math.min(1, (now - theme_ctrl.start_ms) / theme_ctrl.duration_ms)
+  const current = lerp_theme(from, to, t)
+  theme_ctrl.current = current
+  // lerp_theme returns the `to` reference once settled, so identity tells us
+  // when the palette actually changed — avoids re-applying CSS vars every frame.
+  if (current !== theme_ctrl.applied) {
+    apply_theme(current)
+    document.body.style.background = current.palette.bg
+    theme_ctrl.applied = current
+  }
+  return current
+}
+
 async function main(): Promise<void> {
   const renderer = new ui_renderer(canvas)
   await renderer.init()
   const widgets = new ui_widgets(renderer)
-  const theme: theme_definition = await load_theme(theme_url)
-  apply_theme(theme)
-  document.body.style.background = theme.palette.bg
+  const loaded: theme_definition = await load_theme(theme_url)
+  init_themes({ name: 'Midnight', theme: loaded })
 
   const input = new input_collector(canvas, () => renderer.request_render())
   const resize = () => renderer.resize()
   window.addEventListener('resize', resize)
-
-  const clear = hex_to_normalized_rgba(theme.palette.bg)
 
   function frame(): void {
     const frame_start_ms = performance.now()
@@ -196,6 +244,9 @@ async function main(): Promise<void> {
     const { width, height } = renderer.canvas_size()
     const scale = window.devicePixelRatio || 1
     const m = 8 * scale
+
+    const theme = tick_theme(frame_start_ms)
+    const clear = hex_to_normalized_rgba(theme.palette.bg)
 
     renderer.begin_frame()
     widgets.begin_frame(theme, snapshot)
@@ -290,6 +341,12 @@ function render_gallery(
   const cx = x + pad
   const row = 34 * scale
   const gap = 12 * scale
+
+  cy = widgets.section(cx, cy, col_w, 'THEME') + 6 * scale
+  const theme_names = theme_ctrl.presets.map((p) => p.name)
+  const picked = widgets.dropdown('g_theme', cx, cy, 200 * scale, 28 * scale, theme_names, theme_ctrl.index)
+  if (picked !== theme_ctrl.index) transition_theme_to(picked, performance.now())
+  cy += row + gap
 
   cy = widgets.section(cx, cy, col_w, 'BUTTONS') + 6 * scale
   if (widgets.button('g_btn', cx, cy, 120 * scale, 30 * scale, `Clicked ${gallery.clicks}×`)) gallery.clicks += 1
