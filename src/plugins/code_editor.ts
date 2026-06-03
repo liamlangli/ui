@@ -328,6 +328,10 @@ export interface code_editor_state {
   focused: boolean
   /** When set, the next frame scrolls to bring this logical line into view, then clears it. */
   scroll_to_line: number | null
+  /** Internal: last observed caret line, to follow the caret only when it moves (not while wheel-scrolling). */
+  last_cursor_line: number
+  /** Internal: last observed caret column. */
+  last_cursor_col: number
   /** Internal: caret-blink phase origin (ms), reset on activity. */
   blink_start_ms: number
   /** Internal: timestamp of the last click, for double/triple-click detection. */
@@ -380,6 +384,8 @@ export function create_code_editor_state(): code_editor_state {
     scroll_left: 0,
     focused: false,
     scroll_to_line: null,
+    last_cursor_line: -1,
+    last_cursor_col: -1,
     blink_start_ms: 0,
     last_click_ms: 0,
     click_streak: 1,
@@ -508,18 +514,23 @@ export function code_editor(
   // Reset the blink whenever the buffer changed (typing / cursor move).
   if (buffer.version !== start_version) state.blink_start_ms = performance.now()
 
-  // ── Keep the caret in view ────────────────────────────────────────────────
-  const caret_line = buffer.cursor.line
-  const caret_top = caret_line * line_h
-  if (caret_top < state.scroll.offset_y) state.scroll.offset_y = caret_top
-  else if (caret_top + line_h > state.scroll.offset_y + h) state.scroll.offset_y = caret_top + line_h - h
-  state.scroll.offset_y = Math.max(0, Math.min(max_scroll, state.scroll.offset_y))
+  // ── Keep the caret in view — only when it actually moved, so free
+  // wheel-scrolling away from the caret isn't immediately snapped back. ───────
+  const caret_moved = buffer.cursor.line !== state.last_cursor_line || buffer.cursor.col !== state.last_cursor_col
+  state.last_cursor_line = buffer.cursor.line
+  state.last_cursor_col = buffer.cursor.col
+  if (caret_moved) {
+    const caret_top = buffer.cursor.line * line_h
+    if (caret_top < state.scroll.offset_y) state.scroll.offset_y = caret_top
+    else if (caret_top + line_h > state.scroll.offset_y + h) state.scroll.offset_y = caret_top + line_h - h
 
-  const caret_x_px = buffer.cursor.col * char_w
-  if (caret_x_px < state.scroll_left) state.scroll_left = caret_x_px
-  else if (caret_x_px + char_w > state.scroll_left + (code_w - scrollbar_w)) {
-    state.scroll_left = caret_x_px + char_w - (code_w - scrollbar_w)
+    const caret_x_px = buffer.cursor.col * char_w
+    if (caret_x_px < state.scroll_left) state.scroll_left = caret_x_px
+    else if (caret_x_px + char_w > state.scroll_left + (code_w - scrollbar_w)) {
+      state.scroll_left = caret_x_px + char_w - (code_w - scrollbar_w)
+    }
   }
+  state.scroll.offset_y = Math.max(0, Math.min(max_scroll, state.scroll.offset_y))
   state.scroll_left = Math.max(0, state.scroll_left)
 
   const scroll_t = state.scroll.offset_y
