@@ -257,6 +257,11 @@ export class text_buffer {
     this._dirty()
   }
 
+  /** Force a change notification without editing (e.g. after direct `lines` mutation). */
+  mark_dirty(): void {
+    this._dirty()
+  }
+
   /** Leading whitespace of the previous line — used for Enter auto-indent. */
   auto_indent(): string {
     const { line } = this.cursor
@@ -321,6 +326,8 @@ export interface code_editor_state {
   scroll_left: number
   /** Whether the editor currently holds keyboard focus. */
   focused: boolean
+  /** When set, the next frame scrolls to bring this logical line into view, then clears it. */
+  scroll_to_line: number | null
   /** Internal: caret-blink phase origin (ms), reset on activity. */
   blink_start_ms: number
   /** Internal: timestamp of the last click, for double/triple-click detection. */
@@ -336,6 +343,17 @@ export interface code_editor_options {
   line_pad?: number
   /** Disable all editing (cursor + selection + copy still work). Defaults to false. */
   read_only?: boolean
+  /**
+   * Let the plugin process keyboard from the input snapshot. Defaults to true.
+   * Set false when the host owns the keyboard (drives the `text_buffer` itself)
+   * — the plugin then only renders, scrolls, and handles mouse selection.
+   */
+  handle_keyboard?: boolean
+  /**
+   * Override caret visibility. When omitted the caret blinks while the editor
+   * holds focus; pass a boolean to drive blink/visibility from the host.
+   */
+  caret_visible?: boolean
   /** Spaces inserted for a Tab key / used for auto-indent rounding. Defaults to 4. */
   tab_size?: number
   /** Draw the line-number gutter. Defaults to true. */
@@ -361,6 +379,7 @@ export function create_code_editor_state(): code_editor_state {
     scroll: { offset_y: 0 },
     scroll_left: 0,
     focused: false,
+    scroll_to_line: null,
     blink_start_ms: 0,
     last_click_ms: 0,
     click_streak: 1,
@@ -399,6 +418,7 @@ export function code_editor(
   const fpx = (options?.font_px ?? 13) * scale
   const line_pad = (options?.line_pad ?? 2) * scale
   const read_only = options?.read_only === true
+  const handle_keyboard = options?.handle_keyboard !== false
   const tab_size = options?.tab_size ?? 4
   const show_gutter = options?.show_line_numbers !== false
   const tokenize = options?.tokenize
@@ -424,6 +444,13 @@ export function code_editor(
   const visible_rows = Math.max(1, Math.floor(h / line_h))
   const content_h = line_count * line_h
   const max_scroll = Math.max(0, content_h - h)
+
+  // Honour a host-requested scroll-to-line before computing visibility.
+  if (state.scroll_to_line != null) {
+    const target = Math.max(0, Math.min(line_count - 1, state.scroll_to_line))
+    state.scroll.offset_y = Math.max(0, Math.min(max_scroll, target * line_h))
+    state.scroll_to_line = null
+  }
 
   // ── Background + gutter ───────────────────────────────────────────────────
   ui.fill_rect(x, y, w, h, col('bg'))
@@ -476,7 +503,7 @@ export function code_editor(
   if (over_code) ui.set_cursor('text')
 
   // ── Keyboard ──────────────────────────────────────────────────────────────
-  if (state.focused) handle_keys(buffer, input, read_only, tab_size)
+  if (handle_keyboard && state.focused) handle_keys(buffer, input, read_only, tab_size)
 
   // Reset the blink whenever the buffer changed (typing / cursor move).
   if (buffer.version !== start_version) state.blink_start_ms = performance.now()
@@ -557,14 +584,16 @@ export function code_editor(
     }
   }
 
-  // Caret (blinks while focused).
-  if (state.focused) {
-    const blink_on = (performance.now() - state.blink_start_ms) % 1060 < 600
-    if (blink_on) {
-      const cy = y + buffer.cursor.line * line_h - scroll_t
-      const cx = code_x + buffer.cursor.col * char_w - state.scroll_left
-      if (cy + line_h >= y && cy <= y + h) ui.fill_rect(cx, cy, Math.max(1, scale), line_h, col('text'))
-    }
+  // Caret. The host can override visibility (e.g. drive its own blink);
+  // otherwise it blinks while the editor holds focus.
+  const caret_on =
+    options?.caret_visible != null
+      ? options.caret_visible
+      : state.focused && (performance.now() - state.blink_start_ms) % 1060 < 600
+  if (caret_on) {
+    const cy = y + buffer.cursor.line * line_h - scroll_t
+    const cx = code_x + buffer.cursor.col * char_w - state.scroll_left
+    if (cy + line_h >= y && cy <= y + h) ui.fill_rect(cx, cy, Math.max(1, scale), line_h, col('text'))
   }
 
   ui.pop_clip()
