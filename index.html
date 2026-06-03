@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>@liamlangli/ui — WebGPU UI toolkit preview</title>
+    <link rel="icon" href="data:," />
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #16181d; }
+      #app { display: block; width: 100vw; height: 100vh; touch-action: none; }
+      #error {
+        display: none; position: fixed; inset: 0; margin: auto; max-width: 640px; height: max-content;
+        padding: 24px; font: 14px/1.6 ui-monospace, monospace; color: #ff8d8d; background: #1d2026;
+        border: 1px solid #3a414d; border-radius: 8px; white-space: pre-wrap;
+      }
+      #nogpu {
+        position: fixed; inset: 0; display: none; place-items: center; text-align: center;
+        font: 15px/1.6 system-ui, sans-serif; color: #9aa3b0; padding: 32px;
+      }
+      #nogpu a { color: #4c8bf5; }
+    </style>
+  </head>
+  <body>
+    <canvas id="app"></canvas>
+    <pre id="error"></pre>
+    <div id="nogpu">
+      <div>
+        <h2 style="color:#e6e9ef">WebGPU is required</h2>
+        <p>This preview renders entirely on the GPU. Open it in a WebGPU-capable
+        browser (recent Chrome, Edge, or Safari Technology Preview).</p>
+        <p><a href="https://caniuse.com/webgpu">Browser support →</a></p>
+      </div>
+    </div>
+    <script type="module">
+      if (!('gpu' in navigator)) {
+        document.getElementById('nogpu').style.display = 'grid'
+        document.getElementById('app').style.display = 'none'
+      } else {
+        import('./preview/main.ts')
+      }
+    </script>
+  </body>
+</html>
