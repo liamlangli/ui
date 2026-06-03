@@ -9,7 +9,21 @@
       :root { color-scheme: dark; }
       * { box-sizing: border-box; }
       html, body { margin: 0; height: 100%; overflow: hidden; background: #16181d; }
-      #app { display: block; width: 100vw; height: 100vh; touch-action: none; }
+      /* Inset the canvas to the device safe area so it never covers the notch,
+         rounded corners, or home indicator. The body background fills those
+         regions edge-to-edge while the canvas — and therefore all UI — stays
+         inside the safe rect. On desktop the insets are 0 and it fills the
+         viewport. 100dvh tracks the dynamic mobile viewport (URL bar shrink). */
+      #app {
+        display: block;
+        position: fixed;
+        top: env(safe-area-inset-top, 0px);
+        left: env(safe-area-inset-left, 0px);
+        width: calc(100vw - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px));
+        height: calc(100vh - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+        height: calc(100dvh - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+        touch-action: none;
+      }
       #error {
         display: none; position: fixed; inset: 0; margin: auto; max-width: 640px; height: max-content;
         padding: 24px; font: 14px/1.6 ui-monospace, monospace; color: #ff8d8d; background: #1d2026;
