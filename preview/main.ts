@@ -241,7 +241,7 @@ async function main(): Promise<void> {
     const frame_delta_ms = frame_start_ms - metrics.last_frame_start_ms
     metrics.last_frame_start_ms = frame_start_ms
     const snapshot = input.begin_frame()
-    const { width, height } = renderer.canvas_size()
+    const safe = renderer.safe_rect()
     const scale = window.devicePixelRatio || 1
     const m = 8 * scale
 
@@ -255,7 +255,7 @@ async function main(): Promise<void> {
     renderer.begin_frame()
     widgets.begin_frame(theme, snapshot)
 
-    dock.frame(renderer, theme, snapshot, m, m, width - m * 2, height - m * 2, (panel) => {
+    dock.frame(renderer, theme, snapshot, safe.x + m, safe.y + m, safe.w - m * 2, safe.h - m * 2, (panel) => {
       const inset = 0
       const px = panel.x + inset
       const py = panel.y + inset
