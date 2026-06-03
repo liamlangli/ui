@@ -32,6 +32,26 @@ export interface ui_input_snapshot {
   key_a?: boolean
   /** `c` key — combined with ctrl/meta for copy in the text view. */
   key_c?: boolean
+  /** Current native IME preedit text, supplied by the host input bridge. */
+  ime_composition?: string
+  /**
+   * Set by text widgets while focused so the host input bridge can focus and
+   * position a hidden native input/textarea for IME.
+   */
+  native_text_input?: ui_native_text_input | null
+}
+
+export interface ui_native_text_input {
+  id: string
+  x: number
+  y: number
+  w: number
+  h: number
+  value: string
+  cursor: number
+  selection_start: number
+  selection_end: number
+  mode?: 'text' | 'numeric' | 'multiline'
 }
 
 export interface ui_scroll_state {
@@ -207,6 +227,8 @@ export function create_empty_ui_input(): ui_input_snapshot {
     key_page_down: false,
     key_a: false,
     key_c: false,
+    ime_composition: '',
+    native_text_input: null,
   }
 }
 
@@ -265,6 +287,7 @@ export class ui_widgets {
     if (this.open_dropdown_id == null) this.open_dropdown_popup_rect = null
     if (this.open_color_picker_id == null) this.open_color_picker_popup_rect = null
     if (!input.mouse_down && this.active_id) this.active_id = null
+    input.native_text_input = null
   }
 
   end_frame(): void {
@@ -550,6 +573,7 @@ export class ui_widgets {
     }
     let value = buf
     if (focused) {
+      this.request_native_text_input(id, x, y, w, h, value, state, 'text')
       if (this.input.typed_text) {
         value = this.replace_selection(value, state, this.input.typed_text)
       }
@@ -587,6 +611,7 @@ export class ui_widgets {
     this.ui.push_clip(x + 1, y + 1, Math.max(0, w - 2), Math.max(0, h - 2))
     const draw_text = value || placeholder
     const draw_color = value ? this.color('text') : this.color('text_dim')
+    const composition = focused ? this.input.ime_composition ?? '' : ''
     if (focused && value && this.has_selection(state)) {
       const start = this.selection_start(state)
       const end = this.selection_end(state)
@@ -597,6 +622,12 @@ export class ui_widgets {
     this.ui.draw_text(text_x, this.ui.text_v_center_y(y, h, w_font_px * scale), draw_text, w_font_px * scale, draw_color)
     if (focused) {
       const cursor_x = text_x + this.ui.text_width(value.slice(0, state.cursor), w_font_px * scale)
+      if (composition) {
+        const comp_w = this.ui.text_width(composition, w_font_px * scale)
+        const comp_y = this.ui.text_v_center_y(y, h, w_font_px * scale)
+        this.ui.draw_text(cursor_x, comp_y, composition, w_font_px * scale, this.color('text_dim'))
+        this.ui.fill_rect(cursor_x, y + h - 6 * scale, Math.max(1, comp_w), 1 * scale, this.color('accent'))
+      }
       this.ui.fill_rect(cursor_x, y + 6 * scale, 1.5 * scale, Math.max(10 * scale, h - 12 * scale), this.color('accent'))
     }
     this.ui.pop_clip()
@@ -646,6 +677,7 @@ export class ui_widgets {
     let next_value = value
     let draft = focused ? state.draft : value.toFixed(decimals)
     if (focused) {
+      this.request_native_text_input(id, x, y, w, h, draft, state, 'numeric')
       if (this.input.typed_text) {
         const filtered = [...this.input.typed_text].filter((ch) => /[0-9.\-]/.test(ch)).join('')
         if (filtered) {
@@ -706,6 +738,7 @@ export class ui_widgets {
     this.ui.fill_round_rect(x, y, w, h, w_radius * scale, this.color('panel_alt'))
     this.ui.stroke_round_rect(x, y, w, h, w_radius * scale, 1, focused ? this.color('accent') : this.color('border'))
     const text = state.draft || next_value.toFixed(decimals)
+    const composition = focused ? this.input.ime_composition ?? '' : ''
     this.ui.push_clip(x + 1, y + 1, Math.max(0, w - 2), Math.max(0, h - 2))
     if (focused && text && this.has_selection(state)) {
       const start = this.selection_start(state)
@@ -717,6 +750,12 @@ export class ui_widgets {
     this.ui.draw_text(text_x, this.ui.text_v_center_y(y, h, w_font_px * scale), text, w_font_px * scale, this.color('text'))
     if (focused) {
       const cursor_x = text_x + this.ui.text_width(text.slice(0, state.cursor), w_font_px * scale)
+      if (composition) {
+        const comp_w = this.ui.text_width(composition, w_font_px * scale)
+        const comp_y = this.ui.text_v_center_y(y, h, w_font_px * scale)
+        this.ui.draw_text(cursor_x, comp_y, composition, w_font_px * scale, this.color('text_dim'))
+        this.ui.fill_rect(cursor_x, y + h - 6 * scale, Math.max(1, comp_w), 1 * scale, this.color('accent'))
+      }
       this.ui.fill_rect(cursor_x, y + 6 * scale, 1.5 * scale, Math.max(10 * scale, h - 12 * scale), this.color('accent'))
     }
     this.ui.pop_clip()
@@ -1384,6 +1423,30 @@ export class ui_widgets {
     state.cursor = next
     state.sel_anchor = next
     state.sel_head = next
+  }
+
+  private request_native_text_input(
+    id: string,
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    value: string,
+    state: ui_input_text_state,
+    mode: ui_native_text_input['mode'],
+  ): void {
+    this.input.native_text_input = {
+      id,
+      x,
+      y,
+      w,
+      h,
+      value,
+      cursor: state.cursor,
+      selection_start: this.selection_start(state),
+      selection_end: this.selection_end(state),
+      mode,
+    }
   }
 
   private replace_selection(text: string, state: ui_input_text_state, insert: string): string {

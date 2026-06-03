@@ -2,7 +2,7 @@
 // the toolkit consumes. Coordinates are reported in *physical* pixels
 // (clientX * devicePixelRatio) to match the renderer's coordinate space.
 
-import { create_empty_ui_input, type ui_input_snapshot } from '../src/index'
+import { create_empty_ui_input, type ui_input_snapshot, type ui_native_text_input } from '../src/index'
 
 export class input_collector {
   private state: ui_input_snapshot = create_empty_ui_input()
@@ -16,10 +16,40 @@ export class input_collector {
   private ctrl = false
   private meta = false
   private shift = false
+  private readonly ime: HTMLTextAreaElement
+  private native_active = false
+  private composition = ''
+  private pending_composition_commit = ''
+  private composition_commit_seen = false
 
   constructor(private readonly canvas: HTMLCanvasElement, private readonly on_event: () => void = () => {}) {
     const dpr = () => window.devicePixelRatio || 1
     const wake = () => this.on_event()
+    this.ime = document.createElement('textarea')
+    this.ime.setAttribute('aria-hidden', 'true')
+    this.ime.setAttribute('autocorrect', 'off')
+    this.ime.autocapitalize = 'off'
+    this.ime.autocomplete = 'off'
+    this.ime.spellcheck = false
+    this.ime.wrap = 'off'
+    Object.assign(this.ime.style, {
+      position: 'fixed',
+      left: '0px',
+      top: '0px',
+      width: '1px',
+      height: '1px',
+      opacity: '0',
+      color: 'transparent',
+      background: 'transparent',
+      border: '0',
+      outline: '0',
+      padding: '0',
+      resize: 'none',
+      overflow: 'hidden',
+      pointerEvents: 'none',
+      zIndex: '-1',
+    } satisfies Partial<CSSStyleDeclaration>)
+    canvas.insertAdjacentElement('afterend', this.ime)
 
     canvas.addEventListener('pointermove', (e) => {
       const rect = canvas.getBoundingClientRect()
@@ -57,10 +87,13 @@ export class input_collector {
       this.meta = e.metaKey
       this.shift = e.shiftKey
       // Printable text (ignore when a modifier that implies a shortcut is held).
-      if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) this.typed += e.key
+      if (!this.native_active && e.key.length === 1 && !e.ctrlKey && !e.metaKey) this.typed += e.key
       // Keep browser focus shortcuts working but prevent scrolling on space etc.
       if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Backspace'].includes(e.key)) {
         if (document.activeElement === document.body) e.preventDefault()
+      }
+      if (this.native_active && !e.isComposing && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Backspace', 'Delete', 'Home', 'End', 'Enter'].includes(e.key)) {
+        e.preventDefault()
       }
       wake()
     })
@@ -68,6 +101,47 @@ export class input_collector {
       this.ctrl = e.ctrlKey
       this.meta = e.metaKey
       this.shift = e.shiftKey
+      wake()
+    })
+
+    this.ime.addEventListener('compositionstart', () => {
+      this.composition = ''
+      this.pending_composition_commit = ''
+      this.composition_commit_seen = false
+      wake()
+    })
+    this.ime.addEventListener('compositionupdate', (e) => {
+      this.composition = e.data
+      wake()
+    })
+    this.ime.addEventListener('compositionend', (e) => {
+      this.composition = ''
+      this.pending_composition_commit = e.data
+      window.setTimeout(() => {
+        if (!this.pending_composition_commit || this.composition_commit_seen) return
+        this.typed += this.pending_composition_commit
+        this.pending_composition_commit = ''
+        this.composition_commit_seen = true
+        this.ime.value = ''
+        wake()
+      }, 0)
+      wake()
+    })
+    this.ime.addEventListener('input', (e) => {
+      const ev = e as InputEvent
+      if (ev.isComposing) {
+        this.composition = ev.data ?? this.ime.value
+        wake()
+        return
+      }
+      const text = this.ime.value || ev.data || ''
+      if (text) {
+        this.typed += text
+        this.pending_composition_commit = ''
+        this.composition_commit_seen = true
+      }
+      this.composition = ''
+      this.ime.value = ''
       wake()
     })
   }
@@ -79,6 +153,7 @@ export class input_collector {
     s.mouse_released = this.released
     s.wheel_y = this.wheel
     s.typed_text = this.typed
+    s.ime_composition = this.composition
     s.key_backspace = this.keys.has('Backspace')
     s.key_delete = this.keys.has('Delete')
     s.key_enter = this.keys.has('Enter')
@@ -101,10 +176,33 @@ export class input_collector {
 
   /** Clear per-frame edges/deltas. Call once per frame after drawing. */
   end_frame(): void {
+    this.sync_native_text_input(this.state.native_text_input ?? null)
     this.pressed = false
     this.released = false
     this.wheel = 0
     this.typed = ''
     this.keys.clear()
+  }
+
+  private sync_native_text_input(request: ui_native_text_input | null): void {
+    if (!request) {
+      this.native_active = false
+      this.composition = ''
+      this.pending_composition_commit = ''
+      this.composition_commit_seen = false
+      this.ime.value = ''
+      if (document.activeElement === this.ime) this.ime.blur()
+      return
+    }
+
+    const scale = window.devicePixelRatio || 1
+    const rect = this.canvas.getBoundingClientRect()
+    this.ime.style.left = `${rect.left + request.x / scale}px`
+    this.ime.style.top = `${rect.top + request.y / scale}px`
+    this.ime.style.width = `${Math.max(1, request.w / scale)}px`
+    this.ime.style.height = `${Math.max(1, request.h / scale)}px`
+    this.ime.inputMode = request.mode === 'numeric' ? 'decimal' : 'text'
+    this.native_active = true
+    if (document.activeElement !== this.ime) this.ime.focus({ preventScroll: true })
   }
 }

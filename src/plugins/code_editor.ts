@@ -510,6 +510,20 @@ export function code_editor(
 
   // ── Keyboard ──────────────────────────────────────────────────────────────
   if (handle_keyboard && state.focused) handle_keys(buffer, input, read_only, tab_size)
+  if (state.focused && !read_only) {
+    input.native_text_input = {
+      id: 'code_editor',
+      x: code_x,
+      y,
+      w: code_w,
+      h,
+      value: buffer.get_text(),
+      cursor: buffer.cursor.col,
+      selection_start: buffer.cursor.col,
+      selection_end: buffer.cursor.col,
+      mode: 'multiline',
+    }
+  }
 
   // Reset the blink whenever the buffer changed (typing / cursor move).
   if (buffer.version !== start_version) state.blink_start_ms = performance.now()
@@ -604,7 +618,15 @@ export function code_editor(
   if (caret_on) {
     const cy = y + buffer.cursor.line * line_h - scroll_t
     const cx = code_x + buffer.cursor.col * char_w - state.scroll_left
-    if (cy + line_h >= y && cy <= y + h) ui.fill_rect(cx, cy, Math.max(1, scale), line_h, col('text'))
+    if (cy + line_h >= y && cy <= y + h) {
+      const composition = input.ime_composition ?? ''
+      if (composition) {
+        const comp_w = ui.text_width(composition, fpx, FONT_MONO)
+        ui.draw_text(cx, ui.text_v_center_y(cy, line_h, fpx, FONT_MONO), composition, fpx, col('text_dim'), FONT_MONO)
+        ui.fill_rect(cx, cy + line_h - 3 * scale, Math.max(1, comp_w), Math.max(1, scale), col('accent'))
+      }
+      ui.fill_rect(cx, cy, Math.max(1, scale), line_h, col('text'))
+    }
   }
 
   ui.pop_clip()
