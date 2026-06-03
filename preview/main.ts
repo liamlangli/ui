@@ -182,7 +182,7 @@ async function main(): Promise<void> {
   apply_theme(theme)
   document.body.style.background = theme.palette.bg
 
-  const input = new input_collector(canvas)
+  const input = new input_collector(canvas, () => renderer.request_render())
   const resize = () => renderer.resize()
   window.addEventListener('resize', resize)
 
@@ -375,9 +375,8 @@ function render_metrics(
   let cy = two_col ? chart_y : chart_y + chart_h + 18 * scale
   renderer.draw_text(buffer_x, cy, 'Buffers', font, slot('text_dim'))
   cy += 20 * scale
-  cy = draw_buffer_bar(renderer, theme, buffer_x, cy, buffer_w, 'Primitive buffer', stats.primitive_buffer_bytes_used, stats.primitive_buffer_bytes_total, scale)
-  cy = draw_buffer_bar(renderer, theme, buffer_x, cy, buffer_w, 'Index buffer', stats.index_buffer_bytes_used, stats.index_buffer_bytes_total, scale)
-  cy = draw_buffer_bar(renderer, theme, buffer_x, cy, buffer_w, 'Vertex buffer', stats.vertex_buffer_bytes_used, stats.vertex_buffer_bytes_total, scale)
+  cy = draw_buffer_bar(renderer, theme, buffer_x, cy, buffer_w, 'ui_primitive_buffer', stats.primitive_buffer_bytes_used, stats.primitive_buffer_bytes_total, scale)
+  cy = draw_buffer_bar(renderer, theme, buffer_x, cy, buffer_w, 'ui_vertex_buffer', stats.vertex_buffer_bytes_used, stats.vertex_buffer_bytes_total, scale)
 
   const detail_y = cy + 4 * scale
   const detail = `Draw commands ${format_count(stats.draw_commands)}   Vertices ${format_count(stats.vertex_count)}   Textures ${format_count(stats.texture_count)}`

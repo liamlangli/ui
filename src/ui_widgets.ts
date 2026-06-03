@@ -287,8 +287,9 @@ export class ui_widgets {
     const active = options?.active === true
     const bg = active ? this.color('active') : hover ? this.color('hover') : this.color('selected')
     const border = active ? this.color('accent') : this.color('border_strong')
-    this.ui.fill_rect(x, y, w, h, bg)
-    this.ui.stroke_rect(x, y, w, h, 1, border)
+    const r = w_radius * scale
+    this.ui.fill_round_rect(x, y, w, h, r, bg)
+    this.ui.stroke_round_rect(x, y, w, h, r, 1, border)
     const font_px = w_font_px * scale
     const text_w = this.ui.text_width(label, font_px)
     this.ui.draw_text(x + Math.max(0, (w - text_w) * 0.5), this.ui.text_v_center_y(y, h, font_px), label, font_px, this.color('text'))
@@ -303,11 +304,13 @@ export class ui_widgets {
     const hit_w = box_size + label_gap + label_w
     const hover = this.point_in(x, y, hit_w, box_size)
     if (hover && this.input.mouse_pressed) value = !value
-    this.ui.fill_rect(x, y, box_size, box_size, hover ? this.color('panel_alt') : this.color('track'))
-    this.ui.stroke_rect(x, y, box_size, box_size, 1, value ? this.color('accent') : this.color('border_strong'))
+    const box_r = 2 * scale
+    this.ui.fill_round_rect(x, y, box_size, box_size, box_r, hover ? this.color('panel_alt') : this.color('track'))
+    this.ui.stroke_round_rect(x, y, box_size, box_size, box_r, 1, value ? this.color('accent') : this.color('border_strong'))
     if (value) {
       const inner_pad = 4 * scale
-      this.ui.fill_rect(x + inner_pad, y + inner_pad, Math.max(0, box_size - inner_pad * 2), Math.max(0, box_size - inner_pad * 2), this.color('accent'))
+      const inner_r = Math.max(0, box_r - 1 * scale)
+      this.ui.fill_round_rect(x + inner_pad, y + inner_pad, Math.max(0, box_size - inner_pad * 2), Math.max(0, box_size - inner_pad * 2), inner_r, this.color('accent'))
     }
     if (label) this.ui.draw_text(x + box_size + label_gap, this.ui.text_v_center_y(y, box_size, w_font_px * scale), label, w_font_px * scale, this.color('text'))
     return value
@@ -325,12 +328,13 @@ export class ui_widgets {
     const t = max > min ? (value - min) / (max - min) : 0
     const track_h = 4 * scale
     const track_y = y + (h - track_h) * 0.5
-    this.ui.fill_rect(x, track_y, w, track_h, this.color('track'))
-    if (t > 0) this.ui.fill_rect(x, track_y, t * w, track_h, this.color('accent_dim'))
+    const track_r = track_h * 0.5
+    this.ui.fill_round_rect(x, track_y, w, track_h, track_r, this.color('track'))
+    if (t > 0) this.ui.fill_round_rect(x, track_y, t * w, track_h, track_r, this.color('accent_dim'))
     const th = w_slider_thumb * scale
     const tx = x + t * w - th * 0.5
     const ty = y + (h - th) * 0.5
-    this.ui.fill_rect(tx, ty, th, th, this.active_id === id ? this.color('accent') : this.color('selected'))
+    this.ui.fill_round_rect(tx, ty, th, th, th * 0.5, this.active_id === id ? this.color('accent') : this.color('selected'))
     if (show_value) this.ui.draw_text(x + w + 8 * scale, this.ui.text_v_center_y(y, h, (w_font_px - 1) * scale), value.toFixed(2), (w_font_px - 1) * scale, this.color('text_dim'))
     return value
   }
@@ -351,7 +355,7 @@ export class ui_widgets {
       if (ry + row_h < y || ry > y + h) continue
       const hover = this.point_in(x, ry, w - scrollbar_w, row_h)
       const bg = i === selected ? this.color('selected') : hover ? this.color('hover') : 0
-      if (bg) this.ui.fill_rect(x, ry, w - scrollbar_w, row_h, bg)
+      if (bg) this.ui.fill_round_rect(x + 2 * scale, ry + 1 * scale, Math.max(0, w - scrollbar_w - 4 * scale), Math.max(0, row_h - 2 * scale), w_radius * scale, bg)
       this.ui.draw_text(x + w_pad * scale, this.ui.text_v_center_y(ry, row_h, w_font_px * scale), items[i], w_font_px * scale, i === selected ? this.color('text') : this.color('text_dim'))
       if (hover && this.input.mouse_pressed) next_selected = i
     }
@@ -396,7 +400,7 @@ export class ui_widgets {
     const bg = open ? this.color('active') : hover ? this.color('hover') : this.color('panel')
     if (chrome === 'rounded') {
       this.ui.fill_round_rect(x, y, w, h, w_radius * scale, bg)
-      this.ui.stroke_rect(x, y, w, h, 1, open ? this.color('accent') : this.color('border'))
+      this.ui.stroke_round_rect(x, y, w, h, w_radius * scale, 1, open ? this.color('accent') : this.color('border'))
     } else if (chrome === 'rect') {
       this.ui.fill_rect(x, y, w, h, bg)
       this.ui.stroke_rect(x, y, w, h, 1, open ? this.color('accent') : this.color('border'))
@@ -456,8 +460,9 @@ export class ui_widgets {
     const thumb_y2 = y + t2 * travel
     const thumb_hovered = this.active_id === id || this.point_in(x, thumb_y2, w, thumb_h)
 
-    this.ui.fill_rect(x, y, w, h, this.color('panel_alt'))
-    this.ui.fill_rect(x + 1, thumb_y2 + 1, w - 2, thumb_h - 2, thumb_hovered ? this.color('text_dim') : this.color('selected'))
+    const sb_r = Math.max(1, w * 0.5)
+    this.ui.fill_round_rect(x, y, w, h, sb_r, this.color('panel_alt'))
+    this.ui.fill_round_rect(x + 1, thumb_y2 + 1, Math.max(0, w - 2), Math.max(0, thumb_h - 2), Math.max(0, sb_r - 1), thumb_hovered ? this.color('text_dim') : this.color('selected'))
   }
 
   hit_region(x: number, y: number, w: number, h: number): { hovered: boolean; pressed: boolean } {
@@ -573,7 +578,7 @@ export class ui_widgets {
     if (auto_focused) this.pending_focused_input_id = null
 
     this.ui.fill_round_rect(x, y, w, h, w_radius * scale, this.color('panel_alt'))
-    this.ui.stroke_rect(x, y, w, h, 1, focused ? this.color('accent') : this.color('border'))
+    this.ui.stroke_round_rect(x, y, w, h, w_radius * scale, 1, focused ? this.color('accent') : this.color('border'))
     this.ui.push_clip(x + 1, y + 1, Math.max(0, w - 2), Math.max(0, h - 2))
     const draw_text = value || placeholder
     const draw_color = value ? this.color('text') : this.color('text_dim')
@@ -694,7 +699,7 @@ export class ui_widgets {
     state.draft = focused ? draft : next_value.toFixed(decimals)
 
     this.ui.fill_round_rect(x, y, w, h, w_radius * scale, this.color('panel_alt'))
-    this.ui.stroke_rect(x, y, w, h, 1, focused ? this.color('accent') : this.color('border'))
+    this.ui.stroke_round_rect(x, y, w, h, w_radius * scale, 1, focused ? this.color('accent') : this.color('border'))
     const text = state.draft || next_value.toFixed(decimals)
     this.ui.push_clip(x + 1, y + 1, Math.max(0, w - 2), Math.max(0, h - 2))
     if (focused && text && this.has_selection(state)) {
@@ -750,13 +755,14 @@ export class ui_widgets {
 
     const bg = open ? this.color('active') : hover ? this.color('hover') : this.color('panel')
     this.ui.fill_round_rect(x, y, w, h, w_radius * scale, bg)
-    this.ui.stroke_rect(x, y, w, h, 1, open ? this.color('accent') : this.color('border'))
+    this.ui.stroke_round_rect(x, y, w, h, w_radius * scale, 1, open ? this.color('accent') : this.color('border'))
     this.draw_checkerboard(x + 1, y + 1, Math.max(0, w - 2), Math.max(0, h - 2), 4 * scale)
     this.ui.fill_rect(x + 1, y + 1, Math.max(0, w - 2), Math.max(0, h - 2), pack_rgba(current.r, current.g, current.b, current.a))
 
     const swatch_w = Math.min(24 * scale, Math.max(12 * scale, h - 4 * scale))
-    this.ui.fill_rect(x + 2 * scale, y + 2 * scale, swatch_w, Math.max(0, h - 4 * scale), pack_rgba(current.r, current.g, current.b, current.a))
-    this.ui.stroke_rect(x + 2 * scale, y + 2 * scale, swatch_w, Math.max(0, h - 4 * scale), 1, this.color('border_strong'))
+    const swatch_r = Math.max(0, w_radius * scale - 1)
+    this.ui.fill_round_rect(x + 2 * scale, y + 2 * scale, swatch_w, Math.max(0, h - 4 * scale), swatch_r, pack_rgba(current.r, current.g, current.b, current.a))
+    this.ui.stroke_round_rect(x + 2 * scale, y + 2 * scale, swatch_w, Math.max(0, h - 4 * scale), swatch_r, 1, this.color('border_strong'))
     const label = options?.label ?? 'Color'
     const text_x = x + swatch_w + 8 * scale
     this.ui.draw_text(text_x, this.ui.text_v_center_y(y, h, w_font_px * scale), label, w_font_px * scale, this.color('text'))
@@ -1060,14 +1066,15 @@ export class ui_widgets {
     const in_safe_zone = this.point_in_rect(this.input.mouse_x, this.input.mouse_y, union_x, union_y, union_w, union_h)
     if (!in_safe_zone && !this.input.mouse_down) this.open_dropdown_id = null
     if (this.input.mouse_pressed && !in_btn && !in_pop) this.open_dropdown_id = null
-    this.ui.fill_rect(px, py, placement.w, ph, this.color('panel'))
-    this.ui.stroke_rect(px, py, placement.w, ph, 1, this.color('border'))
+    const popup_r = w_radius * scale
+    this.ui.fill_round_rect(px, py, placement.w, ph, popup_r, this.color('panel'))
+    this.ui.stroke_round_rect(px, py, placement.w, ph, popup_r, 1, this.color('border'))
     let row_y = py + popup_pad
     for (let i = 0; i < popup.items.length; i += 1) {
       const hover = this.point_in(px + popup_pad, row_y, placement.w - popup_pad * 2, w_popup_item_h * scale)
       const sel = popup.selected_ref.value === i
       const bg = sel ? this.color('selected') : hover ? this.color('hover') : 0
-      if (bg) this.ui.fill_rect(px + popup_pad, row_y, placement.w - popup_pad * 2, w_popup_item_h * scale, bg)
+      if (bg) this.ui.fill_round_rect(px + popup_pad, row_y, placement.w - popup_pad * 2, w_popup_item_h * scale, Math.max(0, popup_r - 1), bg)
       this.ui.draw_text(px + w_pad * scale, this.ui.text_v_center_y(row_y, w_popup_item_h * scale, w_font_px * scale), popup.items[i], w_font_px * scale, sel ? this.color('text') : this.color('text_dim'))
       if (hover && this.input.mouse_released) {
         popup.selected_ref.value = i
@@ -1104,8 +1111,9 @@ export class ui_widgets {
     if (this.input.mouse_pressed && !in_btn && !in_pop) this.open_color_picker_id = null
 
     const theme_panel = this.color('panel')
-    this.ui.fill_rect(px, py, placement.w, placement.h, theme_panel)
-    this.ui.stroke_rect(px, py, placement.w, placement.h, 1, this.color('border'))
+    const cp_r = w_radius * scale
+    this.ui.fill_round_rect(px, py, placement.w, placement.h, cp_r, theme_panel)
+    this.ui.stroke_round_rect(px, py, placement.w, placement.h, cp_r, 1, this.color('border'))
 
     const title_y = py + pad
     this.ui.draw_text(px + pad, this.ui.text_v_center_y(title_y, 12 * scale, 7 * scale), 'Color Picker', 7 * scale, this.color('text_dim'))

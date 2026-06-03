@@ -17,13 +17,15 @@ export class input_collector {
   private meta = false
   private shift = false
 
-  constructor(private readonly canvas: HTMLCanvasElement) {
+  constructor(private readonly canvas: HTMLCanvasElement, private readonly on_event: () => void = () => {}) {
     const dpr = () => window.devicePixelRatio || 1
+    const wake = () => this.on_event()
 
     canvas.addEventListener('pointermove', (e) => {
       const rect = canvas.getBoundingClientRect()
       this.state.mouse_x = (e.clientX - rect.left) * dpr()
       this.state.mouse_y = (e.clientY - rect.top) * dpr()
+      wake()
     })
     canvas.addEventListener('pointerdown', (e) => {
       canvas.setPointerCapture(e.pointerId)
@@ -32,16 +34,19 @@ export class input_collector {
       this.state.mouse_y = (e.clientY - rect.top) * dpr()
       this.state.mouse_down = true
       this.pressed = true
+      wake()
     })
     canvas.addEventListener('pointerup', () => {
       this.state.mouse_down = false
       this.released = true
+      wake()
     })
     canvas.addEventListener(
       'wheel',
       (e) => {
         this.wheel += -e.deltaY / 100
         e.preventDefault()
+        wake()
       },
       { passive: false },
     )
@@ -57,11 +62,13 @@ export class input_collector {
       if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Backspace'].includes(e.key)) {
         if (document.activeElement === document.body) e.preventDefault()
       }
+      wake()
     })
     window.addEventListener('keyup', (e) => {
       this.ctrl = e.ctrlKey
       this.meta = e.metaKey
       this.shift = e.shiftKey
+      wake()
     })
   }
 

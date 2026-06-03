@@ -25,8 +25,6 @@ export interface ui_renderer_stats {
   primitive_buffer_bytes_total: number
   vertex_buffer_bytes_used: number
   vertex_buffer_bytes_total: number
-  index_buffer_bytes_used: number
-  index_buffer_bytes_total: number
   texture_count: number
 }
 
@@ -54,6 +52,22 @@ export const FONT_MONO = 'FONT_MONO' as const
 
 export type ui_font_primitive = typeof FONT_MAIN | typeof FONT_ZH | typeof FONT_MONO
 
+/**
+ * Controls when `flush()` issues GPU work.
+ *
+ * - `'realtime'`: every `flush()` submits a render pass, so the canvas is
+ *   redrawn on every animation frame. Use when content is continuously
+ *   animating.
+ * - `'adaptive'` (default): `flush()` only submits a render pass when there
+ *   are pending render frames. Pending frames are scheduled by user input
+ *   (call `request_render()` from your input handlers) or any script that
+ *   needs a redraw. Each request schedules 8 frames so transient effects
+ *   (hover, focus rings, cursor blinks tied to input) still finish settling.
+ *   When no frames are pending, the immediate-mode logic still runs but no
+ *   GPU work is issued — this cuts power on idle UIs.
+ */
+export type ui_renderer_render_mode = 'realtime' | 'adaptive'
+
 export interface ui_renderer_init_options {
   /**
    * Load the Chinese (PingFang SC) font atlas. Defaults to `true`.
@@ -65,7 +79,14 @@ export interface ui_renderer_init_options {
    * `load_chinese_font()`.
    */
   chinese_font?: boolean
+  /**
+   * How `flush()` decides whether to submit GPU work. Defaults to
+   * `'adaptive'`. See `ui_renderer_render_mode` for details.
+   */
+  mode?: ui_renderer_render_mode
 }
+
+const adaptive_render_burst_frames = 8
 
 type font_face_doc = { chars: number[][]; line_height: number; size: number }
 type font_doc = font_face_doc & { pages?: string[]; width: number; height: number }
@@ -436,10 +457,14 @@ export class ui_renderer {
   private readonly round_rect_feather_outer = new Float32Array(rr_points * 2)
   private readonly round_rect_feather_inner = new Float32Array(rr_points * 2)
   private last_frame_stats: ui_renderer_stats | null = null
+  private render_mode_: ui_renderer_render_mode = 'adaptive'
+  private pending_render_frames = 0
 
   constructor(private readonly canvas: HTMLCanvasElement) {}
 
   async init(options?: ui_renderer_init_options): Promise<void> {
+    this.render_mode_ = options?.mode ?? 'adaptive'
+    this.pending_render_frames = adaptive_render_burst_frames
     if (!('gpu' in navigator)) throw new Error('WebGPU not supported')
     const adapter = await navigator.gpu.requestAdapter()
     if (!adapter) throw new Error('WebGPU adapter unavailable')
@@ -577,6 +602,24 @@ export class ui_renderer {
     this.canvas.height = this.canvas_height
     this.context.configure({ device: this.device, format: this.format, alphaMode: 'opaque' })
     this.device.queue.writeBuffer(this.screen_buffer, 0, new Float32Array([this.canvas_width, this.canvas_height]))
+    this.request_render()
+  }
+
+  /**
+   * Schedule the next N animation frames to actually issue GPU work in
+   * `'adaptive'` mode. Defaults to an 8-frame burst, enough to let transient
+   * input feedback (hover highlight, focus ring, cursor blink kick) settle
+   * before the renderer drops back to idle. Call this from input handlers
+   * or whenever a script mutates state that needs to be repainted. No-op
+   * in `'realtime'` mode but safe to call.
+   */
+  request_render(frames: number = adaptive_render_burst_frames): void {
+    if (frames <= 0) return
+    if (this.pending_render_frames < frames) this.pending_render_frames = frames
+  }
+
+  render_mode(): ui_renderer_render_mode {
+    return this.render_mode_
   }
 
   begin_frame(): void {
@@ -1081,11 +1124,18 @@ export class ui_renderer {
   flush(clear_color: GPUColorDict): void {
     if (!this.device || !this.context || !this.pipeline_image || !this.pipeline_sdf || !this.bind_group_white) return
     const byte_length = Math.max(this.vertex_count * vertex_stride, vertex_stride)
+    if (this.render_mode_ === 'adaptive' && this.pending_render_frames <= 0) {
+      this.last_frame_stats = this.capture_stats(this.vertex_buffer?.size ?? byte_length)
+      return
+    }
+    if (this.render_mode_ === 'adaptive') this.pending_render_frames -= 1
     if (!this.vertex_buffer || this.vertex_buffer.size < byte_length) {
+      let next_size = Math.max(this.vertex_buffer?.size ?? 0, 4096)
+      while (next_size < byte_length) next_size *= 2
       this.vertex_buffer?.destroy()
       this.vertex_buffer = this.device.createBuffer({
         label: 'ui.vertex_buffer',
-        size: Math.max(byte_length, 4096),
+        size: next_size,
         usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
       })
     }
@@ -1208,8 +1258,6 @@ export class ui_renderer {
       primitive_buffer_bytes_total: this.vertex_data.byteLength,
       vertex_buffer_bytes_used,
       vertex_buffer_bytes_total: this.vertex_buffer?.size ?? 0,
-      index_buffer_bytes_used: 0,
-      index_buffer_bytes_total: 0,
       texture_count: this.font_bind_groups.size + this.extra_bind_groups.size + (this.bind_group_white ? 1 : 0),
     }
   }
