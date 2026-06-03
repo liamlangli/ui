@@ -7,7 +7,100 @@ It bundles the pieces needed to build a browser-native editor UI on top of WebGP
 - **`ui_renderer`** — a batched WebGPU renderer for rectangles, rounded rects, SDF text (Lato main text and jb_mono monospace text in a shared atlas, PingFang SC for Chinese text), images, and the HSV color picker panels.
 - **`ui_widgets`** — an immediate-mode widget layer (buttons, toggles, sliders, dropdowns, text/number inputs, color pickers, scroll regions, menus) drawn through `ui_renderer`.
 - **`dock`** — a docking layout engine: split/leaf trees, tab drag-and-drop, drop targets, and (de)serialization.
-- **`theme`** — palette/CSS-variable theming with `load_theme`, `apply_theme`, `theme_color`, and `hex_to_normalized_rgba`.
+- **`theme`** — palette/CSS-variable theming with `load_theme`, `apply_theme`, `theme_color`, `theme_rgba`, `pack_color`, and `hex_to_normalized_rgba`.
+- **`plugins`** — opt-in, higher-level drop-in components (`dock_system`, `file_browser`, `im_dialog`) packaged so other projects can reuse them piecemeal. See [Plugins](#plugins).
+
+## Live preview
+
+An interactive playground lives in [`preview/`](preview) and is wired up with
+Vite. It boots the renderer and lays the whole demo out inside the `dock_system`
+plugin (Explorer, Widgets gallery, Console, About, and a Chat panel) — every
+pixel is drawn on the GPU.
+
+```bash
+npm install
+npm run dev      # local dev server
+npm run build    # production build → dist/ (GitHub Pages base = /ui/)
+```
+
+> Requires a WebGPU-capable browser (recent Chrome/Edge, or Safari Technology
+> Preview). The page shows a graceful fallback otherwise.
+
+### GitHub Pages
+
+`.github/workflows/deploy-pages.yml` builds the preview and deploys it to GitHub
+Pages on every push to `main` (or via *Run workflow*). Once enabled
+(**Settings → Pages → Source: GitHub Actions**) the demo is served at
+`https://liamlangli.github.io/ui/`. The Pages sub-path is injected at build time
+via the `BASE_PATH` env var, so forks deploy under their own repo name
+automatically.
+
+## Plugins
+
+Import individual plugins from the `@liamlangli/ui/plugins` sub-path (or the
+package root). Each is a self-contained immediate-mode component: it owns its
+drawing and input handling and takes your `ui_renderer` (+ `ui_widgets` where
+needed), a `theme_definition`, and the per-frame `ui_input_snapshot`.
+
+```ts
+import { dock_system, file_browser, im_dialog } from '@liamlangli/ui/plugins'
+```
+
+### `dock_system` — docking workspace
+
+The core `dock` module is pure layout math; `dock_system` is the rendering +
+input glue around it. It draws tab bars, splitters, the drag ghost and drop
+overlay, drives tab activation / drag-to-reorder / drag-to-split / splitter
+resize, and hands each visible panel body back to you to fill.
+
+```ts
+const dock = new dock_system() // or new dock_system(my_saved_layout)
+
+// each frame, between renderer.begin_frame() and renderer.flush():
+dock.frame(renderer, theme, input, x, y, w, h, (panel) => {
+  // panel.{x,y,w,h} is the clipped body rect (physical px)
+  if (panel.tab.id === 'files') file_browser(renderer, theme, input, panel.x, panel.y, panel.w, panel.h, tree, fb_state)
+})
+
+dock.add_tab({ id: 'log', title: 'Log' }) // spawn/focus a tab
+const saved = serialize_dock_layout(dock.layout)
+```
+
+### `file_browser` — tree view
+
+A scrollable, expandable file/folder tree. You own the `file_node[]` forest and
+the persistent state; it reports selection / activation (double-click or Enter) /
+expand-toggle.
+
+```ts
+const fb = create_file_browser_state()
+const tree: file_node[] = [{ name: 'src', kind: 'dir', children: [{ name: 'index.ts' }] }]
+
+const ev = file_browser(renderer, theme, input, x, y, w, h, tree, fb, { default_expanded: true })
+if (ev.activated) open_file(ev.activated.name)
+```
+
+### `im_dialog` — IM chat panel
+
+A chat surface with incoming/outgoing bubbles, avatars, author + timestamp
+captions, auto-scroll-to-newest, and an optional composer (text input + Send).
+It returns submitted text so you can append it to your own message array.
+
+```ts
+const chat = create_im_dialog_state()
+const messages: im_message[] = [
+  { author: 'Ada', side: 'left', text: 'Hi!', timestamp: Date.now() },
+]
+
+// widgets.begin_frame() must have run this frame (im_dialog uses the composer):
+const ev = im_dialog(renderer, widgets, theme, input, x, y, w, h, messages, chat, {
+  title: 'Ada · online',
+  placeholder: 'Message Ada…',
+})
+if (ev.sent) messages.push({ author: 'Me', side: 'right', text: ev.sent, timestamp: Date.now() })
+```
+
+CJK works once the Chinese atlas has loaded (see [Chinese font loading](#chinese-font-loading)).
 
 ## Usage
 

@@ -1,0 +1,28 @@
+{
+  "css": {
+    "--app-radius": "6px",
+    "--app-font": "Lato, system-ui, sans-serif"
+  },
+  "palette": {
+    "bg": "#16181d",
+    "panel": "#1d2026",
+    "panel_alt": "#23272f",
+    "border": "#2c313a",
+    "border_strong": "#3a414d",
+    "text": "#e6e9ef",
+    "text_dim": "#9aa3b0",
+    "hover": "#2a2f38",
+    "active": "#323845",
+    "selected": "#2f3744",
+    "accent": "#4c8bf5",
+    "accent_dim": "#2f4d7a",
+    "scene_outline": "#4c8bf5",
+    "gizmo_axis_x": "#e0698b",
+    "gizmo_axis_y": "#5fb878",
+    "gizmo_axis_z": "#5b9bd5",
+    "gizmo_center": "#d8a24a",
+    "track": "#15171b",
+    "overlay": "#0b0d10",
+    "ghost": "#3a414d"
+  }
+}

@@ -19,6 +19,8 @@
   "include": [
     "src/**/*.ts",
     "src/**/*.d.ts",
+    "preview/**/*.ts",
+    "vite.config.ts",
     "env.d.ts"
   ],
   "exclude": [

@@ -33,6 +33,41 @@ export function theme_color(theme: theme_definition, slot: theme_slot): string {
   return theme.palette[slot]
 }
 
+/**
+ * Pack a `#rrggbb` / `#rrggbbaa` hex string into the `0xAABBGGRR` integer the
+ * renderer's draw calls expect. Exported so plugin/consumer code can colour
+ * raw `fill_rect` / `draw_text` calls the same way the built-in widgets do.
+ */
+export function pack_color(hex: string): number {
+  const raw = hex.trim().replace('#', '')
+  const parse = (start: number) => Number.parseInt(raw.slice(start, start + 2), 16)
+  if (raw.length === 6) {
+    const r = parse(0)
+    const g = parse(2)
+    const b = parse(4)
+    return (((255 & 255) << 24) | ((b & 255) << 16) | ((g & 255) << 8) | (r & 255)) >>> 0
+  }
+  if (raw.length === 8) {
+    const r = parse(0)
+    const g = parse(2)
+    const b = parse(4)
+    const a = parse(6)
+    return (((a & 255) << 24) | ((b & 255) << 16) | ((g & 255) << 8) | (r & 255)) >>> 0
+  }
+  return 0xffffffff
+}
+
+/** Convenience: resolve a theme slot straight to a packed `0xAABBGGRR` colour. */
+export function theme_rgba(theme: theme_definition, slot: theme_slot): number {
+  return pack_color(theme_color(theme, slot))
+}
+
+/** Pack four 0..1 float channels into a `0xAABBGGRR` integer. */
+export function pack_rgba_floats(r: number, g: number, b: number, a = 1): number {
+  const c = (v: number) => Math.max(0, Math.min(255, Math.round(v * 255)))
+  return (((c(a) & 255) << 24) | ((c(b) & 255) << 16) | ((c(g) & 255) << 8) | (c(r) & 255)) >>> 0
+}
+
 export function apply_theme(theme: theme_definition): void {
   const root = document.documentElement
   for (const [name, value] of Object.entries(theme.css)) {
