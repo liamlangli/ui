@@ -247,6 +247,10 @@ async function main(): Promise<void> {
 
     const theme = tick_theme(frame_start_ms)
     const clear = hex_to_normalized_rgba(theme.palette.bg)
+    // While a cross-fade is in flight the palette changes every frame, so keep
+    // waking the (adaptive) renderer until it settles — `lerp_theme` returns the
+    // `to` reference once finished, which we detect by identity.
+    if (theme !== theme_ctrl.to) renderer.request_render()
 
     renderer.begin_frame()
     widgets.begin_frame(theme, snapshot)
