@@ -178,7 +178,7 @@ export class dock_system {
     measure: (title: string) => number,
   ): void {
     const bar_h = leaf.tab_bar_h
-    const radius = 4 * scale
+    const radius = 3 * scale
     // Panel background + tab strip.
     ui.fill_round_rect(leaf.x, leaf.y, leaf.w, leaf.h, radius, col('panel'))
     ui.fill_rect(leaf.x, leaf.y, leaf.w, bar_h, col('panel_alt'))
@@ -192,16 +192,20 @@ export class dock_system {
       const active = tab.id === leaf.active_tab_id
       const hover = point_in(input, cursor, leaf.y, tw, bar_h)
       if (active) {
-        ui.fill_round_rect_per_corner(cursor, leaf.y + 3 * scale, tw, bar_h - 3 * scale, radius, radius, 0, 0, col('panel'))
-        ui.fill_rect(cursor, leaf.y + 1 * scale, tw, 2 * scale, col('accent'))
+        ui.fill_round_rect_per_corner(cursor, leaf.y, tw, bar_h, radius, radius, 0, 0, col('panel'))
+        const ind_pad = 3 * scale
+        const ind_h = 2 * scale
+        ui.fill_round_rect(cursor + ind_pad, leaf.y + ind_pad, Math.max(0, tw - ind_pad * 2), ind_h, ind_h * 0.5, col('accent'))
       } else if (hover) {
-        ui.fill_round_rect_per_corner(cursor, leaf.y + 3 * scale, tw, bar_h - 3 * scale, radius, radius, 0, 0, col('hover'))
+        ui.fill_round_rect_per_corner(cursor, leaf.y, tw, bar_h, radius, radius, 0, 0, col('hover'))
       }
       const label_color = active ? col('text') : col('text_dim')
       const close_w = closable && active ? 16 * scale : 0
+      const label_y = ui.text_v_center_y(leaf.y, bar_h, font_px) + 2 * scale
       ui.push_clip(cursor, leaf.y, tw - close_w, bar_h)
-      ui.draw_text(cursor + 10 * scale, ui.text_v_center_y(leaf.y, bar_h, font_px), tab.title, font_px, label_color)
-      if (tab.dirty) ui.fill_circle(cursor + 10 * scale + measure(tab.title) + 6 * scale, leaf.y + bar_h * 0.5, 2.5 * scale, col('accent'))
+      ui.draw_text(cursor + 10 * scale, label_y, tab.title, font_px, label_color)
+      const label_cy = leaf.y + bar_h * 0.5 + 2 * scale
+      if (tab.dirty) ui.fill_circle(cursor + 10 * scale + measure(tab.title) + 6 * scale, label_cy, 2.5 * scale, col('accent'))
       ui.pop_clip()
 
       // Activate on press; arm a drag.
@@ -220,7 +224,7 @@ export class dock_system {
       // Close affordance.
       if (close_w > 0) {
         const cx = cursor + tw - 13 * scale
-        const cy = leaf.y + bar_h * 0.5
+        const cy = label_cy
         const close_hover = point_in(input, cx - 7 * scale, cy - 7 * scale, 14 * scale, 14 * scale)
         if (close_hover) ui.fill_circle(cx, cy, 8 * scale, col('hover'))
         const r = 3.2 * scale

@@ -43,6 +43,7 @@ type font_atlas = {
   height: number
   font_size: number
   line_height: number
+  baseline: number
   glyphs: Map<number, glyph_metric>
 }
 
@@ -252,6 +253,16 @@ function font_face(doc: font_bundle_doc, font_type: typeof FONT_MAIN | typeof FO
   return face
 }
 
+const baseline_reference_codepoints = [72, 77, 78, 73, 76, 69, 88, 84]
+
+function detect_baseline(glyphs: Map<number, glyph_metric>, font_size: number): number {
+  for (const code of baseline_reference_codepoints) {
+    const g = glyphs.get(code)
+    if (g && g.height > 0) return g.y_offset + g.height
+  }
+  return Math.round(font_size * 0.8)
+}
+
 function glyph_map(doc: font_face_doc, texture_width: number, texture_height: number, options?: { cjk_punctuation_fallbacks?: boolean }): font_atlas {
   const glyphs = new Map<number, glyph_metric>()
   for (const [code, width, height, x_offset, y_offset, x_advance, atlas_x, atlas_y] of doc.chars) {
@@ -274,6 +285,7 @@ function glyph_map(doc: font_face_doc, texture_width: number, texture_height: nu
     height: texture_height,
     font_size: doc.size,
     line_height: doc.line_height,
+    baseline: detect_baseline(glyphs, doc.size),
     glyphs,
   }
 }
@@ -979,12 +991,15 @@ export class ui_renderer {
   draw_text(x: number, y: number, text: string, font_px: number, rgba: number, font_type: ui_font_primitive = FONT_MAIN): void {
     if (!text || !this.font_atlases.size) return
     const effective_font_px = font_px * default_font_scale
+    const primary = this.font_atlases.get(font_type) ?? this.font_atlases.get(FONT_MAIN)
     let cx = x
     let cy = y
+    let baseline_y = primary ? cy + primary.baseline * (effective_font_px / primary.font_size) : cy
     for (const ch of text) {
       if (ch === '\n') {
         cx = x
         cy += this.text_line_height(font_px, font_type)
+        baseline_y = primary ? cy + primary.baseline * (effective_font_px / primary.font_size) : cy
         continue
       }
       const code = ch.codePointAt(0) ?? 32
@@ -1000,7 +1015,7 @@ export class ui_renderer {
       const inv_w = 1 / font.atlas.width
       const inv_h = 1 / font.atlas.height
       const x0 = cx + glyph.x_offset * scale
-      const y0 = cy + glyph.y_offset * scale
+      const y0 = baseline_y - (font.atlas.baseline - glyph.y_offset) * scale
       const x1 = x0 + glyph.width * scale
       const y1 = y0 + glyph.height * scale
       this.current_texture_id = font.texture_id

@@ -253,6 +253,7 @@ export class ui_widgets {
   private open_color_picker_popup_rect: { id: string; x: number; y: number; w: number; h: number } | null = null
   private readonly color_picker_values = new Map<string, ui_color_rgba>()
   private readonly color_picker_number_inputs = new Map<string, ui_number_input_state>()
+  private is_inside_popup_rendering = false
 
   constructor(private readonly ui: ui_renderer) {}
 
@@ -261,14 +262,16 @@ export class ui_widgets {
     this.input = input
     this.pending_dropdown = null
     this.pending_color_picker = null
-    this.open_dropdown_popup_rect = null
-    this.open_color_picker_popup_rect = null
+    if (this.open_dropdown_id == null) this.open_dropdown_popup_rect = null
+    if (this.open_color_picker_id == null) this.open_color_picker_popup_rect = null
     if (!input.mouse_down && this.active_id) this.active_id = null
   }
 
   end_frame(): void {
+    this.is_inside_popup_rendering = true
     if (this.pending_dropdown) this.render_dropdown_popup(this.pending_dropdown)
     if (this.pending_color_picker) this.render_color_picker_popup(this.pending_color_picker)
+    this.is_inside_popup_rendering = false
   }
 
   section(x: number, y: number, w: number, label: string): number {
@@ -285,7 +288,9 @@ export class ui_widgets {
     const scale = window.devicePixelRatio || 1
     const hover = this.point_in(x, y, w, h)
     const active = options?.active === true
-    const bg = active ? this.color('active') : hover ? this.color('hover') : this.color('selected')
+    if (hover && this.input.mouse_pressed) this.active_id = id
+    const pressed = this.active_id === id && this.input.mouse_down && hover
+    const bg = pressed || active ? this.color('active') : hover ? this.color('hover') : this.color('selected')
     const border = active ? this.color('accent') : this.color('border_strong')
     const r = w_radius * scale
     this.ui.fill_round_rect(x, y, w, h, r, bg)
@@ -1182,11 +1187,22 @@ export class ui_widgets {
   }
 
   private point_in(x: number, y: number, w: number, h: number): boolean {
+    if (!this.is_inside_popup_rendering && this.mouse_blocked_by_popup()) return false
     return this.input.mouse_x >= x && this.input.mouse_y >= y && this.input.mouse_x < x + w && this.input.mouse_y < y + h
   }
 
   private point_in_rect(px: number, py: number, x: number, y: number, w: number, h: number): boolean {
     return px >= x && py >= y && px < x + w && py < y + h
+  }
+
+  private mouse_blocked_by_popup(): boolean {
+    const dr = this.open_dropdown_popup_rect
+    if (dr && this.open_dropdown_id != null &&
+      this.point_in_rect(this.input.mouse_x, this.input.mouse_y, dr.x, dr.y, dr.w, dr.h)) return true
+    const cr = this.open_color_picker_popup_rect
+    if (cr && this.open_color_picker_id != null &&
+      this.point_in_rect(this.input.mouse_x, this.input.mouse_y, cr.x, cr.y, cr.w, cr.h)) return true
+    return false
   }
 
   private color_picker_number_state(id: string): ui_number_input_state {

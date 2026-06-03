@@ -131,7 +131,7 @@ export function serialize_dock_layout(layout: dock_layout): string {
 
 export function tab_width(title: string, scale: number, measured_text_width?: number): number {
   const text_width = measured_text_width ?? title.length * 12.4 * scale
-  return Math.max(24 * scale, text_width + 28 * scale)
+  return Math.max(24 * scale, text_width + 34 * scale)
 }
 
 export function compute_dock_frame(root: dock_node, x: number, y: number, w: number, h: number, scale: number): dock_frame {
