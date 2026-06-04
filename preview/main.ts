@@ -33,10 +33,14 @@ import {
   code_editor,
   create_code_editor_state,
   text_buffer,
+  ui_main_menu,
+  visit_dock_leaves,
+  activate_dock_tab,
   type editor_token,
   type editor_token_kind,
   type file_node,
   type im_message,
+  type ui_menu_node,
 } from '../src/index'
 import { input_collector } from './input'
 import theme_url from './theme.json?url'
@@ -156,6 +160,87 @@ const auto_replies = [
 
 // --- Persistent widget / plugin state -------------------------------------
 const dock = new dock_system(build_layout())
+
+// Every demo page the top menu can spawn as a dock tab.
+const DEMO_TABS: { id: string; title: string }[] = [
+  { id: 'files', title: 'Explorer' },
+  { id: 'editor', title: 'Editor' },
+  { id: 'gallery', title: 'Widgets' },
+  { id: 'console', title: 'Console' },
+  { id: 'metrics', title: 'Metrics' },
+  { id: 'about', title: 'About' },
+  { id: 'chat', title: 'Chat' },
+]
+
+// Spawn a demo tab — or just focus it if it already lives somewhere in the dock.
+function open_demo_tab(id: string, title: string): void {
+  let found_leaf: string | null = null
+  visit_dock_leaves(dock.layout.root, (leaf) => {
+    if (!found_leaf && leaf.tabs.some((t) => t.id === id)) found_leaf = leaf.id
+  })
+  if (found_leaf) activate_dock_tab(dock.layout, found_leaf, id)
+  else dock.add_tab({ id, title })
+}
+
+// The Theme sub-menu is rebuilt each frame (to reflect the live selection), so
+// keep a reference to splice fresh children into.
+const theme_menu: ui_menu_node = { label: 'Theme', children: [] }
+
+const main_menu = new ui_main_menu([
+  {
+    label: 'Demos',
+    children: [
+      {
+        label: 'Panels',
+        icon: '🗂️',
+        children: [
+          { id: 'files', label: 'Explorer', icon: '📁' },
+          { id: 'gallery', label: 'Widgets', icon: '🎛️' },
+          { id: 'metrics', label: 'Metrics', icon: '📈' },
+          { id: 'about', label: 'About', icon: 'ℹ️' },
+        ],
+      },
+      {
+        label: 'Editors',
+        icon: '✏️',
+        children: [
+          { id: 'editor', label: 'Code Editor', icon: '📝' },
+          { id: 'console', label: 'Console', icon: '🖥️' },
+        ],
+      },
+      { label: '', separator: true },
+      { id: 'chat', label: 'Chat', icon: '💬' },
+    ],
+  },
+  theme_menu,
+  {
+    label: 'View',
+    children: [
+      { id: 'open-all', label: 'Open all demo tabs' },
+      { id: 'reset', label: 'Reset layout' },
+    ],
+  },
+])
+
+function handle_menu(node: ui_menu_node): void {
+  const id = node.id
+  if (!id) return
+  if (id.startsWith('theme:')) {
+    transition_theme_to(Number(id.slice('theme:'.length)), performance.now())
+    return
+  }
+  if (id === 'open-all') {
+    for (const tab of DEMO_TABS) open_demo_tab(tab.id, tab.title)
+    return
+  }
+  if (id === 'reset') {
+    dock.layout = build_layout()
+    return
+  }
+  const tab = DEMO_TABS.find((t) => t.id === id)
+  if (tab) open_demo_tab(tab.id, tab.title)
+}
+
 const file_state = create_file_browser_state()
 const chat_state = create_im_dialog_state()
 let chat_is_typing = false
@@ -307,7 +392,20 @@ async function main(): Promise<void> {
     renderer.begin_frame()
     widgets.begin_frame(theme, snapshot)
 
-    dock.frame(renderer, theme, snapshot, safe.x + m, safe.y + m, safe.w - m * 2, safe.h - m * 2, (panel) => {
+    // Top menu bar reserves a strip; the dock fills the area below it.
+    const menu_h = 30 * scale
+    const bar_x = safe.x + m
+    const bar_y = safe.y + m
+    const bar_w = safe.w - m * 2
+    const dock_y = bar_y + menu_h + m
+    const dock_h = safe.y + safe.h - m - dock_y
+
+    // When a dropdown is open over the dock, swallow the click so the panel
+    // underneath doesn't also react to it.
+    const block = main_menu.blocks_point(snapshot.mouse_x, snapshot.mouse_y)
+    const dock_input = block ? { ...snapshot, mouse_pressed: false, mouse_down: false, mouse_released: false, wheel_y: 0 } : snapshot
+
+    dock.frame(renderer, theme, dock_input, bar_x, dock_y, bar_w, dock_h, (panel) => {
       const inset = 0
       const px = panel.x + inset
       const py = panel.y + inset
@@ -337,6 +435,12 @@ async function main(): Promise<void> {
           break
       }
     })
+
+    // Refresh the Theme sub-menu against the live selection, then draw the menu
+    // bar on top of the dock so its dropdowns overlay the panels below.
+    theme_menu.children = theme_ctrl.presets.map((preset, i) => ({ id: `theme:${i}`, label: preset.name, checked: i === theme_ctrl.index }))
+    const menu_event = main_menu.frame(renderer, theme, snapshot, bar_x, bar_y, bar_w, menu_h)
+    if (menu_event.activated) handle_menu(menu_event.activated)
 
     widgets.end_frame()
     renderer.flush(clear)
