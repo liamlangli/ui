@@ -131,8 +131,8 @@ export function ui_multi_drop_menu(
   let pressed_inside = false
 
   // --- Menu bar -----------------------------------------------------------
-  ui.fill_rect(x, y, w, h, col('panel_alt'))
-  ui.fill_rect(x, y + h - 1 * scale, w, 1 * scale, col('border'))
+  ui.fill_round_rect(x, y, w, h, radius, col('panel_alt'))
+  ui.stroke_round_rect(x, y, w, h, radius, 1, col('border'))
 
   const bar_x: number[] = []
   const bar_w: number[] = []

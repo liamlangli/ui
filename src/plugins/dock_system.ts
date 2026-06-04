@@ -181,7 +181,7 @@ export class dock_system {
     const radius = 3 * scale
     // Panel background + tab strip.
     ui.fill_round_rect(leaf.x, leaf.y, leaf.w, leaf.h, radius, col('panel'))
-    ui.fill_rect(leaf.x, leaf.y, leaf.w, bar_h, col('panel_alt'))
+    ui.fill_round_rect_per_corner(leaf.x, leaf.y, leaf.w, bar_h, radius, radius, 0, 0, col('panel_alt'))
     ui.fill_rect(leaf.x, leaf.y + bar_h - 1 * scale, leaf.w, 1 * scale, col('border'))
 
     let cursor = leaf.x + 4 * scale
