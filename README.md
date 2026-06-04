@@ -8,14 +8,14 @@ It bundles the pieces needed to build a browser-native editor UI on top of WebGP
 - **`ui_widgets`** — an immediate-mode widget layer (buttons, toggles, sliders, dropdowns, text/number inputs, color pickers, scroll regions, menus) drawn through `ui_renderer`.
 - **`dock`** — a docking layout engine: split/leaf trees, tab drag-and-drop, drop targets, and (de)serialization.
 - **`theme`** — palette/CSS-variable theming with `load_theme`, `apply_theme`, `theme_color`, `theme_rgba`, `pack_color`, and `hex_to_normalized_rgba`.
-- **`plugins`** — opt-in, higher-level drop-in components (`dock_system`, `file_browser`, `im_dialog`, `code_editor`) packaged so other projects can reuse them piecemeal. See [Plugins](#plugins).
+- **`plugins`** — opt-in, higher-level drop-in components (`dock_system`, `file_browser`, `asset_browser`, `graph`, `im_dialog`, `code_editor`) packaged so other projects can reuse them piecemeal. See [Plugins](#plugins).
 
 ## Live preview
 
 An interactive playground lives in [`preview/`](preview) and is wired up with
 Vite. It boots the renderer and lays the whole demo out inside the `dock_system`
-plugin (Explorer, an Editor, Widgets gallery, Console, About, and a Chat panel)
-— every pixel is drawn on the GPU.
+plugin (Explorer, an Editor, Widgets gallery, Console, a node Graph, About, and a
+Chat panel) — every pixel is drawn on the GPU.
 
 ```bash
 npm install
@@ -43,7 +43,7 @@ drawing and input handling and takes your `ui_renderer` (+ `ui_widgets` where
 needed), a `theme_definition`, and the per-frame `ui_input_snapshot`.
 
 ```ts
-import { code_editor, dock_system, file_browser, im_dialog } from '@liamlangli/ui/plugins'
+import { asset_browser, code_editor, dock_system, file_browser, graph_canvas, im_dialog } from '@liamlangli/ui/plugins'
 ```
 
 ### `dock_system` — docking workspace
@@ -79,6 +79,76 @@ const tree: file_node[] = [{ name: 'src', kind: 'dir', children: [{ name: 'index
 const ev = file_browser(renderer, theme, input, x, y, w, h, tree, fb, { default_expanded: true })
 if (ev.activated) open_file(ev.activated.name)
 ```
+
+### `asset_browser` — two-pane content browser
+
+The richer "content browser" pattern (vs the single-column `file_browser`): a
+collapsible folder tree on the left, a wrapped grid of preview cards for the
+selected folder on the right, a breadcrumb + host toolbar buttons across the
+top, and a draggable splitter between the panes. It owns scrolling, hit-testing,
+selection, splitter-drag and double-click, and reports navigation / activation /
+toolbar / context-menu intents back to you. You own the folder forest, the entry
+list for the selected folder, and each card's thumbnail (via `render_preview`).
+
+```ts
+const ab = create_asset_browser_state('Project')
+const folders: asset_folder_node[] = [{ path: 'Project', name: 'Project', children: [{ path: 'Project/Textures', name: 'Textures' }] }]
+const entries: asset_entry[] = [{ path: 'Project/Textures/brick.png', name: 'brick.png', kind: 'file', type_label: 'TEXTURE' }]
+
+const ev = asset_browser(renderer, theme, input, x, y, w, h, folders, entries, ab, {
+  toolbar: [{ id: 'create', label: 'Create Asset' }, { id: 'import', label: 'Import' }],
+  render_preview: (entry, px, py, pw, ph) => draw_thumbnail(entry, px, py, pw, ph),
+})
+if (ev.folder_selected) load_folder(ev.folder_selected)
+if (ev.entry_activated) open_asset(ev.entry_activated.path)
+if (ev.toolbar_clicked === 'create') open_create_menu()
+if (ev.context_requested) open_context_menu(ev.context_requested)
+```
+
+### `graph` — node-graph canvas
+
+A generic, content-agnostic node editor surface: a pannable / zoomable grid,
+nodes with typed input/output pins, bezier wires, a marquee selection box and a
+floating link draft. It owns all interaction — left-drag a node to move it (or a
+marquee on empty canvas to select; Shift extends), drag from an output pin to an
+input pin to connect, middle-drag to pan, wheel to zoom, right-click for a create
+menu. You own the `nodes`/`links` arrays and describe each node through a
+`spec(node) → { title, inputs, outputs }`, so the same canvas drives a shader
+graph, render graph, material graph, … The plugin mutates `node.x/.y` on drag and
+pushes to `links` on connect; events are returned so you can react.
+
+```ts
+import { graph_canvas, create_graph_state } from '@liamlangli/ui/plugins'
+import type { graph_node_view } from '@liamlangli/ui/plugins'
+
+const gstate = create_graph_state()
+const nodes = [
+  { id: 1, x: 20, y: 30, type: 'UV' },
+  { id: 2, x: 240, y: 40, type: 'Output' },
+]
+const links = [{ src_node: 1, src_pin: 0, dst_node: 2, dst_pin: 0 }]
+
+function spec(node: (typeof nodes)[number]): graph_node_view {
+  // → host maps its node model to a title + typed pins
+  return node.type === 'UV'
+    ? { title: 'UV', inputs: [], outputs: [{ label: 'UV', kind: 'uv' }] }
+    : { title: 'Output', inputs: [{ label: 'Base Color', kind: 'color' }], outputs: [] }
+}
+
+// each frame, between renderer.begin_frame() and renderer.flush():
+const ev = graph_canvas(renderer, theme, input, x, y, w, h, nodes, links, gstate, spec, {
+  compatible: (out_kind, in_kind) => out_kind === in_kind,   // gate wire creation
+  render_body: (node, view, body) => draw_inline_editor(node, body), // inline node content
+})
+if (ev.link_created) recompile()
+if (ev.menu_requested) open_create_menu(ev.menu_requested)    // { screen_x, screen_y, graph_x, graph_y }
+if (ev.delete_requested) remove_selected(gstate.selected)
+```
+
+Pan and the create menu need the middle / right mouse buttons forwarded on the
+`ui_input_snapshot` (`mouse_middle_down`, `mouse_right_pressed`); selection,
+node-drag, marquee, wire-drag and zoom work with the base left-button + wheel
+fields alone.
 
 ### `im_dialog` — IM chat panel
 

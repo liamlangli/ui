@@ -10,6 +10,8 @@ export class input_collector {
   private wheel = 0
   private pressed = false
   private released = false
+  private middle_down = false
+  private right_pressed = false
   // one-shot key edges, consumed each frame
   private keys = new Set<string>()
   // held modifiers, persist across frames until keyup
@@ -68,13 +70,20 @@ export class input_collector {
       const rect = canvas.getBoundingClientRect()
       this.state.mouse_x = (e.clientX - rect.left) * dpr()
       this.state.mouse_y = (e.clientY - rect.top) * dpr()
-      this.state.mouse_down = true
-      this.pressed = true
-      const region = this.hit_native_text_region(this.state.mouse_x, this.state.mouse_y)
-      if (region) this.focus_native_text_region(region)
+      if (e.button === 1) {
+        this.middle_down = true
+      } else if (e.button === 2) {
+        this.right_pressed = true
+      } else {
+        this.state.mouse_down = true
+        this.pressed = true
+        const region = this.hit_native_text_region(this.state.mouse_x, this.state.mouse_y)
+        if (region) this.focus_native_text_region(region)
+      }
       canvas.setPointerCapture(e.pointerId)
       wake()
     })
+    canvas.addEventListener('contextmenu', (e) => e.preventDefault())
     canvas.addEventListener(
       'touchstart',
       (e) => {
@@ -95,9 +104,13 @@ export class input_collector {
       const region = this.hit_native_text_region(x, y)
       if (region) this.focus_native_text_region(region)
     })
-    canvas.addEventListener('pointerup', () => {
-      this.state.mouse_down = false
-      this.released = true
+    canvas.addEventListener('pointerup', (e) => {
+      if (e.button === 1) {
+        this.middle_down = false
+      } else if (e.button !== 2) {
+        this.state.mouse_down = false
+        this.released = true
+      }
       wake()
     })
     canvas.addEventListener(
@@ -180,6 +193,8 @@ export class input_collector {
     const s = this.state
     s.mouse_pressed = this.pressed
     s.mouse_released = this.released
+    s.mouse_middle_down = this.middle_down
+    s.mouse_right_pressed = this.right_pressed
     s.wheel_y = this.wheel
     s.typed_text = this.typed
     s.ime_composition = this.composition
@@ -209,6 +224,7 @@ export class input_collector {
     this.native_regions = [...(this.state.native_text_regions ?? [])]
     this.pressed = false
     this.released = false
+    this.right_pressed = false
     this.wheel = 0
     this.typed = ''
     this.keys.clear()
