@@ -36,11 +36,16 @@ import {
   ui_main_menu,
   visit_dock_leaves,
   activate_dock_tab,
+  graph_canvas,
+  create_graph_state,
   type editor_token,
   type editor_token_kind,
   type file_node,
   type im_message,
   type ui_menu_node,
+  type graph_node_base,
+  type graph_node_view,
+  type graph_link,
 } from '../src/index'
 import { input_collector } from './input'
 import theme_url from './theme.json?url'
@@ -158,6 +163,28 @@ const auto_replies = [
   'Let me try that.',
 ]
 
+// --- graph plugin demo ------------------------------------------------------
+interface demo_graph_node extends graph_node_base {
+  title: string
+  inputs: { label: string; kind: string }[]
+  outputs: { label: string; kind: string }[]
+}
+const graph_nodes: demo_graph_node[] = [
+  { id: 1, x: 20, y: 30, title: 'UV', inputs: [], outputs: [{ label: 'UV', kind: 'uv' }] },
+  { id: 2, x: 220, y: 20, title: 'Texture', inputs: [{ label: 'UV', kind: 'uv' }], outputs: [{ label: 'RGBA', kind: 'color' }] },
+  { id: 3, x: 220, y: 200, title: 'Color', inputs: [], outputs: [{ label: 'RGB', kind: 'color' }] },
+  { id: 4, x: 440, y: 110, title: 'Multiply', inputs: [{ label: 'A', kind: 'color' }, { label: 'B', kind: 'color' }], outputs: [{ label: 'Out', kind: 'color' }] },
+  { id: 5, x: 660, y: 120, title: 'Output', inputs: [{ label: 'Base Color', kind: 'color' }, { label: 'Alpha', kind: 'float' }], outputs: [] },
+]
+const graph_links: graph_link[] = [
+  { src_node: 1, src_pin: 0, dst_node: 2, dst_pin: 0 },
+  { src_node: 2, src_pin: 0, dst_node: 4, dst_pin: 0 },
+  { src_node: 3, src_pin: 0, dst_node: 4, dst_pin: 1 },
+  { src_node: 4, src_pin: 0, dst_node: 5, dst_pin: 0 },
+]
+const graph_state_demo = create_graph_state()
+const graph_view = (node: demo_graph_node): graph_node_view => ({ title: node.title, inputs: node.inputs, outputs: node.outputs })
+
 // --- Persistent widget / plugin state -------------------------------------
 const dock = new dock_system(build_layout())
 
@@ -168,6 +195,7 @@ const DEMO_TABS: { id: string; title: string }[] = [
   { id: 'gallery', title: 'Widgets' },
   { id: 'console', title: 'Console' },
   { id: 'metrics', title: 'Metrics' },
+  { id: 'graph', title: 'Graph' },
   { id: 'about', title: 'About' },
   { id: 'chat', title: 'Chat' },
 ]
@@ -197,6 +225,7 @@ const main_menu = new ui_main_menu([
           { id: 'files', label: 'Explorer', icon: '📁' },
           { id: 'gallery', label: 'Widgets', icon: '🎛️' },
           { id: 'metrics', label: 'Metrics', icon: '📈' },
+          { id: 'graph', label: 'Graph', icon: '🕸️' },
           { id: 'about', label: 'About', icon: 'ℹ️' },
         ],
       },
@@ -429,6 +458,11 @@ async function main(): Promise<void> {
           break
         case 'metrics':
           render_metrics(renderer, theme, px, py, pw, ph, scale)
+          break
+        case 'graph':
+          graph_canvas(renderer, theme, snapshot, px, py, pw, ph, graph_nodes, graph_links, graph_state_demo, graph_view, {
+            compatible: (a, b) => a === b || a === 'color' || b === 'color',
+          })
           break
         case 'chat':
           render_chat(renderer, widgets, theme, snapshot, px, py, pw, ph)

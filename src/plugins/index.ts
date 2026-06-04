@@ -8,8 +8,10 @@
 // takes the host's `ui_renderer` (+ `ui_widgets` where needed), a
 // `theme_definition`, and an `ui_input_snapshot`.
 
+export * from './asset_browser'
 export * from './code_editor'
 export * from './dock_system'
 export * from './file_browser'
+export * from './graph'
 export * from './im_dialog'
 export * from './ui_main_menu'

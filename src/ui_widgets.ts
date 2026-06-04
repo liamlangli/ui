@@ -8,6 +8,10 @@ export interface ui_input_snapshot {
   mouse_down: boolean
   mouse_pressed: boolean
   mouse_released: boolean
+  /** Middle mouse button held (level). Optional; used by the graph plugin to pan. */
+  mouse_middle_down?: boolean
+  /** Right mouse button pressed this frame (edge). Optional; used by the graph plugin to open a create menu. */
+  mouse_right_pressed?: boolean
   wheel_y: number
   typed_text: string
   key_backspace: boolean
@@ -215,6 +219,8 @@ export function create_empty_ui_input(): ui_input_snapshot {
     mouse_down: false,
     mouse_pressed: false,
     mouse_released: false,
+    mouse_middle_down: false,
+    mouse_right_pressed: false,
     wheel_y: 0,
     typed_text: '',
     key_backspace: false,
