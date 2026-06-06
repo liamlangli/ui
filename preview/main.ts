@@ -188,8 +188,8 @@ const graph_view = (node: demo_graph_node): graph_node_view => ({ title: node.ti
 // --- Persistent widget / plugin state -------------------------------------
 const dock = new dock_system(build_layout())
 
-// Every demo page the top menu can spawn as a dock tab.
-const DEMO_TABS: { id: string; title: string }[] = [
+// Every workspace view the top menu can spawn as a dock tab.
+const VIEW_TABS: { id: string; title: string }[] = [
   { id: 'files', title: 'Explorer' },
   { id: 'editor', title: 'Editor' },
   { id: 'gallery', title: 'Widgets' },
@@ -200,8 +200,8 @@ const DEMO_TABS: { id: string; title: string }[] = [
   { id: 'chat', title: 'Chat' },
 ]
 
-// Spawn a demo tab — or just focus it if it already lives somewhere in the dock.
-function open_demo_tab(id: string, title: string): void {
+// Spawn a view tab — or just focus it if it already lives somewhere in the dock.
+function open_view_tab(id: string, title: string): void {
   let found_leaf: string | null = null
   visit_dock_leaves(dock.layout.root, (leaf) => {
     if (!found_leaf && leaf.tabs.some((t) => t.id === id)) found_leaf = leaf.id
@@ -214,41 +214,67 @@ function open_demo_tab(id: string, title: string): void {
 // keep a reference to splice fresh children into.
 const theme_menu: ui_menu_node = { label: 'Theme', children: [] }
 
+const compile_ctrl = {
+  auto_compile: true,
+  debounce_ms: 650,
+  timer: 0,
+  sequence: 0,
+  last_source_version: 0,
+  status: 'Idle' as 'Idle' | 'Queued' | 'Compiling' | 'Built',
+}
+
 const main_menu = new ui_main_menu([
   {
-    label: 'Demos',
+    label: 'File',
     children: [
-      {
-        label: 'Panels',
-        icon: '🗂️',
-        children: [
-          { id: 'files', label: 'Explorer', icon: '📁' },
-          { id: 'gallery', label: 'Widgets', icon: '🎛️' },
-          { id: 'metrics', label: 'Metrics', icon: '📈' },
-          { id: 'graph', label: 'Graph', icon: '🕸️' },
-          { id: 'about', label: 'About', icon: 'ℹ️' },
-        ],
-      },
-      {
-        label: 'Editors',
-        icon: '✏️',
-        children: [
-          { id: 'editor', label: 'Code Editor', icon: '📝' },
-          { id: 'console', label: 'Console', icon: '🖥️' },
-        ],
-      },
+      { id: 'new-file', label: 'New File' },
+      { id: 'open-file', label: 'Open File' },
+      { id: 'save-file', label: 'Save' },
       { label: '', separator: true },
-      { id: 'chat', label: 'Chat', icon: '💬' },
+      { id: 'files', label: 'Explorer' },
     ],
   },
-  theme_menu,
+  {
+    label: 'Edit',
+    children: [
+      { id: 'focus-editor', label: 'Focus Editor' },
+      { id: 'select-all', label: 'Select All' },
+    ],
+  },
   {
     label: 'View',
     children: [
-      { id: 'open-all', label: 'Open all demo tabs' },
+      {
+        label: 'Workspace',
+        children: [
+          { id: 'files', label: 'Explorer' },
+          { id: 'editor', label: 'Editor' },
+          { id: 'console', label: 'Console' },
+        ],
+      },
+      {
+        label: 'Tools',
+        children: [
+          { id: 'metrics', label: 'Metrics' },
+          { id: 'graph', label: 'Graph' },
+          { id: 'gallery', label: 'Widgets' },
+          { id: 'chat', label: 'Chat' },
+          { id: 'about', label: 'About' },
+        ],
+      },
+      { label: '', separator: true },
+      { id: 'open-all', label: 'Open all views' },
       { id: 'reset', label: 'Reset layout' },
     ],
   },
+  {
+    label: 'Run',
+    children: [
+      { id: 'compile-now', label: 'Compile Now' },
+      { id: 'auto-compile', label: 'Auto Compile', checked: compile_ctrl.auto_compile },
+    ],
+  },
+  theme_menu,
 ])
 
 function handle_menu(node: ui_menu_node): void {
@@ -259,15 +285,50 @@ function handle_menu(node: ui_menu_node): void {
     return
   }
   if (id === 'open-all') {
-    for (const tab of DEMO_TABS) open_demo_tab(tab.id, tab.title)
+    for (const tab of VIEW_TABS) open_view_tab(tab.id, tab.title)
     return
   }
   if (id === 'reset') {
     dock.layout = build_layout()
     return
   }
-  const tab = DEMO_TABS.find((t) => t.id === id)
-  if (tab) open_demo_tab(tab.id, tab.title)
+  if (id === 'focus-editor') {
+    open_view_tab('editor', 'Editor')
+    editor_state.focused = true
+    return
+  }
+  if (id === 'select-all') {
+    open_view_tab('editor', 'Editor')
+    editor_buffer.select_all()
+    return
+  }
+  if (id === 'new-file') {
+    open_view_tab('editor', 'Editor')
+    editor_buffer.set_text('')
+    schedule_compile()
+    return
+  }
+  if (id === 'open-file') {
+    open_view_tab('files', 'Explorer')
+    append_console('open file: use the Explorer view', '#d8a24a')
+    return
+  }
+  if (id === 'save-file') {
+    append_console(`saved buffer (${editor_buffer.get_text().length} bytes)`, '#5fb878')
+    return
+  }
+  if (id === 'compile-now') {
+    run_compile()
+    return
+  }
+  if (id === 'auto-compile') {
+    compile_ctrl.auto_compile = !compile_ctrl.auto_compile
+    if (compile_ctrl.auto_compile) schedule_compile()
+    else cancel_compile()
+    return
+  }
+  const tab = VIEW_TABS.find((t) => t.id === id)
+  if (tab) open_view_tab(tab.id, tab.title)
 }
 
 const file_state = create_file_browser_state()
