@@ -126,7 +126,6 @@ export function asset_browser(
   const col = (slot: theme_slot) => pack(theme_color(theme, slot))
   const event: asset_browser_event = {}
 
-  const toolbar_h = 27 * scale
   const gap = 3 * scale
   const splitter_w = 6 * scale
   const btn_h = 24 * scale
@@ -155,7 +154,7 @@ export function asset_browser(
   const grid_rect = { x: x + left_w + splitter_w, y: body_y, w: w - left_w - splitter_w, h: body_h }
 
   // Breadcrumb (sits in the toolbar lane, above the grid).
-  draw_breadcrumb(ui, theme, grid_rect.x + 4 * scale, toolbar_y, btn_h, state.selected_folder, input, scale, (p) => { state.selected_folder = p; event.folder_selected = p }, col)
+  draw_breadcrumb(ui, grid_rect.x + 4 * scale, toolbar_y, btn_h, state.selected_folder, input, scale, (p) => { state.selected_folder = p; event.folder_selected = p }, col)
 
   // --- Splitter ----------------------------------------------------------
   const split_hover = point_in(input, splitter_rect.x - 2 * scale, splitter_rect.y, splitter_rect.w + 4 * scale, splitter_rect.h)
@@ -168,12 +167,12 @@ export function asset_browser(
   // --- Tree pane ---------------------------------------------------------
   ui.fill_rect(tree_rect.x, tree_rect.y, tree_rect.w, tree_rect.h, col('panel'))
   ui.stroke_rect(tree_rect.x, tree_rect.y, tree_rect.w, tree_rect.h, 1, col('border'))
-  draw_tree(ui, theme, input, tree_rect, flatten_tree(folders, state.collapsed), state, font_px, scale, col, event)
+  draw_tree(ui, input, tree_rect, flatten_tree(folders, state.collapsed), state, font_px, scale, col, event)
 
   // --- Grid pane ---------------------------------------------------------
   ui.fill_rect(grid_rect.x, grid_rect.y, grid_rect.w, grid_rect.h, col('panel'))
   ui.stroke_rect(grid_rect.x, grid_rect.y, grid_rect.w, grid_rect.h, 1, col('border'))
-  draw_grid(ui, theme, input, grid_rect, entries, state, font_px, scale, col, options, event)
+  draw_grid(ui, input, grid_rect, entries, state, font_px, scale, col, options, event)
 
   return event
 }
@@ -196,7 +195,6 @@ function flatten_tree(folders: asset_folder_node[], collapsed: Set<string>): tre
 
 function draw_tree(
   ui: ui_renderer,
-  theme: theme_definition,
   input: ui_input_snapshot,
   rect: { x: number; y: number; w: number; h: number },
   rows: tree_row[],
@@ -223,7 +221,6 @@ function draw_tree(
       const indent_x = rect.x + 8 * scale + row.depth * 14 * scale
       const toggle_size = 10 * scale
       const toggle_x = indent_x
-      const toggle_y = ry + Math.floor((row_h - toggle_size) * 0.5)
       const label_x = indent_x + 14 * scale
       if (row.has_children) {
         const expanded = !row.collapsed
@@ -252,7 +249,6 @@ function draw_tree(
 
 function draw_grid(
   ui: ui_renderer,
-  theme: theme_definition,
   input: ui_input_snapshot,
   rect: { x: number; y: number; w: number; h: number },
   entries: asset_entry[],
@@ -331,7 +327,6 @@ function draw_grid(
 
 function draw_breadcrumb(
   ui: ui_renderer,
-  theme: theme_definition,
   x: number,
   y: number,
   h: number,

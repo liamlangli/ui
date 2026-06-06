@@ -145,7 +145,7 @@ export class dock_system {
 
     // --- Panels ------------------------------------------------------------
     for (const leaf of frame.leaves) {
-      this.draw_leaf(ui, theme, input, leaf, font_px, scale, closable, col, render_body, measure)
+      this.draw_leaf(ui, input, leaf, font_px, scale, closable, col, render_body, measure)
     }
 
     // --- Splitter chrome (drawn above panels) ------------------------------
@@ -162,12 +162,11 @@ export class dock_system {
     }
 
     // --- Tab drag / drop ---------------------------------------------------
-    this.update_tab_drag(ui, theme, input, frame, scale, font_px, col, measure)
+    this.update_tab_drag(ui, input, frame, scale, font_px, col, measure)
   }
 
   private draw_leaf(
     ui: ui_renderer,
-    theme: theme_definition,
     input: ui_input_snapshot,
     leaf: dock_frame_leaf,
     font_px: number,
@@ -254,7 +253,6 @@ export class dock_system {
 
   private update_tab_drag(
     ui: ui_renderer,
-    theme: theme_definition,
     input: ui_input_snapshot,
     frame: ReturnType<typeof compute_dock_frame>,
     scale: number,

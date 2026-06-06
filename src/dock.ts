@@ -215,12 +215,6 @@ export function visit_dock_leaves(node: dock_node, visit: (leaf: dock_leaf) => v
   visit_dock_leaves(node.right, visit)
 }
 
-function find_parent(node: dock_node, child_id: string, parent: dock_split | null = null): dock_split | null {
-  if (node.id === child_id) return parent
-  if (node.kind === 'leaf') return null
-  return find_parent(node.left, child_id, node) ?? find_parent(node.right, child_id, node)
-}
-
 function replace_child(node: dock_node, target_id: string, replacement: dock_node): dock_node {
   if (node.id === target_id) return replacement
   if (node.kind === 'leaf') return node

@@ -588,6 +588,107 @@ export class ui_renderer {
     if (options?.chinese_font ?? true) void this.load_chinese_font()
   }
 
+  async init_with_device(device: GPUDevice, format: GPUTextureFormat, options?: ui_renderer_init_options): Promise<void> {
+    this.render_mode_ = options?.mode ?? 'adaptive'
+    this.pending_render_frames = adaptive_render_burst_frames
+    this.device = device
+    this.context = null
+    this.format = format
+
+    const [shader_code, latin_mono_font_doc] = await Promise.all([
+      load_text(ui_shader_url),
+      load_json<font_bundle_doc>(latin_mono_font_json_url),
+    ])
+    const latin_mono_font_image = await load_image_bitmap_asset(font_image_url(latin_mono_font_doc, 'latin_mono'))
+    this.font_atlases.set(FONT_MAIN, glyph_map(font_face(latin_mono_font_doc, FONT_MAIN), latin_mono_font_doc.width, latin_mono_font_doc.height))
+    this.font_atlases.set(FONT_MONO, glyph_map(font_face(latin_mono_font_doc, FONT_MONO), latin_mono_font_doc.width, latin_mono_font_doc.height))
+    this.screen_buffer = this.device.createBuffer({ label: 'ui.screen_buffer', size: 8, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST })
+
+    const shader_module = this.device.createShaderModule({ label: 'ui.shader_module', code: shader_code })
+    const color_panel_module = this.device.createShaderModule({ label: 'ui.shader_module.color_panel', code: color_panel_shader })
+    const sampler = this.device.createSampler({ label: 'ui.linear_sampler', magFilter: 'linear', minFilter: 'linear' })
+    this.sampler = sampler
+    this.sampler_nearest = this.device.createSampler({ label: 'ui.nearest_sampler', magFilter: 'nearest', minFilter: 'nearest' })
+    const bind_group_layout = this.device.createBindGroupLayout({
+      label: 'ui.bind_group_layout',
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: {} },
+        { binding: 2, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } },
+      ],
+    })
+    this.bind_group_layout = bind_group_layout
+    this.color_panel_bind_group_layout = this.device.createBindGroupLayout({
+      label: 'ui.bind_group_layout.color_panel',
+      entries: [{ binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } }],
+    })
+    const pipeline_layout = this.device.createPipelineLayout({ label: 'ui.pipeline_layout', bindGroupLayouts: [bind_group_layout] })
+    const color_panel_layout = this.device.createPipelineLayout({ label: 'ui.pipeline_layout.color_panel', bindGroupLayouts: [this.color_panel_bind_group_layout] })
+    const vertex: GPUVertexBufferLayout = {
+      arrayStride: vertex_stride,
+      attributes: [
+        { shaderLocation: 0, offset: 0, format: 'float32x2' },
+        { shaderLocation: 1, offset: 8, format: 'float32x2' },
+        { shaderLocation: 2, offset: 16, format: 'unorm8x4' },
+      ],
+    }
+    const color_target: GPUColorTargetState = {
+      format: this.format,
+      blend: {
+        color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+        alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+      },
+    }
+    this.pipeline_image = this.device.createRenderPipeline({
+      label: 'ui.pipeline.image',
+      layout: pipeline_layout,
+      vertex: { module: shader_module, entryPoint: 'vs_main', buffers: [vertex] },
+      fragment: { module: shader_module, entryPoint: 'fs_image', targets: [color_target] },
+      primitive: { topology: 'triangle-list' },
+    })
+    this.pipeline_sdf = this.device.createRenderPipeline({
+      label: 'ui.pipeline.sdf',
+      layout: pipeline_layout,
+      vertex: { module: shader_module, entryPoint: 'vs_main', buffers: [vertex] },
+      fragment: { module: shader_module, entryPoint: 'fs_sdf', targets: [color_target] },
+      primitive: { topology: 'triangle-list' },
+    })
+    this.color_panel_pipeline = this.device.createRenderPipeline({
+      label: 'ui.pipeline.color_panel',
+      layout: color_panel_layout,
+      vertex: { module: color_panel_module, entryPoint: 'vs_main' },
+      fragment: { module: color_panel_module, entryPoint: 'fs_main', targets: [{ format: 'rgba8unorm' }] },
+      primitive: { topology: 'triangle-list' },
+    })
+
+    const white_texture = this.device.createTexture({
+      label: 'ui.white_texture',
+      size: [1, 1, 1],
+      format: 'rgba8unorm',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    })
+    this.device.queue.writeTexture({ texture: white_texture }, new Uint8Array([255, 255, 255, 255]), { bytesPerRow: 4 }, { width: 1, height: 1, depthOrArrayLayers: 1 })
+    this.bind_group_white = this.device.createBindGroup({
+      label: 'ui.bind_group.white',
+      layout: bind_group_layout,
+      entries: [
+        { binding: 0, resource: sampler },
+        { binding: 1, resource: white_texture.createView() },
+        { binding: 2, resource: { buffer: this.screen_buffer } },
+      ],
+    })
+    this.font_bind_groups.set(latin_mono_font_texture_id, this.create_texture_bind_group('ui.font_texture.latin_mono', latin_mono_font_image, sampler, bind_group_layout))
+    this.font_bind_groups.set(cjk_font_texture_id, this.create_placeholder_font_bind_group('ui.font_texture.cjk.placeholder', sampler, bind_group_layout))
+    this.color_panel_uniform = this.device.createBuffer({
+      label: 'ui.buffer.color_panel',
+      size: 32,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    })
+    this.resize_to(this.canvas.width || 1, this.canvas.height || 1)
+
+    if (options?.chinese_font ?? true) void this.load_chinese_font()
+  }
+
   /**
    * Asynchronously load the Chinese (PingFang SC) font atlas and swap it in
    * once ready. Safe to call multiple times — concurrent and repeat calls
@@ -625,6 +726,14 @@ export class ui_renderer {
     this.canvas.width = this.canvas_width
     this.canvas.height = this.canvas_height
     this.context.configure({ device: this.device, format: this.format, alphaMode: 'opaque' })
+    this.device.queue.writeBuffer(this.screen_buffer, 0, new Float32Array([this.canvas_width, this.canvas_height]))
+    this.request_render()
+  }
+
+  resize_to(width: number, height: number): void {
+    if (!this.device || !this.screen_buffer) return
+    this.canvas_width = Math.max(1, Math.floor(width))
+    this.canvas_height = Math.max(1, Math.floor(height))
     this.device.queue.writeBuffer(this.screen_buffer, 0, new Float32Array([this.canvas_width, this.canvas_height]))
     this.request_render()
   }
@@ -1181,22 +1290,7 @@ export class ui_renderer {
           },
         ],
       })
-      pass.setVertexBuffer(0, this.vertex_buffer)
-      for (const cmd of this.commands) {
-        if (cmd.clip_w <= 0 || cmd.clip_h <= 0) continue
-        pass.setScissorRect(cmd.clip_x, cmd.clip_y, cmd.clip_w, cmd.clip_h)
-        const font_bind_group = this.font_bind_groups.get(cmd.texture_id)
-        const bind_group = font_bind_group ?? (cmd.texture_id === white_texture_id ? this.bind_group_white : this.extra_bind_groups.get(cmd.texture_id))
-        if (!bind_group) continue
-        if (font_bind_group) {
-          pass.setPipeline(this.pipeline_sdf)
-          pass.setBindGroup(0, bind_group)
-        } else {
-          pass.setPipeline(this.pipeline_image)
-          pass.setBindGroup(0, bind_group)
-        }
-        pass.draw(cmd.vertex_count, 1, cmd.vertex_offset)
-      }
+      this.encode_render_pass(pass)
       pass.end()
       this.device.queue.submit([encoder.finish()])
     } else {
@@ -1206,6 +1300,47 @@ export class ui_renderer {
     // frame never leaves stale geometry behind for the next one.
     this.vertex_count = 0
     this.commands = []
+  }
+
+  render(pass: GPURenderPassEncoder): void {
+    if (!this.device || !this.pipeline_image || !this.pipeline_sdf || !this.bind_group_white) return
+    const vertex_byte_length = this.vertex_count * vertex_stride
+    const byte_length = Math.max(vertex_byte_length, vertex_stride)
+    if (!this.vertex_buffer || this.vertex_buffer.size < byte_length) {
+      let next_size = Math.max(this.vertex_buffer?.size ?? 0, 4096)
+      while (next_size < byte_length) next_size *= 2
+      this.vertex_buffer?.destroy()
+      this.vertex_buffer = this.device.createBuffer({
+        label: 'ui.vertex_buffer',
+        size: next_size,
+        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+      })
+    }
+    this.last_frame_stats = this.capture_stats(byte_length)
+    this.device.queue.writeBuffer(this.vertex_buffer, 0, this.vertex_data, 0, vertex_byte_length)
+    this.encode_render_pass(pass)
+    this.vertex_count = 0
+    this.commands = []
+  }
+
+  private encode_render_pass(pass: GPURenderPassEncoder): void {
+    if (!this.vertex_buffer || !this.pipeline_image || !this.pipeline_sdf || !this.bind_group_white) return
+    pass.setVertexBuffer(0, this.vertex_buffer)
+    for (const cmd of this.commands) {
+      if (cmd.clip_w <= 0 || cmd.clip_h <= 0) continue
+      pass.setScissorRect(cmd.clip_x, cmd.clip_y, cmd.clip_w, cmd.clip_h)
+      const font_bind_group = this.font_bind_groups.get(cmd.texture_id)
+      const bind_group = font_bind_group ?? (cmd.texture_id === white_texture_id ? this.bind_group_white : this.extra_bind_groups.get(cmd.texture_id))
+      if (!bind_group) continue
+      if (font_bind_group) {
+        pass.setPipeline(this.pipeline_sdf)
+        pass.setBindGroup(0, bind_group)
+      } else {
+        pass.setPipeline(this.pipeline_image)
+        pass.setBindGroup(0, bind_group)
+      }
+      pass.draw(cmd.vertex_count, 1, cmd.vertex_offset)
+    }
   }
 
   private create_placeholder_font_bind_group(label: string, sampler: GPUSampler, layout: GPUBindGroupLayout): GPUBindGroup {

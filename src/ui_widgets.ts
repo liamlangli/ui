@@ -191,12 +191,10 @@ const w_row_h = 28
 const w_radius = 3
 const w_scrollbar_w = 7
 const w_scrollbar_min = 20
-const w_toggle_w = 34
 const w_toggle_h = 18
 const w_slider_thumb = 11
 const w_pad = 8
 const w_popup_item_h = 22
-const w_submenu_w = 160
 const w_section_h = 22
 const w_popup_safe_margin = 6
 
@@ -340,7 +338,7 @@ export class ui_widgets {
     return hover && this.input.mouse_pressed
   }
 
-  toggle(id: string, x: number, y: number, value: boolean, label?: string): boolean {
+  toggle(_id: string, x: number, y: number, value: boolean, label?: string): boolean {
     const scale = window.devicePixelRatio || 1
     const box_size = Math.max(8 * scale, (w_toggle_h - 3) * scale)
     const label_gap = label ? 7 * scale : 0
@@ -383,7 +381,7 @@ export class ui_widgets {
     return value
   }
 
-  list(id: string, x: number, y: number, w: number, h: number, items: string[], selected: number, scroll: ui_scroll_state): number {
+  list(_id: string, x: number, y: number, w: number, h: number, items: string[], selected: number, scroll: ui_scroll_state): number {
     const scale = window.devicePixelRatio || 1
     const row_h = w_row_h * scale
     const scrollbar_w = w_scrollbar_w * scale

@@ -224,7 +224,7 @@ export function im_dialog(
   for (const item of laid) {
     const right = item.msg.side === 'right'
     if (draw_y + item.total_h >= list_y && draw_y <= list_y + list_h) {
-      render_bubble(ui, theme, item, draw_y, right, {
+      render_bubble(ui, item, draw_y, right, {
         list_x,
         list_w,
         pad,
@@ -323,7 +323,6 @@ function render_typing_bubble(
 
 function render_bubble(
   ui: ui_renderer,
-  theme: theme_definition,
   item: laid_message,
   draw_y: number,
   right: boolean,
