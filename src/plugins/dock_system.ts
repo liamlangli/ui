@@ -17,6 +17,7 @@
 import { theme_color } from '../theme'
 import type { theme_definition, dock_layout, dock_tab } from '../types'
 import { ui_renderer } from '../ui_renderer'
+import type { ui_layer } from '../ui_renderer'
 import type { ui_input_snapshot } from '../ui_widgets'
 import {
   compute_dock_frame,
@@ -39,6 +40,15 @@ export interface dock_system_options {
   font_px?: number
   /** Show a × close affordance on the active tab. Defaults to true. */
   closable?: boolean
+  /**
+   * Cache the body geometry of inactive panels (the leaf is neither the active
+   * leaf nor hovered, and no drag is in flight) and replay it instead of
+   * re-running its render callback. Defaults to false — panels in a tiled dock
+   * are all simultaneously interactive, so enable this only when you invalidate
+   * panels whose content animates. Uses the same {@link ui_layer} tech as
+   * `window_system`. See {@link dock_system.invalidate}.
+   */
+  cache_bodies?: boolean
 }
 
 /** A visible panel body the host is expected to render into, in physical px. */
@@ -83,6 +93,8 @@ export class dock_system {
   readonly drag: dock_drag_state = fresh_drag()
   private dragging_split_id: string | null = null
   private split_grab_offset = 0
+  // Cached body geometry per leaf id (only used when cache_bodies is enabled).
+  private body_cache = new Map<string, { layer: ui_layer; px: number; py: number; w: number; h: number; tab_id: string }>()
 
   constructor(layout?: dock_layout) {
     this.layout = layout ?? create_default_dock_layout()
@@ -91,6 +103,16 @@ export class dock_system {
   /** Spawn or focus a tab in the most-recently-active leaf. */
   add_tab(tab: dock_tab): boolean {
     return spawn_dock_tab(this.layout, tab)
+  }
+
+  /**
+   * Drop the cached body for a leaf (or all leaves) so it re-renders live next
+   * frame. Call this when an inactive panel's content changes while
+   * `cache_bodies` is enabled.
+   */
+  invalidate(leaf_id?: string): void {
+    if (leaf_id === undefined) this.body_cache.clear()
+    else this.body_cache.delete(leaf_id)
   }
 
   frame(
@@ -107,6 +129,7 @@ export class dock_system {
     const scale = window.devicePixelRatio || 1
     const font_px = (options?.font_px ?? 12.5) * scale
     const closable = options?.closable ?? true
+    const cache_bodies = options?.cache_bodies ?? false
     const measure = (title: string) => ui.text_width(title, font_px)
 
     const frame = compute_dock_frame(this.layout.root, x, y, w, h, scale)
@@ -145,7 +168,13 @@ export class dock_system {
 
     // --- Panels ------------------------------------------------------------
     for (const leaf of frame.leaves) {
-      this.draw_leaf(ui, input, leaf, font_px, scale, closable, col, render_body, measure)
+      this.draw_leaf(ui, input, leaf, font_px, scale, closable, cache_bodies, col, render_body, measure)
+    }
+    // Prune caches for leaves that no longer exist.
+    if (cache_bodies && this.body_cache.size > frame.leaves.length) {
+      for (const id of [...this.body_cache.keys()]) {
+        if (!frame.leaves.some((l) => l.leaf_id === id)) this.body_cache.delete(id)
+      }
     }
 
     // --- Splitter chrome (drawn above panels) ------------------------------
@@ -172,6 +201,7 @@ export class dock_system {
     font_px: number,
     scale: number,
     closable: boolean,
+    cache_bodies: boolean,
     col: (slot: Parameters<typeof theme_color>[1]) => number,
     render_body: dock_render_body,
     measure: (title: string) => number,
@@ -246,7 +276,22 @@ export class dock_system {
     const active_tab = leaf.tabs.find((t) => t.id === leaf.active_tab_id)
     if (active_tab && body_h > 0) {
       ui.push_clip(body_x, body_y, body_w, body_h)
-      render_body({ leaf_id: leaf.leaf_id, tab: active_tab, x: body_x, y: body_y, w: body_w, h: body_h })
+      const panel = { leaf_id: leaf.leaf_id, tab: active_tab, x: body_x, y: body_y, w: body_w, h: body_h }
+      // A leaf is cacheable when it's neither active nor hovered and nothing is
+      // being dragged — i.e. the user can't be interacting with its body.
+      const interacting = this.drag.armed || this.drag.active || this.dragging_split_id !== null
+      const cacheable =
+        cache_bodies && leaf.leaf_id !== this.layout.last_active_leaf_id && !point_in(input, body_x, body_y, body_w, body_h) && !interacting
+      const cache = this.body_cache.get(leaf.leaf_id)
+      if (cacheable && cache && cache.w === body_w && cache.h === body_h && cache.tab_id === active_tab.id) {
+        ui.replay_layer(cache.layer, body_x - cache.px, body_y - cache.py)
+      } else if (cacheable) {
+        ui.begin_layer(body_x, body_y)
+        render_body(panel)
+        this.body_cache.set(leaf.leaf_id, { layer: ui.end_layer(), px: body_x, py: body_y, w: body_w, h: body_h, tab_id: active_tab.id })
+      } else {
+        render_body(panel)
+      }
       ui.pop_clip()
     }
   }

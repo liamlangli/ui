@@ -4,6 +4,7 @@
 export * from './types'
 export * from './theme'
 export * from './dock'
+export * from './window'
 export * from './ui_renderer'
 export * from './ui_widgets'
 export * from './plugins'

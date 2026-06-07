@@ -26,6 +26,8 @@ import {
   type ui_text_view_line,
   // plugins
   dock_system,
+  window_system,
+  type window_layout,
   file_browser,
   create_file_browser_state,
   im_dialog,
@@ -185,8 +187,27 @@ const graph_links: graph_link[] = [
 const graph_state_demo = create_graph_state()
 const graph_view = (node: demo_graph_node): graph_node_view => ({ title: node.title, inputs: node.inputs, outputs: node.outputs })
 
+// A free-floating arrangement of the same views for "window mode".
+function build_window_layout(): window_layout {
+  const win = (id: string, title: string, x: number, y: number, w: number, h: number, z: number) =>
+    ({ id, title, x, y, w, h, z, minimized: false, maximized: false, restore_x: x, restore_y: y, restore_w: w, restore_h: h } as const)
+  return {
+    windows: [
+      win('files', 'Explorer', 24, 24, 240, 380, 1),
+      win('editor', 'Editor', 288, 40, 470, 300, 4),
+      win('console', 'Console', 320, 300, 420, 190, 3),
+      win('chat', 'Chat', 780, 60, 300, 380, 2),
+    ],
+    next_z: 5,
+    focused_id: 'editor',
+  }
+}
+
 // --- Persistent widget / plugin state -------------------------------------
 const dock = new dock_system(build_layout())
+const windows = new window_system(build_window_layout())
+// Which workspace layout engine drives the views this frame.
+let workspace_mode: 'dock' | 'window' = 'dock'
 
 // Every workspace view the top menu can spawn as a dock tab.
 const VIEW_TABS: { id: string; title: string }[] = [
@@ -200,8 +221,12 @@ const VIEW_TABS: { id: string; title: string }[] = [
   { id: 'chat', title: 'Chat' },
 ]
 
-// Spawn a view tab — or just focus it if it already lives somewhere in the dock.
+// Spawn a view — or just focus it if it already exists in the active workspace.
 function open_view_tab(id: string, title: string): void {
+  if (workspace_mode === 'window') {
+    windows.add_window(id, title)
+    return
+  }
   let found_leaf: string | null = null
   visit_dock_leaves(dock.layout.root, (leaf) => {
     if (!found_leaf && leaf.tabs.some((t) => t.id === id)) found_leaf = leaf.id
@@ -213,6 +238,10 @@ function open_view_tab(id: string, title: string): void {
 // The Theme sub-menu is rebuilt each frame (to reflect the live selection), so
 // keep a reference to splice fresh children into.
 const theme_menu: ui_menu_node = { label: 'Theme', children: [] }
+
+// Layout-mode radio items, kept by reference so their checkmarks track state.
+const mode_dock_item: ui_menu_node = { id: 'mode-dock', label: 'Dock Mode', checked: true }
+const mode_window_item: ui_menu_node = { id: 'mode-window', label: 'Window Mode', checked: false }
 
 const compile_ctrl = {
   auto_compile: true,
@@ -263,6 +292,8 @@ const main_menu = new ui_main_menu([
         ],
       },
       { label: '', separator: true },
+      { label: 'Layout Mode', children: [mode_dock_item, mode_window_item] },
+      { label: '', separator: true },
       { id: 'open-all', label: 'Open all views' },
       { id: 'reset', label: 'Reset layout' },
     ],
@@ -288,8 +319,13 @@ function handle_menu(node: ui_menu_node): void {
     for (const tab of VIEW_TABS) open_view_tab(tab.id, tab.title)
     return
   }
+  if (id === 'mode-dock' || id === 'mode-window') {
+    workspace_mode = id === 'mode-window' ? 'window' : 'dock'
+    return
+  }
   if (id === 'reset') {
-    dock.layout = build_layout()
+    if (workspace_mode === 'window') windows.layout = build_window_layout()
+    else dock.layout = build_layout()
     return
   }
   if (id === 'focus-editor') {
@@ -495,7 +531,7 @@ async function main(): Promise<void> {
     const block = main_menu.blocks_point(snapshot.mouse_x, snapshot.mouse_y)
     const dock_input = block ? { ...snapshot, mouse_pressed: false, mouse_down: false, mouse_released: false, wheel_y: 0 } : snapshot
 
-    dock.frame(renderer, theme, dock_input, bar_x, dock_y, bar_w, dock_h, (panel) => {
+    const render_panel = (panel: { x: number; y: number; w: number; h: number; tab: { id: string } }) => {
       const inset = 0
       const px = panel.x + inset
       const py = panel.y + inset
@@ -529,11 +565,20 @@ async function main(): Promise<void> {
           render_chat(renderer, widgets, theme, snapshot, px, py, pw, ph)
           break
       }
-    })
+    }
+
+    // Drive the active workspace engine — both hand back the same panel shape.
+    if (workspace_mode === 'window') {
+      windows.frame(renderer, theme, dock_input, bar_x, dock_y, bar_w, dock_h, render_panel)
+    } else {
+      dock.frame(renderer, theme, dock_input, bar_x, dock_y, bar_w, dock_h, render_panel)
+    }
 
     // Refresh the Theme sub-menu against the live selection, then draw the menu
     // bar on top of the dock so its dropdowns overlay the panels below.
     theme_menu.children = theme_ctrl.presets.map((preset, i) => ({ id: `theme:${i}`, label: preset.name, checked: i === theme_ctrl.index }))
+    mode_dock_item.checked = workspace_mode === 'dock'
+    mode_window_item.checked = workspace_mode === 'window'
     const menu_event = main_menu.frame(renderer, theme, snapshot, bar_x, bar_y, bar_w, menu_h)
     if (menu_event.activated) handle_menu(menu_event.activated)
 
@@ -582,11 +627,13 @@ function render_chat(
   if (ev.sent) {
     chat_messages.push({ author: 'Me', side: 'right', text: ev.sent, timestamp: Date.now() })
     chat_is_typing = true
+    windows.invalidate('chat') // refresh the Chat window even if it's inactive
     renderer.request_render()
     const reply = auto_replies[Math.floor(Math.random() * auto_replies.length)]
     window.setTimeout(() => {
       chat_is_typing = false
       chat_messages.push({ author: 'Ada', side: 'left', text: reply, timestamp: Date.now() })
+      windows.invalidate('chat')
       renderer.request_render()
     }, 600 + Math.random() * 700)
   }

@@ -15,6 +15,24 @@ export interface ui_draw_command {
   clip_h: number
 }
 
+/**
+ * A retained slice of geometry captured between {@link ui_renderer.begin_layer}
+ * and {@link ui_renderer.end_layer}: the raw vertex bytes plus the draw commands
+ * that reference them (rebased to a zero vertex offset). Replaying a layer with
+ * {@link ui_renderer.replay_layer} re-emits that geometry into the current frame
+ * — optionally translated — without re-running the (possibly expensive) code
+ * that produced it. This is how callers cache the body of an inactive panel /
+ * window and skip its layout + text shaping on frames where it hasn't changed.
+ */
+export interface ui_layer {
+  vertices: ArrayBuffer
+  vertex_count: number
+  commands: ui_draw_command[]
+  /** Origin the layer was captured at (so callers can compute a move delta). */
+  origin_x: number
+  origin_y: number
+}
+
 export interface ui_rect {
   x: number
   y: number
@@ -470,6 +488,14 @@ export class ui_renderer {
   private commands: ui_draw_command[] = []
   private clip_stack: clip_rect[] = []
   private current_texture_id = white_texture_id
+  // Retained-layer recording (see begin_layer / end_layer / replay_layer).
+  private layer_start_vertex = 0
+  private layer_start_command = 0
+  private layer_origin_x = 0
+  private layer_origin_y = 0
+  // Forces the next emit_command to start a fresh command instead of merging
+  // into the previous one, so a captured layer never straddles its boundary.
+  private break_command_merge = false
   private readonly font_atlases = new Map<ui_font_primitive, font_atlas>()
   private chinese_font_load: Promise<void> | null = null
   private canvas_width = 1
@@ -776,6 +802,7 @@ export class ui_renderer {
     this.commands = []
     this.clip_stack = [{ x: 0, y: 0, w: this.canvas_width, h: this.canvas_height }]
     this.current_texture_id = white_texture_id
+    this.break_command_merge = false
   }
 
   register_external_texture(texture: GPUTexture): number {
@@ -969,6 +996,97 @@ export class ui_renderer {
 
   set_cursor(cursor: string | null): void {
     this.canvas.style.cursor = cursor ?? ''
+  }
+
+  /**
+   * Begin recording a retained layer. Geometry emitted until {@link end_layer}
+   * is also drawn into the current frame as usual; `end_layer` additionally
+   * returns a {@link ui_layer} copy you can stash and {@link replay_layer} on
+   * later frames to skip re-running the producing code.
+   *
+   * `origin_x`/`origin_y` are remembered on the layer so callers can later pass
+   * `replay_layer(layer, now_x - layer.origin_x, ...)` to move a cached panel.
+   * Layers are flat captures — do not nest begin_layer calls.
+   */
+  begin_layer(origin_x = 0, origin_y = 0): void {
+    this.layer_start_vertex = this.vertex_count
+    this.layer_start_command = this.commands.length
+    this.layer_origin_x = origin_x
+    this.layer_origin_y = origin_y
+    // The first command of the layer must not coalesce into a pre-layer command.
+    this.break_command_merge = true
+  }
+
+  /** Finish recording and return the captured layer (vertex offsets rebased to 0). */
+  end_layer(): ui_layer {
+    const v0 = this.layer_start_vertex
+    const vertex_count = this.vertex_count - v0
+    const vertices = this.vertex_data.slice(v0 * vertex_stride, this.vertex_count * vertex_stride)
+    const commands: ui_draw_command[] = []
+    for (let i = this.layer_start_command; i < this.commands.length; i += 1) {
+      const c = this.commands[i]
+      commands.push({ ...c, vertex_offset: c.vertex_offset - v0 })
+    }
+    return { vertices, vertex_count, commands, origin_x: this.layer_origin_x, origin_y: this.layer_origin_y }
+  }
+
+  /**
+   * Re-emit a captured {@link ui_layer} into the current frame, optionally
+   * translated by (dx, dy) in pixels. Commands are re-clipped against the live
+   * clip stack, so replaying inside a `push_clip` confines the cached geometry.
+   */
+  replay_layer(layer: ui_layer, dx = 0, dy = 0): void {
+    if (layer.vertex_count <= 0) return
+    this.ensure_vertices(layer.vertex_count)
+    const base = this.vertex_count
+    const base_byte = base * vertex_stride
+    const span = layer.vertex_count * vertex_stride
+    new Uint8Array(this.vertex_data, base_byte, span).set(new Uint8Array(layer.vertices, 0, span))
+    if (dx !== 0 || dy !== 0) {
+      for (let i = 0; i < layer.vertex_count; i += 1) {
+        const o = base_byte + i * vertex_stride
+        this.view.setFloat32(o + 0, this.view.getFloat32(o + 0, true) + dx, true)
+        this.view.setFloat32(o + 4, this.view.getFloat32(o + 4, true) + dy, true)
+      }
+    }
+    this.vertex_count += layer.vertex_count
+    const clip = this.current_clip()
+    // A replayed run is contiguous but pre-built, so never merge the first
+    // command into whatever the live frame emitted just before it.
+    let merge = false
+    for (const c of layer.commands) {
+      const cc = clip_intersect(clip, { x: c.clip_x + dx, y: c.clip_y + dy, w: c.clip_w, h: c.clip_h })
+      if (cc.w <= 0 || cc.h <= 0) {
+        merge = false
+        continue
+      }
+      const cmd: ui_draw_command = {
+        vertex_offset: base + c.vertex_offset,
+        vertex_count: c.vertex_count,
+        texture_id: c.texture_id,
+        clip_x: Math.floor(cc.x),
+        clip_y: Math.floor(cc.y),
+        clip_w: Math.ceil(cc.w),
+        clip_h: Math.ceil(cc.h),
+      }
+      const prev = merge ? this.commands[this.commands.length - 1] : undefined
+      if (
+        prev &&
+        prev.vertex_offset + prev.vertex_count === cmd.vertex_offset &&
+        prev.texture_id === cmd.texture_id &&
+        prev.clip_x === cmd.clip_x &&
+        prev.clip_y === cmd.clip_y &&
+        prev.clip_w === cmd.clip_w &&
+        prev.clip_h === cmd.clip_h
+      ) {
+        prev.vertex_count += cmd.vertex_count
+      } else {
+        this.commands.push(cmd)
+      }
+      merge = true
+    }
+    // Keep the next live command from merging into the replayed tail.
+    this.break_command_merge = true
   }
 
   fill_rect(x: number, y: number, w: number, h: number, rgba: number, feather = 0): void {
@@ -1737,7 +1855,8 @@ export class ui_renderer {
       clip_w: Math.ceil(clip.w),
       clip_h: Math.ceil(clip.h),
     }
-    const prev = this.commands[this.commands.length - 1]
+    const prev = this.break_command_merge ? undefined : this.commands[this.commands.length - 1]
+    this.break_command_merge = false
     if (
       prev &&
       prev.vertex_offset + prev.vertex_count === cmd.vertex_offset &&

@@ -8,7 +8,7 @@ It bundles the pieces needed to build a browser-native editor UI on top of WebGP
 - **`ui_widgets`** — an immediate-mode widget layer (buttons, toggles, sliders, dropdowns, text/number inputs, color pickers, scroll regions, menus) drawn through `ui_renderer`.
 - **`dock`** — a docking layout engine: split/leaf trees, tab drag-and-drop, drop targets, and (de)serialization.
 - **`theme`** — palette/CSS-variable theming with `load_theme`, `apply_theme`, `theme_color`, `theme_rgba`, `pack_color`, and `hex_to_normalized_rgba`.
-- **`plugins`** — opt-in, higher-level drop-in components (`dock_system`, `file_browser`, `asset_browser`, `graph`, `im_dialog`, `code_editor`) packaged so other projects can reuse them piecemeal. See [Plugins](#plugins).
+- **`plugins`** — opt-in, higher-level drop-in components (`dock_system`, `window_system`, `file_browser`, `asset_browser`, `graph`, `im_dialog`, `code_editor`) packaged so other projects can reuse them piecemeal. See [Plugins](#plugins).
 
 ## Live preview
 
@@ -43,7 +43,7 @@ drawing and input handling and takes your `ui_renderer` (+ `ui_widgets` where
 needed), a `theme_definition`, and the per-frame `ui_input_snapshot`.
 
 ```ts
-import { asset_browser, code_editor, dock_system, file_browser, graph_canvas, im_dialog } from '@liamlangli/ui/plugins'
+import { asset_browser, code_editor, dock_system, window_system, file_browser, graph_canvas, im_dialog } from '@liamlangli/ui/plugins'
 ```
 
 ### `dock_system` — docking workspace
@@ -65,6 +65,38 @@ dock.frame(renderer, theme, input, x, y, w, h, (panel) => {
 dock.add_tab({ id: 'log', title: 'Log' }) // spawn/focus a tab
 const saved = serialize_dock_layout(dock.layout)
 ```
+
+### `window_system` — floating window workspace
+
+The sibling of `dock_system`, for a desktop-style "window mode". The core
+`window` module is pure layout state; `window_system` is the rendering + input
+glue. Each view floats in its own frame with a header bar (title plus
+minimize / maximize / close buttons), drag-to-move, drag-to-resize from any
+edge or corner, and click-to-focus z-ordering. A rounded taskbar pinned to the
+bottom lists the running views and shows a live clock; clicking a chip focuses,
+restores or minimizes its window. The body callback hands back the same `panel`
+shape as `dock_system`, so one render switch can drive both — let the user flip
+between dock mode and window mode.
+
+```ts
+const windows = new window_system() // or new window_system(my_saved_layout)
+
+// each frame, between renderer.begin_frame() and renderer.flush():
+windows.frame(renderer, theme, input, x, y, w, h, (panel) => {
+  // panel.{x,y,w,h} is the clipped body rect (physical px) — identical to dock_system
+  if (panel.tab.id === 'files') file_browser(renderer, theme, input, panel.x, panel.y, panel.w, panel.h, tree, fb_state)
+})
+
+windows.add_window('log', 'Log') // spawn/focus a window
+const saved = serialize_window_layout(windows.layout)
+```
+
+By default (`cache_bodies: true`) only the focused window renders its body live
+each frame; inactive windows have their geometry cached and replayed (see
+[Retained layers](#retained-layers--cached-panels)), so a workspace full of
+windows costs roughly one live panel plus cheap buffer copies. Call
+`windows.invalidate(id)` when an inactive window's content changes (the preview
+does this for the Chat window when a message arrives).
 
 ### `file_browser` — tree view
 
@@ -291,6 +323,33 @@ renderer.update_texture(tex, rgba /* Uint8ClampedArray | Uint8Array */)
 renderer.draw_texture(tex, x, y, w, h) // sampler chosen at create time
 renderer.destroy_texture(tex)
 ```
+
+### Retained layers (cached panels)
+
+Immediate mode rebuilds every primitive each frame. For content that rarely
+changes — the body of an unfocused window, an inactive dock panel — that work
+is wasted. The renderer can capture a slice of geometry between `begin_layer()`
+and `end_layer()` into a `ui_layer` (its raw vertex bytes plus the draw commands
+that reference them), then `replay_layer()` it on later frames — optionally
+translated — without re-running the code that produced it:
+
+```ts
+// first frame: record while the panel draws normally
+renderer.begin_layer(x, y)
+render_panel_body(x, y, w, h)            // text shaping, layout, …
+const layer = renderer.end_layer()       // stash this
+
+// later frames: skip the work, just replay the geometry
+renderer.push_clip(x, y, w, h)
+renderer.replay_layer(layer, x - layer.origin_x, y - layer.origin_y) // move-aware
+renderer.pop_clip()
+```
+
+Commands are re-clipped against the live clip stack, so replaying inside a
+`push_clip` confines the cached geometry. Invalidate (re-record) when the
+content or the panel size changes. `window_system` uses this for inactive
+windows out of the box; `dock_system` exposes the same behaviour behind its
+`cache_bodies` option.
 
 ## Peer dependencies
 
