@@ -158,6 +158,8 @@ const font_page_urls: Record<string, string> = {
 }
 
 const color_panel_shader = /* wgsl */ `
+enable f16;
+
 struct Params {
   size : vec2f,
   mode : f32,
@@ -189,22 +191,23 @@ fn vs_main(@builtin(vertex_index) vi : u32) -> v_out {
   return out;
 }
 
-fn hsv_to_rgb(h : f32, s : f32, v : f32) -> vec3f {
+fn hsv_to_rgb(h : f16, s : f16, v : f16) -> vec3<f16> {
   let hh = ((h % 360.0) + 360.0) % 360.0;
   let ss = clamp(s, 0.0, 1.0);
   let vv = clamp(v, 0.0, 1.0);
   let c = vv * ss;
   let x = c * (1.0 - abs(((hh / 60.0) % 2.0) - 1.0));
   let m = vv - c;
-  if (hh < 60.0) { return vec3f(c + m, x + m, m); }
-  if (hh < 120.0) { return vec3f(x + m, c + m, m); }
-  if (hh < 180.0) { return vec3f(m, c + m, x + m); }
-  if (hh < 240.0) { return vec3f(m, x + m, c + m); }
-  if (hh < 300.0) { return vec3f(x + m, m, c + m); }
-  return vec3f(c + m, m, x + m);
+  if (hh < 60.0) { return vec3<f16>(c + m, x + m, m); }
+  if (hh < 120.0) { return vec3<f16>(x + m, c + m, m); }
+  if (hh < 180.0) { return vec3<f16>(m, c + m, x + m); }
+  if (hh < 240.0) { return vec3<f16>(m, x + m, c + m); }
+  if (hh < 300.0) { return vec3<f16>(x + m, m, c + m); }
+  return vec3<f16>(c + m, m, x + m);
 }
 
 fn hash12(p : vec2f) -> f32 {
+  // Kept in f32: the large multiplier and sin() argument lose all entropy in f16.
   let h = dot(p, vec2f(127.1, 311.7));
   return fract(sin(h) * 43758.5453123);
 }
@@ -212,19 +215,29 @@ fn hash12(p : vec2f) -> f32 {
 @fragment
 fn fs_main(v : v_out) -> @location(0) vec4f {
   let uv = clamp(v.uv, vec2f(0.0), vec2f(1.0));
-  var color = vec3f(0.0);
-  var alpha = 1.0;
+  var color = vec3<f16>(0.0);
+  var alpha : f16 = 1.0;
   if (u.mode < 0.5) {
-    color = hsv_to_rgb(uv.x * 360.0, 1.0 - uv.y, u.data.x);
+    color = hsv_to_rgb(f16(uv.x) * 360.0, 1.0 - f16(uv.y), f16(u.data.x));
   } else {
-    color = hsv_to_rgb(u.data.x, u.data.y, 1.0 - uv.y);
-    alpha = clamp(u.data.z, 0.0, 1.0);
+    color = hsv_to_rgb(f16(u.data.x), f16(u.data.y), 1.0 - f16(uv.y));
+    alpha = clamp(f16(u.data.z), 0.0, 1.0);
   }
   let noise = (hash12(floor(uv * u.size)) - 0.5) / 255.0;
-  color = clamp(color + vec3f(noise), vec3f(0.0), vec3f(1.0));
-  return vec4f(color, alpha);
+  color = clamp(color + vec3<f16>(f16(noise)), vec3<f16>(0.0), vec3<f16>(1.0));
+  return vec4f(vec3f(color), f32(alpha));
 }
 `
+
+// The shaders are authored with f16 (half) types to cut GPU ALU/bandwidth.
+// When the device lacks the `shader-f16` feature, downgrade every f16 type back
+// to f32 so the same source compiles. All numeric literals are written without
+// the `h` suffix (relying on abstract-float conversion), so the only tokens to
+// rewrite are the `f16` type names and the `enable f16;` directive.
+function apply_f16(code: string, enabled: boolean): string {
+  if (enabled) return code
+  return code.replace(/^[ \t]*enable[ \t]+f16[ \t]*;[ \t]*\r?\n?/m, '').replace(/\bf16\b/g, 'f32')
+}
 
 async function load_text(url: string): Promise<string> {
   const res = await fetch(url)
@@ -487,7 +500,8 @@ export class ui_renderer {
     if (!('gpu' in navigator)) throw new Error('WebGPU not supported')
     const adapter = await navigator.gpu.requestAdapter()
     if (!adapter) throw new Error('WebGPU adapter unavailable')
-    this.device = await adapter.requestDevice()
+    const requiredFeatures: GPUFeatureName[] = adapter.features.has('shader-f16') ? ['shader-f16'] : []
+    this.device = await adapter.requestDevice({ requiredFeatures })
     this.context = this.canvas.getContext('webgpu')
     if (!this.context) throw new Error('WebGPU canvas context unavailable')
     this.format = navigator.gpu.getPreferredCanvasFormat()
@@ -501,8 +515,9 @@ export class ui_renderer {
     this.font_atlases.set(FONT_MONO, glyph_map(font_face(latin_mono_font_doc, FONT_MONO), latin_mono_font_doc.width, latin_mono_font_doc.height))
     this.screen_buffer = this.device.createBuffer({ label: 'ui.screen_buffer', size: 8, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST })
 
-    const shader_module = this.device.createShaderModule({ label: 'ui.shader_module', code: shader_code })
-    const color_panel_module = this.device.createShaderModule({ label: 'ui.shader_module.color_panel', code: color_panel_shader })
+    const f16 = this.device.features.has('shader-f16')
+    const shader_module = this.device.createShaderModule({ label: 'ui.shader_module', code: apply_f16(shader_code, f16) })
+    const color_panel_module = this.device.createShaderModule({ label: 'ui.shader_module.color_panel', code: apply_f16(color_panel_shader, f16) })
     const sampler = this.device.createSampler({ label: 'ui.linear_sampler', magFilter: 'linear', minFilter: 'linear' })
     this.sampler = sampler
     this.sampler_nearest = this.device.createSampler({ label: 'ui.nearest_sampler', magFilter: 'nearest', minFilter: 'nearest' })
@@ -604,8 +619,9 @@ export class ui_renderer {
     this.font_atlases.set(FONT_MONO, glyph_map(font_face(latin_mono_font_doc, FONT_MONO), latin_mono_font_doc.width, latin_mono_font_doc.height))
     this.screen_buffer = this.device.createBuffer({ label: 'ui.screen_buffer', size: 8, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST })
 
-    const shader_module = this.device.createShaderModule({ label: 'ui.shader_module', code: shader_code })
-    const color_panel_module = this.device.createShaderModule({ label: 'ui.shader_module.color_panel', code: color_panel_shader })
+    const f16 = this.device.features.has('shader-f16')
+    const shader_module = this.device.createShaderModule({ label: 'ui.shader_module', code: apply_f16(shader_code, f16) })
+    const color_panel_module = this.device.createShaderModule({ label: 'ui.shader_module.color_panel', code: apply_f16(color_panel_shader, f16) })
     const sampler = this.device.createSampler({ label: 'ui.linear_sampler', magFilter: 'linear', minFilter: 'linear' })
     this.sampler = sampler
     this.sampler_nearest = this.device.createSampler({ label: 'ui.nearest_sampler', magFilter: 'nearest', minFilter: 'nearest' })
