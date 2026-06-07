@@ -20,6 +20,7 @@
 import { theme_color } from '../theme'
 import type { theme_definition } from '../types'
 import { ui_renderer } from '../ui_renderer'
+import type { ui_layer } from '../ui_renderer'
 import type { ui_input_snapshot } from '../ui_widgets'
 import {
   create_default_window_layout,
@@ -46,6 +47,13 @@ export interface window_system_options {
   font_px?: number
   /** Show the bottom taskbar with running views + clock. Defaults to true. */
   taskbar?: boolean
+  /**
+   * Cache the body geometry of inactive (non-focused) windows and replay it
+   * instead of re-running their render callback every frame. Defaults to true.
+   * The focused window always renders live; call {@link window_system.invalidate}
+   * when an inactive window's underlying content changes. See {@link ui_layer}.
+   */
+  cache_bodies?: boolean
 }
 
 type resize_edges = { left: boolean; right: boolean; top: boolean; bottom: boolean }
@@ -77,6 +85,10 @@ export class window_system {
   private area_y = 0
   private area_w = 0
   private area_h = 0
+  // Cached body geometry per window id, plus the rect it was captured at so we
+  // can detect a size change (forces a re-render) or a move (replay translated).
+  private body_cache = new Map<string, { layer: ui_layer; px: number; py: number; w: number; h: number }>()
+  private last_focused_id: string | null = null
 
   constructor(layout?: window_layout) {
     this.layout = layout ?? create_default_window_layout()
@@ -85,6 +97,15 @@ export class window_system {
   /** Spawn or focus a view as a floating window. */
   add_window(id: string, title: string, options?: window_new_options): window_view {
     return spawn_window(this.layout, id, title, options)
+  }
+
+  /**
+   * Drop the cached body for a window (or all windows) so it re-renders live on
+   * the next frame. Call this when an inactive window's content has changed.
+   */
+  invalidate(id?: string): void {
+    if (id === undefined) this.body_cache.clear()
+    else this.body_cache.delete(id)
   }
 
   frame(
@@ -101,6 +122,7 @@ export class window_system {
     const scale = window.devicePixelRatio || 1
     const font_px = (options?.font_px ?? 12.5) * scale
     const show_taskbar = options?.taskbar ?? true
+    const cache_bodies = options?.cache_bodies ?? true
     const col = (slot: Parameters<typeof theme_color>[1]) => pack(theme_color(theme, slot))
 
     const taskbar_h = show_taskbar ? window_taskbar_h * scale : 0
@@ -158,6 +180,13 @@ export class window_system {
     else if (this.action.kind === 'move' && !this.action.armed) cursor = 'grabbing'
     else if (hot && this.action.kind === 'none') cursor = resize_cursor(resize_hit(input, rect_of(hot), scale, hot.maximized))
 
+    // When focus moves, drop the freshly-unfocused window's cache so it gets
+    // one live re-render in its inactive (no hover / no caret) state.
+    if (this.layout.focused_id !== this.last_focused_id) {
+      if (this.last_focused_id) this.body_cache.delete(this.last_focused_id)
+      this.last_focused_id = this.layout.focused_id
+    }
+
     // --- Draw windows back-to-front ----------------------------------------
     for (const win of [...visible].sort((a, b) => a.z - b.z)) {
       const r = rect_of(win)
@@ -165,7 +194,15 @@ export class window_system {
       // Background windows get neutered input so a click doesn't fall through
       // to the panel under the top-most window.
       const interactive = hot === win && this.action.kind === 'none'
-      this.draw_window(ui, interactive ? input : block_input(input), r, title_h, font_px, scale, focused, interactive, col, render_body)
+      this.draw_window_chrome(ui, interactive ? input : block_input(input), r, title_h, font_px, scale, focused, interactive, col)
+      this.draw_window_body(ui, r, title_h, focused, cache_bodies, render_body)
+    }
+
+    // Prune caches for windows that no longer exist.
+    if (this.body_cache.size > this.layout.windows.length) {
+      for (const id of [...this.body_cache.keys()]) {
+        if (!this.layout.windows.some((w) => w.id === id)) this.body_cache.delete(id)
+      }
     }
 
     // --- Taskbar ------------------------------------------------------------
@@ -209,7 +246,9 @@ export class window_system {
     }
   }
 
-  private draw_window(
+  // Window frame + header are cheap and depend on focus / hover, so they are
+  // always drawn live — only the body (below) is cached.
+  private draw_window_chrome(
     ui: ui_renderer,
     input: ui_input_snapshot,
     r: window_rect,
@@ -219,7 +258,6 @@ export class window_system {
     focused: boolean,
     interactive: boolean,
     col: (slot: Parameters<typeof theme_color>[1]) => number,
-    render_body: dock_render_body,
   ): void {
     const radius = 6 * scale
     // Soft drop shadow behind the focused window for depth.
@@ -269,16 +307,40 @@ export class window_system {
     const cr = 3.4 * scale
     ui.stroke_line(close_cx - cr, cy - cr, close_cx + cr, cy + cr, 1.4 * scale, x_c)
     ui.stroke_line(close_cx - cr, cy + cr, close_cx + cr, cy - cr, 1.4 * scale, x_c)
+  }
 
-    // Body.
+  // Body content: rendered live for the focused window (and on the first frame
+  // / after a resize), otherwise replayed from a cached layer so an inactive
+  // window costs only a vertex-buffer copy instead of a full re-layout.
+  private draw_window_body(
+    ui: ui_renderer,
+    r: window_rect,
+    title_h: number,
+    focused: boolean,
+    cache_bodies: boolean,
+    render_body: dock_render_body,
+  ): void {
     const body_y = r.y + title_h
     const body_h = r.h - title_h
-    if (body_h > 0) {
-      ui.push_clip(r.x, body_y, r.w, body_h)
+    if (body_h <= 0) return
+    ui.push_clip(r.x, body_y, r.w, body_h)
+    const cache = this.body_cache.get(r.win.id)
+    // Re-render live when caching is off, the window is focused, there is no
+    // cache yet, or its size changed (cached geometry is size-specific).
+    const live = !cache_bodies || focused || !cache || cache.w !== r.w || cache.h !== body_h
+    if (live) {
       const panel: dock_panel = { leaf_id: r.win.id, tab: { id: r.win.id, title: r.win.title, dirty: r.win.dirty }, x: r.x, y: body_y, w: r.w, h: body_h }
-      render_body(panel)
-      ui.pop_clip()
+      if (cache_bodies && !focused) {
+        ui.begin_layer(r.x, body_y)
+        render_body(panel)
+        this.body_cache.set(r.win.id, { layer: ui.end_layer(), px: r.x, py: body_y, w: r.w, h: body_h })
+      } else {
+        render_body(panel)
+      }
+    } else {
+      ui.replay_layer(cache.layer, r.x - cache.px, body_y - cache.py)
     }
+    ui.pop_clip()
   }
 
   private draw_taskbar(

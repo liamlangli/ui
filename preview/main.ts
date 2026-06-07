@@ -627,11 +627,13 @@ function render_chat(
   if (ev.sent) {
     chat_messages.push({ author: 'Me', side: 'right', text: ev.sent, timestamp: Date.now() })
     chat_is_typing = true
+    windows.invalidate('chat') // refresh the Chat window even if it's inactive
     renderer.request_render()
     const reply = auto_replies[Math.floor(Math.random() * auto_replies.length)]
     window.setTimeout(() => {
       chat_is_typing = false
       chat_messages.push({ author: 'Ada', side: 'left', text: reply, timestamp: Date.now() })
+      windows.invalidate('chat')
       renderer.request_render()
     }, 600 + Math.random() * 700)
   }

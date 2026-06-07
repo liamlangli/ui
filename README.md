@@ -91,6 +91,13 @@ windows.add_window('log', 'Log') // spawn/focus a window
 const saved = serialize_window_layout(windows.layout)
 ```
 
+By default (`cache_bodies: true`) only the focused window renders its body live
+each frame; inactive windows have their geometry cached and replayed (see
+[Retained layers](#retained-layers--cached-panels)), so a workspace full of
+windows costs roughly one live panel plus cheap buffer copies. Call
+`windows.invalidate(id)` when an inactive window's content changes (the preview
+does this for the Chat window when a message arrives).
+
 ### `file_browser` — tree view
 
 A scrollable, expandable file/folder tree. You own the `file_node[]` forest and
@@ -316,6 +323,33 @@ renderer.update_texture(tex, rgba /* Uint8ClampedArray | Uint8Array */)
 renderer.draw_texture(tex, x, y, w, h) // sampler chosen at create time
 renderer.destroy_texture(tex)
 ```
+
+### Retained layers (cached panels)
+
+Immediate mode rebuilds every primitive each frame. For content that rarely
+changes — the body of an unfocused window, an inactive dock panel — that work
+is wasted. The renderer can capture a slice of geometry between `begin_layer()`
+and `end_layer()` into a `ui_layer` (its raw vertex bytes plus the draw commands
+that reference them), then `replay_layer()` it on later frames — optionally
+translated — without re-running the code that produced it:
+
+```ts
+// first frame: record while the panel draws normally
+renderer.begin_layer(x, y)
+render_panel_body(x, y, w, h)            // text shaping, layout, …
+const layer = renderer.end_layer()       // stash this
+
+// later frames: skip the work, just replay the geometry
+renderer.push_clip(x, y, w, h)
+renderer.replay_layer(layer, x - layer.origin_x, y - layer.origin_y) // move-aware
+renderer.pop_clip()
+```
+
+Commands are re-clipped against the live clip stack, so replaying inside a
+`push_clip` confines the cached geometry. Invalidate (re-record) when the
+content or the panel size changes. `window_system` uses this for inactive
+windows out of the box; `dock_system` exposes the same behaviour behind its
+`cache_bodies` option.
 
 ## Peer dependencies
 
