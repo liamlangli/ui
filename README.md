@@ -8,7 +8,7 @@ It bundles the pieces needed to build a browser-native editor UI on top of WebGP
 - **`ui_widgets`** — an immediate-mode widget layer (buttons, toggles, sliders, dropdowns, text/number inputs, color pickers, scroll regions, menus) drawn through `ui_renderer`.
 - **`dock`** — a docking layout engine: split/leaf trees, tab drag-and-drop, drop targets, and (de)serialization.
 - **`theme`** — palette/CSS-variable theming with `load_theme`, `apply_theme`, `theme_color`, `theme_rgba`, `pack_color`, and `hex_to_normalized_rgba`.
-- **`plugins`** — opt-in, higher-level drop-in components (`dock_system`, `file_browser`, `asset_browser`, `graph`, `im_dialog`, `code_editor`) packaged so other projects can reuse them piecemeal. See [Plugins](#plugins).
+- **`plugins`** — opt-in, higher-level drop-in components (`dock_system`, `window_system`, `file_browser`, `asset_browser`, `graph`, `im_dialog`, `code_editor`) packaged so other projects can reuse them piecemeal. See [Plugins](#plugins).
 
 ## Live preview
 
@@ -43,7 +43,7 @@ drawing and input handling and takes your `ui_renderer` (+ `ui_widgets` where
 needed), a `theme_definition`, and the per-frame `ui_input_snapshot`.
 
 ```ts
-import { asset_browser, code_editor, dock_system, file_browser, graph_canvas, im_dialog } from '@liamlangli/ui/plugins'
+import { asset_browser, code_editor, dock_system, window_system, file_browser, graph_canvas, im_dialog } from '@liamlangli/ui/plugins'
 ```
 
 ### `dock_system` — docking workspace
@@ -64,6 +64,31 @@ dock.frame(renderer, theme, input, x, y, w, h, (panel) => {
 
 dock.add_tab({ id: 'log', title: 'Log' }) // spawn/focus a tab
 const saved = serialize_dock_layout(dock.layout)
+```
+
+### `window_system` — floating window workspace
+
+The sibling of `dock_system`, for a desktop-style "window mode". The core
+`window` module is pure layout state; `window_system` is the rendering + input
+glue. Each view floats in its own frame with a header bar (title plus
+minimize / maximize / close buttons), drag-to-move, drag-to-resize from any
+edge or corner, and click-to-focus z-ordering. A rounded taskbar pinned to the
+bottom lists the running views and shows a live clock; clicking a chip focuses,
+restores or minimizes its window. The body callback hands back the same `panel`
+shape as `dock_system`, so one render switch can drive both — let the user flip
+between dock mode and window mode.
+
+```ts
+const windows = new window_system() // or new window_system(my_saved_layout)
+
+// each frame, between renderer.begin_frame() and renderer.flush():
+windows.frame(renderer, theme, input, x, y, w, h, (panel) => {
+  // panel.{x,y,w,h} is the clipped body rect (physical px) — identical to dock_system
+  if (panel.tab.id === 'files') file_browser(renderer, theme, input, panel.x, panel.y, panel.w, panel.h, tree, fb_state)
+})
+
+windows.add_window('log', 'Log') // spawn/focus a window
+const saved = serialize_window_layout(windows.layout)
 ```
 
 ### `file_browser` — tree view
