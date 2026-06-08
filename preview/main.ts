@@ -13,10 +13,8 @@ import {
   ui_renderer,
   ui_widgets,
   ui_icons,
-  type ui_icon_name,
   hex_to_normalized_rgba,
   pack_color,
-  theme_rgba,
   create_text_view_state,
   FONT_MONO,
   type theme_definition,
@@ -80,6 +78,7 @@ function build_layout(): dock_layout {
           left: leaf('leaf-main', [
             { id: 'editor', title: 'Editor' },
             { id: 'gallery', title: 'Widgets' },
+            { id: 'icons', title: 'Icons' },
             { id: 'about', title: 'About' },
           ], 'editor'),
           right: leaf('leaf-console', [
@@ -219,6 +218,7 @@ const VIEW_TABS: { id: string; title: string }[] = [
   { id: 'files', title: 'Explorer' },
   { id: 'editor', title: 'Editor' },
   { id: 'gallery', title: 'Widgets' },
+  { id: 'icons', title: 'Icons' },
   { id: 'console', title: 'Console' },
   { id: 'metrics', title: 'Metrics' },
   { id: 'graph', title: 'Graph' },
@@ -292,6 +292,7 @@ const main_menu = new ui_main_menu([
           { id: 'metrics', label: 'Metrics' },
           { id: 'graph', label: 'Graph' },
           { id: 'gallery', label: 'Widgets' },
+          { id: 'icons', label: 'Icons' },
           { id: 'chat', label: 'Chat' },
           { id: 'about', label: 'About' },
         ],
@@ -434,6 +435,13 @@ const gallery = {
   clicks: 0,
 }
 
+// --- icons gallery state ----------------------------------------------------
+const ICON_SIZE_OPTIONS = [16, 24, 32, 48]
+const icons_panel = {
+  scroll: { offset_y: 0 } as ui_scroll_state,
+  size_index: 1,
+}
+
 type metric_sample = {
   fps: number
   cpu_ms: number
@@ -552,6 +560,9 @@ async function main(): Promise<void> {
           break
         case 'gallery':
           render_gallery(renderer, widgets, theme, px, py, pw, ph, scale)
+          break
+        case 'icons':
+          render_icons(renderer, widgets, theme, snapshot, px, py, pw, ph, scale)
           break
         case 'about':
           widgets.text_view('about_view', px + 8 * scale, py + 8 * scale, pw - 16 * scale, ph - 16 * scale, about_lines, about_state, { wrap: true, background: false, read_only: true })
@@ -693,20 +704,100 @@ function render_gallery(
 
   cy = widgets.section(cx, cy, col_w, 'COLOR') + 6 * scale
   gallery.color = widgets.ui_color_picker('g_col', cx, cy, 180 * scale, 28 * scale, gallery.color)
-  cy += row + gap
+}
 
-  cy = widgets.section(cx, cy, col_w, 'ICONS') + 8 * scale
-  if (icon_set) {
-    // Vector icons baked into a single 512² atlas (32² per cell), tinted live.
-    const tint = theme_rgba(theme, 'text')
-    const icon_px = 20 * scale
-    const step = 30 * scale
-    const per_row = Math.max(1, Math.floor(col_w / step))
-    icon_set.names().forEach((name: ui_icon_name, i: number) => {
-      const ix = cx + (i % per_row) * step
-      const iy = cy + Math.floor(i / per_row) * step
-      icon_set!.draw(name, ix, iy, icon_px, tint)
-    })
+function render_icons(
+  renderer: ui_renderer,
+  widgets: ui_widgets,
+  theme: theme_definition,
+  snapshot: ReturnType<input_collector['begin_frame']>,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  scale: number,
+): void {
+  const slot = (name: keyof theme_definition['palette']) => pack_color(theme.palette[name])
+  const pad = 16 * scale
+
+  renderer.fill_rect(x, y, w, h, slot('panel'))
+  if (!icon_set) {
+    renderer.draw_text(x + pad, y + pad, 'Baking icon atlas…', 12 * scale, slot('text_dim'))
+    return
+  }
+  const names = icon_set.names()
+
+  // Header: title + a size picker. The atlas is baked once; only the draw size
+  // changes here (the cached texture is sampled at whatever size you ask for).
+  renderer.draw_text(x + pad, y + 12 * scale, `Built-in icons · ${names.length}`, 13 * scale, slot('text'))
+  renderer.draw_text(x + pad, y + 30 * scale, 'Composed from ui_renderer draw commands, cached in one 512² atlas (32² cells).', 10.5 * scale, slot('text_dim'))
+  const dd_w = 96 * scale
+  const dd_h = 26 * scale
+  const dd_x = x + w - pad - dd_w
+  const dd_y = y + 12 * scale
+  icons_panel.size_index = widgets.dropdown(
+    'icons_size',
+    dd_x,
+    dd_y,
+    dd_w,
+    dd_h,
+    ICON_SIZE_OPTIONS.map((s) => `${s} px`),
+    icons_panel.size_index,
+  )
+  const icon_px = (ICON_SIZE_OPTIONS[icons_panel.size_index] ?? 24) * scale
+
+  // Grid viewport (scrollable).
+  const grid_x = x + pad
+  const grid_y = y + 52 * scale
+  const grid_w = Math.max(1, w - pad * 2)
+  const grid_h = Math.max(1, y + h - pad - grid_y)
+
+  const gap = 10 * scale
+  const tile_w = Math.max(80 * scale, icon_px + 34 * scale)
+  const tile_h = icon_px + 36 * scale
+  const columns = Math.max(1, Math.floor((grid_w + gap) / (tile_w + gap)))
+  const rows = Math.ceil(names.length / columns)
+  const content_h = rows * (tile_h + gap)
+
+  widgets.handle_scroll_area(grid_x, grid_y, grid_w, grid_h, icons_panel.scroll, content_h)
+  const max_off = Math.max(0, content_h - grid_h)
+  icons_panel.scroll.offset_y = Math.max(0, Math.min(max_off, icons_panel.scroll.offset_y))
+
+  renderer.push_clip(grid_x, grid_y, grid_w, grid_h)
+  const label_font = 9.5 * scale
+  for (let i = 0; i < names.length; i += 1) {
+    const name = names[i]
+    if (!name) continue
+    const col = i % columns
+    const rowi = Math.floor(i / columns)
+    const tile_x = grid_x + col * (tile_w + gap)
+    const tile_y = grid_y + rowi * (tile_h + gap) - icons_panel.scroll.offset_y
+    if (tile_y + tile_h < grid_y || tile_y > grid_y + grid_h) continue // cull off-screen rows
+
+    const hover =
+      snapshot.mouse_x >= tile_x &&
+      snapshot.mouse_x < tile_x + tile_w &&
+      snapshot.mouse_y >= Math.max(grid_y, tile_y) &&
+      snapshot.mouse_y < Math.min(grid_y + grid_h, tile_y + tile_h)
+
+    renderer.fill_round_rect(tile_x, tile_y, tile_w, tile_h, 6 * scale, hover ? slot('hover') : slot('panel_alt'))
+    renderer.stroke_round_rect(tile_x, tile_y, tile_w, tile_h, 6 * scale, 1, slot('border'))
+
+    const ix = tile_x + (tile_w - icon_px) * 0.5
+    const iy = tile_y + 11 * scale
+    icon_set.draw(name, ix, iy, icon_px, hover ? slot('accent') : slot('text'))
+
+    const label_w = renderer.text_width(name, label_font, FONT_MONO)
+    const label_x = tile_x + Math.max(4 * scale, (tile_w - label_w) * 0.5)
+    renderer.push_clip(tile_x + 3 * scale, tile_y, tile_w - 6 * scale, tile_h)
+    renderer.draw_text(label_x, tile_y + tile_h - 16 * scale, name, label_font, hover ? slot('text') : slot('text_dim'), FONT_MONO)
+    renderer.pop_clip()
+  }
+  renderer.pop_clip()
+
+  if (content_h > grid_h) {
+    const sb_w = 7 * scale
+    widgets.scrollbar('icons_sb', grid_x + grid_w - sb_w, grid_y, sb_w, grid_h, icons_panel.scroll, content_h)
   }
 }
 
