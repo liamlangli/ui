@@ -511,6 +511,7 @@ export class ui_renderer {
   private vertex_data = new ArrayBuffer(4096 * vertex_stride)
   private view = new DataView(this.vertex_data)
   private vertex_count = 0
+  private need_enlarge = false
   private commands: ui_draw_command[] = []
   private clip_stack: clip_rect[] = []
   private current_texture_id = white_texture_id
@@ -1498,6 +1499,7 @@ export class ui_renderer {
     // frame never leaves stale geometry behind for the next one.
     this.vertex_count = 0
     this.commands = []
+    this.enlarge_if_needed()
   }
 
   render(pass: GPURenderPassEncoder): void {
@@ -1519,6 +1521,7 @@ export class ui_renderer {
     this.encode_render_pass(pass)
     this.vertex_count = 0
     this.commands = []
+    this.enlarge_if_needed()
   }
 
   /**
@@ -1604,6 +1607,7 @@ export class ui_renderer {
     this.clip_stack = saved_clip
     this.current_texture_id = saved_texture_id
     this.break_command_merge = saved_break
+    this.enlarge_if_needed()
   }
 
   private encode_render_pass(pass: GPURenderPassEncoder): void {
@@ -1875,7 +1879,20 @@ export class ui_renderer {
     this.view = new DataView(this.vertex_data)
   }
 
-  private push_vertex(x: number, y: number, u: number, v: number, color: number): void {
+  private enlarge_if_needed(): void {
+    if (!this.need_enlarge) return
+    this.need_enlarge = false
+    const next_buffer = new ArrayBuffer(this.vertex_data.byteLength * 2)
+    new Uint8Array(next_buffer).set(new Uint8Array(this.vertex_data))
+    this.vertex_data = next_buffer
+    this.view = new DataView(this.vertex_data)
+  }
+
+  private push_vertex(x: number, y: number, u: number, v: number, color: number): boolean {
+    if ((this.vertex_count + 1) * vertex_stride > this.vertex_data.byteLength) {
+      this.need_enlarge = true
+      return false
+    }
     const offset = this.vertex_count * vertex_stride
     this.view.setFloat32(offset + 0, x, true)
     this.view.setFloat32(offset + 4, y, true)
@@ -1883,6 +1900,7 @@ export class ui_renderer {
     this.view.setFloat32(offset + 12, v, true)
     this.view.setUint32(offset + 16, color, true)
     this.vertex_count += 1
+    return true
   }
 
   private push_quad_colored(
@@ -1945,11 +1963,15 @@ export class ui_renderer {
     const max_x = Math.max(x0, x1, x2)
     const max_y = Math.max(y0, y1, y2)
     if (max_x <= clip.x || max_y <= clip.y || min_x >= clip.x + clip.w || min_y >= clip.y + clip.h) return
-    this.ensure_vertices(3)
     const base = this.vertex_count
-    this.push_vertex(x0, y0, u, v, c0)
-    this.push_vertex(x1, y1, u1, v, c1)
-    this.push_vertex(x2, y2, u1, v1, c2)
+    if (
+      !this.push_vertex(x0, y0, u, v, c0) ||
+      !this.push_vertex(x1, y1, u1, v, c1) ||
+      !this.push_vertex(x2, y2, u1, v1, c2)
+    ) {
+      this.vertex_count = base
+      return
+    }
     this.emit_command(base, 3)
   }
 
@@ -1966,14 +1988,18 @@ export class ui_renderer {
     const cv0 = v0 + (v1 - v0) * ((cy0 - y0) * inv_h)
     const cu1 = u0 + (u1 - u0) * ((cx1 - x0) * inv_w)
     const cv1 = v0 + (v1 - v0) * ((cy1 - y0) * inv_h)
-    this.ensure_vertices(6)
     const base = this.vertex_count
-    this.push_vertex(cx0, cy0, cu0, cv0, color)
-    this.push_vertex(cx1, cy0, cu1, cv0, color)
-    this.push_vertex(cx1, cy1, cu1, cv1, color)
-    this.push_vertex(cx0, cy0, cu0, cv0, color)
-    this.push_vertex(cx1, cy1, cu1, cv1, color)
-    this.push_vertex(cx0, cy1, cu0, cv1, color)
+    if (
+      !this.push_vertex(cx0, cy0, cu0, cv0, color) ||
+      !this.push_vertex(cx1, cy0, cu1, cv0, color) ||
+      !this.push_vertex(cx1, cy1, cu1, cv1, color) ||
+      !this.push_vertex(cx0, cy0, cu0, cv0, color) ||
+      !this.push_vertex(cx1, cy1, cu1, cv1, color) ||
+      !this.push_vertex(cx0, cy1, cu0, cv1, color)
+    ) {
+      this.vertex_count = base
+      return
+    }
     this.emit_command(base, 6)
   }
 
@@ -1984,11 +2010,15 @@ export class ui_renderer {
     const max_x = Math.max(x0, x1, x2)
     const max_y = Math.max(y0, y1, y2)
     if (max_x <= clip.x || max_y <= clip.y || min_x >= clip.x + clip.w || min_y >= clip.y + clip.h) return
-    this.ensure_vertices(3)
     const base = this.vertex_count
-    this.push_vertex(x0, y0, u, v, color)
-    this.push_vertex(x1, y1, u, v, color)
-    this.push_vertex(x2, y2, u, v, color)
+    if (
+      !this.push_vertex(x0, y0, u, v, color) ||
+      !this.push_vertex(x1, y1, u, v, color) ||
+      !this.push_vertex(x2, y2, u, v, color)
+    ) {
+      this.vertex_count = base
+      return
+    }
     this.emit_command(base, 3)
   }
 

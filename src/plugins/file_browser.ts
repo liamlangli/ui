@@ -7,8 +7,10 @@
 
 import { theme_color } from '../theme'
 import type { theme_definition, theme_slot } from '../types'
+import { draw_icon } from '../ui_icon'
 import { FONT_MAIN, ui_renderer } from '../ui_renderer'
-import type { ui_input_snapshot, ui_scroll_state } from '../ui_widgets'
+import type { ui_input_snapshot, ui_input_text_state, ui_scroll_state, ui_widgets } from '../ui_widgets'
+import { hori_split_view, type hori_split_view_state } from './hori_split_view'
 
 export interface file_node {
   /** Stable id; if omitted a path-derived key is used. */
@@ -59,6 +61,7 @@ export interface file_browser_state {
   collapsed?: Set<string>
   /** Tree-pane width as a fraction of the content body. */
   split_ratio?: number
+  split_view?: hori_split_view_state
   tree_scroll?: ui_scroll_state
   grid_scroll?: ui_scroll_state
   list_scroll?: ui_scroll_state
@@ -66,6 +69,7 @@ export interface file_browser_state {
   search_text?: string
   search_focused?: boolean
   search_cursor?: number
+  search_input?: ui_input_text_state
   _dragging_split?: boolean
   last_click_path?: string | null
   last_entry_click_ms?: number
@@ -84,12 +88,14 @@ export interface file_browser_options {
   toolbar?: file_browser_toolbar_button[]
   /** Controlled view mode. Omit to let state.view_mode own it. */
   view_mode?: file_browser_view_mode
-  /** Show the built-in list/grid segmented control. Defaults to true. */
+  /** Show the built-in list/grid segmented control. Defaults to false. */
   view_toggle?: boolean
   /** Show the folder tree pane. Defaults to true. */
   show_tree?: boolean
   /** Show the search field. Defaults to true. */
   search?: boolean
+  /** Shared widget system used for the search field. Omit to use the plugin's compatibility fallback. */
+  widgets?: ui_widgets
   /** Logical grid card width / height. Defaults to 64 x 92. */
   card_w?: number
   card_h?: number
@@ -139,6 +145,7 @@ export function create_file_browser_state(initial_folder = 'Project'): file_brow
     selected_paths: [],
     collapsed: new Set<string>(),
     split_ratio: 0.32,
+    split_view: { ratio: 0.32 },
     tree_scroll: { offset_y: 0 },
     grid_scroll: { offset_y: 0 },
     list_scroll: { offset_y: 0 },
@@ -146,6 +153,7 @@ export function create_file_browser_state(initial_folder = 'Project'): file_brow
     search_text: '',
     search_focused: false,
     search_cursor: 0,
+    search_input: { cursor: 0, sel_anchor: 0, sel_head: 0 },
     _dragging_split: false,
     last_click_path: null,
     last_entry_click_ms: 0,
@@ -250,9 +258,10 @@ function rich_file_browser(
   const col = (slot: theme_slot) => pack(theme_color(theme, slot))
   const event: file_browser_event = {}
 
-  const gap = 3 * scale
-  const splitter_w = options?.show_tree === false ? 0 : 6 * scale
-  const btn_h = 24 * scale
+  const gap = 2 * scale
+  const show_tree = options?.show_tree !== false
+  const btn_h = 20 * scale
+  const toolbar_active = (options?.toolbar?.length ?? 0) > 0 || options?.view_toggle === true
   const toolbar_y = y + gap
   const toolbar_h = btn_h
   let bx = x
@@ -264,7 +273,7 @@ function rich_file_browser(
     bx += bw + 6 * scale
   }
 
-  if (options?.view_toggle !== false) {
+  if (options?.view_toggle === true) {
     const modes: file_browser_view_mode[] = ['list', 'grid']
     for (const mode of modes) {
       const label = mode === 'list' ? 'List' : 'Grid'
@@ -280,42 +289,55 @@ function rich_file_browser(
   }
 
   const search_enabled = options?.search !== false
-  const search_w = search_enabled ? Math.min(210 * scale, Math.max(130 * scale, w * 0.28)) : 0
-  const search_x = search_enabled ? x + w - search_w : x + w
-  if (search_enabled) draw_search_field(ui, input, search_x, toolbar_y, search_w, btn_h, state, event, scale, col)
+  const toolbar_search_w = search_enabled && !show_tree ? Math.min(210 * scale, Math.max(130 * scale, w * 0.28)) : 0
+  const toolbar_search_x = toolbar_search_w > 0 ? x + w - toolbar_search_w : x + w
+  if (toolbar_active && toolbar_search_w > 0) {
+    draw_search_field(ui, input, toolbar_search_x, toolbar_y, toolbar_search_w, btn_h, state, event, scale, col, options?.widgets)
+  }
 
-  const body_y = toolbar_y + toolbar_h + gap
+  const body_y = toolbar_active ? toolbar_y + toolbar_h + gap : y
   const body_h = Math.max(0, y + h - body_y)
-  const show_tree = options?.show_tree !== false
-  const avail_w = Math.max(0, w - splitter_w)
   const min_left = 140 * scale
   const min_right = 160 * scale
-  const left_w = show_tree ? clamp(avail_w * (state.split_ratio ?? 0.32), min_left, Math.max(min_left, avail_w - min_right)) : 0
-  const tree_rect = { x, y: body_y, w: left_w, h: body_h }
-  const splitter_rect = { x: x + left_w, y: body_y, w: splitter_w, h: body_h }
-  const content_rect = { x: x + left_w + splitter_w, y: body_y, w: w - left_w - splitter_w, h: body_h }
-
-  const breadcrumb_x = Math.max(bx + 4 * scale, content_rect.x + 4 * scale)
-  const breadcrumb_w = Math.max(0, search_x - breadcrumb_x - 8 * scale)
-  ui.push_clip(breadcrumb_x, toolbar_y, breadcrumb_w, btn_h)
-  draw_breadcrumb(ui, breadcrumb_x, toolbar_y, btn_h, state.selected_folder ?? '', input, scale, (path) => {
-    state.selected_folder = path
-    state.selected_paths = []
-    event.folder_selected = path
-  }, col)
-  ui.pop_clip()
+  state.split_view ??= { ratio: state.split_ratio ?? 0.32 }
+  const split = hori_split_view(ui, input, x, body_y, w, body_h, state.split_view, {
+    show_left: show_tree,
+    min_left,
+    min_right,
+    initial_ratio: state.split_ratio ?? 0.32,
+    sizing: 'ratio',
+    separator_w: Math.max(1, scale),
+    hit_pad: 2 * scale,
+    separator_color: show_tree ? col('border') : undefined,
+  })
+  state.split_ratio = state.split_view.ratio
+  state._dragging_split = state.split_view.dragging
+  const tree_rect = split.left
+  const content_rect = split.right
 
   if (show_tree) {
-    const split_hover = point_in(input, splitter_rect.x - 2 * scale, splitter_rect.y, splitter_rect.w + 4 * scale, splitter_rect.h)
-    if (split_hover || state._dragging_split) ui.set_cursor('col-resize')
-    if (split_hover && input.mouse_pressed) state._dragging_split = true
-    if (!input.mouse_down) state._dragging_split = false
-    if (state._dragging_split) state.split_ratio = clamp((input.mouse_x - x) / Math.max(1, avail_w), 0.12, 0.8)
-
-    ui.fill_rect(tree_rect.x, tree_rect.y, tree_rect.w, tree_rect.h, col('panel'))
-    ui.stroke_rect(tree_rect.x, tree_rect.y, tree_rect.w, tree_rect.h, 1, col('border'))
-    draw_folder_tree(ui, input, tree_rect, flatten_folder_tree(folders, state.collapsed ?? new Set()), state, font_px, scale, col, event)
-    ui.fill_rect(splitter_rect.x, splitter_rect.y, splitter_rect.w, splitter_rect.h, split_hover || state._dragging_split ? col('hover') : col('track'))
+    const panel_r = 7 * scale
+    ui.fill_round_rect(tree_rect.x, tree_rect.y, tree_rect.w, tree_rect.h, panel_r, col('panel'))
+    const search_pad = 6 * scale
+    const tree_list_rect = { ...tree_rect }
+    if (search_enabled && tree_rect.w > search_pad * 2 && tree_rect.h > btn_h + search_pad * 2) {
+      draw_search_field(
+        ui,
+        input,
+        tree_rect.x + search_pad,
+        tree_rect.y + search_pad,
+        tree_rect.w - search_pad * 2,
+        btn_h,
+        state,
+        event,
+        scale,
+        col,
+        options?.widgets,
+      )
+      tree_list_rect.y += btn_h + search_pad * 2
+      tree_list_rect.h = Math.max(0, tree_list_rect.h - btn_h - search_pad * 2)
+    }
+    draw_folder_tree(ui, input, tree_list_rect, flatten_folder_tree(folders, state.collapsed ?? new Set()), state, font_px, scale, col, event)
   }
 
   const search_text = (state.search_text ?? '').trim().toLowerCase()
@@ -323,12 +345,36 @@ function rich_file_browser(
     ? (options?.search_entries ?? entries).filter((entry) => entry.name.toLowerCase().includes(search_text) || entry.path.toLowerCase().includes(search_text))
     : entries
 
-  ui.fill_rect(content_rect.x, content_rect.y, content_rect.w, content_rect.h, col('panel'))
-  ui.stroke_rect(content_rect.x, content_rect.y, content_rect.w, content_rect.h, 1, col('border'))
+  const panel_r = 7 * scale
+  ui.fill_round_rect_per_corner(content_rect.x, content_rect.y, content_rect.w, content_rect.h, 0, 0, 0, panel_r, col('bg'))
+  const content_pad = 6 * scale
+  const content_header_h = btn_h + content_pad
+  const breadcrumb_x = content_rect.x + content_pad
+  const breadcrumb_y = content_rect.y + content_pad
+  const content_search_w = !show_tree && search_enabled ? Math.min(210 * scale, Math.max(130 * scale, content_rect.w * 0.34)) : 0
+  const content_search_x = content_search_w > 0 ? content_rect.x + content_rect.w - content_pad - content_search_w : content_rect.x + content_rect.w - content_pad
+  const breadcrumb_w = Math.max(0, content_search_x - breadcrumb_x - 8 * scale)
+  ui.push_clip(breadcrumb_x, breadcrumb_y, breadcrumb_w, btn_h)
+  draw_breadcrumb(ui, breadcrumb_x, breadcrumb_y, btn_h, state.selected_folder ?? '', input, font_px, scale, (path) => {
+    state.selected_folder = path
+    state.selected_paths = []
+    event.folder_selected = path
+  }, col)
+  ui.pop_clip()
+  if (content_search_w > 0) {
+    draw_search_field(ui, input, content_search_x, breadcrumb_y, content_search_w, btn_h, state, event, scale, col, options?.widgets)
+  }
+
+  const entries_rect = {
+    x: content_rect.x,
+    y: content_rect.y + content_header_h,
+    w: content_rect.w,
+    h: Math.max(0, content_rect.h - content_header_h),
+  }
   if ((options?.view_mode ?? state.view_mode) === 'list') {
-    draw_entry_list(ui, input, content_rect, visible_entries, state, font_px, scale, col, event)
+    draw_entry_list(ui, input, entries_rect, visible_entries, state, font_px, scale, col, event)
   } else {
-    draw_entry_grid(ui, input, content_rect, visible_entries, state, font_px, scale, col, options, event)
+    draw_entry_grid(ui, input, entries_rect, visible_entries, state, font_px, scale, col, options, event)
   }
 
   return event
@@ -339,6 +385,7 @@ function ensure_rich_state(state: file_browser_state): void {
   state.selected_paths ??= []
   state.collapsed ??= new Set<string>()
   state.split_ratio ??= 0.32
+  state.split_view ??= { ratio: state.split_ratio }
   state.tree_scroll ??= { offset_y: 0 }
   state.grid_scroll ??= { offset_y: 0 }
   state.list_scroll ??= { offset_y: 0 }
@@ -346,6 +393,7 @@ function ensure_rich_state(state: file_browser_state): void {
   state.search_text ??= ''
   state.search_focused ??= false
   state.search_cursor ??= state.search_text.length
+  state.search_input ??= { cursor: state.search_cursor, sel_anchor: state.search_cursor, sel_head: state.search_cursor }
   state._dragging_split ??= false
   state.last_click_path ??= null
   state.last_entry_click_ms ??= 0
@@ -380,7 +428,19 @@ function draw_search_field(
   event: file_browser_event,
   scale: number,
   col: (slot: theme_slot) => number,
+  widgets?: ui_widgets,
 ): void {
+  if (widgets) {
+    state.search_input ??= { cursor: state.search_cursor ?? 0, sel_anchor: state.search_cursor ?? 0, sel_head: state.search_cursor ?? 0 }
+    const before = state.search_text ?? ''
+    const next = widgets.input_text('file-browser-search', x, y, w, h, before, 'Search files', state.search_input)
+    state.search_text = next
+    state.search_cursor = state.search_input.cursor
+    state.search_focused = input.native_text_input?.id === 'file-browser-search'
+    if (next !== before) event.search_changed = next
+    return
+  }
+
   const inside = point_in(input, x, y, w, h)
   if (input.mouse_pressed) state.search_focused = inside
   if (inside) ui.set_cursor('text')
@@ -431,8 +491,8 @@ function draw_search_field(
   }
   if ((state.search_text ?? '') !== before) event.search_changed = state.search_text ?? ''
 
-  ui.fill_round_rect(x, y, w, h, 3 * scale, col('panel_alt'))
-  ui.stroke_round_rect(x, y, w, h, 3 * scale, 1, state.search_focused ? col('scene_outline') : col('border'))
+  ui.fill_round_rect(x, y, w, h, 6 * scale, col('panel_alt'))
+  ui.stroke_round_rect(x, y, w, h, 6 * scale, 1, state.search_focused ? col('scene_outline') : col('border'))
   const text = state.search_text || 'Search files'
   const color = state.search_text ? col('text') : col('text_dim')
   const font_px = 7.5 * scale
@@ -475,6 +535,7 @@ function draw_folder_tree(
   const row_h = 22 * scale
   const scroll = state.tree_scroll ?? { offset_y: 0 }
   const content_h = rows.length * row_h + 12 * scale
+  const scrollbar_w = content_h > rect.h ? 7 * scale : 0
   const max_off = Math.max(0, content_h - rect.h)
   if (point_in(input, rect.x, rect.y, rect.w, rect.h) && input.wheel_y) {
     scroll.offset_y = clamp(scroll.offset_y - input.wheel_y * 20 * scale, 0, max_off)
@@ -487,19 +548,18 @@ function draw_folder_tree(
   for (const row of rows) {
     if (ry + row_h >= rect.y && ry <= rect.y + rect.h) {
       const active = row.path === state.selected_folder
-      const hover = point_in(input, rect.x + 4 * scale, ry, rect.w - 8 * scale, row_h)
-      if (active) ui.fill_rect(rect.x + 4 * scale, ry, rect.w - 8 * scale, row_h, col('active'))
-      else if (hover) ui.fill_rect(rect.x + 4 * scale, ry, rect.w - 8 * scale, row_h, col('hover'))
+      const hover = point_in(input, rect.x, ry, rect.w - scrollbar_w, row_h)
+      if (active) ui.fill_rect(rect.x + 3 * scale, ry, rect.w - scrollbar_w - 6 * scale, row_h, col('selected'))
+      else if (hover) ui.fill_rect(rect.x + 3 * scale, ry, rect.w - scrollbar_w - 6 * scale, row_h, col('hover'))
 
-      const indent_x = rect.x + 8 * scale + row.depth * 14 * scale
+      const indent_x = rect.x + 7 * scale + row.depth * 14 * scale
       const toggle_x = indent_x
-      const label_x = indent_x + 14 * scale
+      const icon_w = 14 * scale
+      const icon_size = 15 * scale
+      const label_x = indent_x + icon_w + 2 * scale
       if (row.has_children) {
-        const tri = 3.2 * scale
-        const tcx = toggle_x + tri
-        const tcy = ry + row_h * 0.5
-        if (!row.collapsed) ui.fill_triangle(tcx - tri, tcy - tri * 0.6, tcx + tri, tcy - tri * 0.6, tcx, tcy + tri * 0.8, col('text_dim'))
-        else ui.fill_triangle(tcx - tri * 0.6, tcy - tri, tcx - tri * 0.6, tcy + tri, tcx + tri * 0.8, tcy, col('text_dim'))
+        const icon_name = row.collapsed ? 'chevron_right' : 'chevron_down'
+        draw_icon(ui, icon_name, toggle_x + 0.5 * scale, ry + row_h * 0.5 - icon_size * 0.5, icon_size, active ? col('text') : col('text_dim'))
         if (point_in(input, toggle_x - 2 * scale, ry, 16 * scale, row_h) && input.mouse_pressed) {
           const collapsed = state.collapsed ?? new Set<string>()
           if (row.collapsed) collapsed.delete(row.path)
@@ -531,7 +591,7 @@ function draw_entry_grid(
   options: file_browser_options | undefined,
   event: file_browser_event,
 ): void {
-  const pad = 10 * scale
+  const pad = 6 * scale
   const card_w = (options?.card_w ?? 64) * scale
   const card_h = (options?.card_h ?? 92) * scale
   const card_gap = 8 * scale
@@ -562,21 +622,19 @@ function draw_entry_grid(
     if (ey + card_h < rect.y || ey > rect.y + rect.h) continue
     const active = (state.selected_paths ?? []).includes(entry.path)
     const hover = point_in(input, ex, ey, card_w, card_h)
-    ui.fill_rect(ex, ey, card_w, card_h, hover ? col('hover') : col('panel_alt'))
+    ui.fill_round_rect_per_corner(ex, ey, card_w, card_h, 0, 0, 0, 7 * scale, active ? col('selected') : hover ? col('hover') : col('panel_alt'))
     const drew = options?.render_preview?.(entry, ex, ey, card_w, preview_h) ?? false
     if (!drew) {
-      ui.fill_rect(ex, ey, card_w, preview_h, col('panel'))
+      ui.fill_rect(ex + 3 * scale, ey + 3 * scale, Math.max(0, card_w - 6 * scale), Math.max(0, preview_h - 3 * scale), col('panel'))
       ui.draw_text(ex + 8 * scale, ui.text_v_center_y(ey + 12 * scale, 20 * scale, 6 * scale), entry.kind === 'folder' ? 'DIR' : 'FILE', 6 * scale, col('text_dim'))
     }
     ui.push_clip(ex + 4 * scale, ey + preview_h, card_w - 8 * scale, card_h - preview_h - 12 * scale)
-    ui.draw_text(ex + 4 * scale, ey + preview_h + 2 * scale, base_name(entry.name), 6 * scale, col('text'))
+    ui.draw_text(ex + 4 * scale, ey + preview_h + 2 * scale, base_name(entry.name), font_px, col('text'))
     ui.pop_clip()
     const type_label = entry.type_label ?? (entry.kind === 'folder' ? 'Folder' : file_type_label(entry.name))
     const tw = ui.text_width(type_label, 5 * scale)
     ui.draw_text(ex + card_w - 4 * scale - tw, ey + card_h - 12 * scale, type_label, 5 * scale, col('text_dim'))
     if (entry.marked) ui.fill_circle(ex + card_w - 7 * scale, ey + 8 * scale, 2.5 * scale, col('accent'))
-    ui.stroke_rect(ex, ey, card_w, card_h, 1, col('border'))
-    if (active) ui.stroke_rect(ex - 2 * scale, ey - 2 * scale, card_w + 4 * scale, card_h + 4 * scale, 1, col('scene_outline'))
 
     handle_entry_click(input, hover, entry, state, event)
   }
@@ -611,7 +669,7 @@ function draw_entry_list(
   const type_x = rect.x + Math.max(150 * scale, rect.w * 0.46)
   const path_x = rect.x + Math.max(230 * scale, rect.w * 0.64)
   ui.push_clip(rect.x, rect.y, rect.w, rect.h)
-  ui.fill_rect(rect.x, rect.y, rect.w, header_h, col('panel_alt'))
+  ui.fill_round_rect(rect.x + 3 * scale, rect.y + 3 * scale, Math.max(0, rect.w - 6 * scale), Math.max(0, header_h - 3 * scale), 6 * scale, col('panel_alt'))
   ui.draw_text(rect.x + pad, ui.text_v_center_y(rect.y, header_h, 6.5 * scale), 'Name', 6.5 * scale, col('text_dim'))
   ui.draw_text(type_x, ui.text_v_center_y(rect.y, header_h, 6.5 * scale), 'Type', 6.5 * scale, col('text_dim'))
   ui.draw_text(path_x, ui.text_v_center_y(rect.y, header_h, 6.5 * scale), 'Path', 6.5 * scale, col('text_dim'))
@@ -625,8 +683,8 @@ function draw_entry_list(
     if (ry + row_h < rect.y + header_h || ry > rect.y + rect.h) continue
     const active = (state.selected_paths ?? []).includes(entry.path)
     const hover = point_in(input, rect.x, ry, rect.w, row_h)
-    if (active) ui.fill_rect(rect.x + 3 * scale, ry, rect.w - 6 * scale, row_h, col('active'))
-    else if (hover) ui.fill_rect(rect.x + 3 * scale, ry, rect.w - 6 * scale, row_h, col('hover'))
+    if (active) ui.fill_round_rect(rect.x + 3 * scale, ry + 1 * scale, rect.w - 6 * scale, row_h - 2 * scale, 6 * scale, col('active'))
+    else if (hover) ui.fill_round_rect(rect.x + 3 * scale, ry + 1 * scale, rect.w - 6 * scale, row_h - 2 * scale, 6 * scale, col('hover'))
 
     const label = `${entry.kind === 'folder' ? '▸' : ' '} ${entry.name}`
     ui.push_clip(rect.x + pad, ry, Math.max(0, type_x - rect.x - pad * 2), row_h)
@@ -681,12 +739,12 @@ function draw_breadcrumb(
   h: number,
   folder: string,
   input: ui_input_snapshot,
+  font_px: number,
   scale: number,
   on_select: (path: string) => void,
   col: (slot: theme_slot) => number,
 ): void {
   const parts = folder.split('/').filter(Boolean)
-  const font_px = 6.5 * scale
   const text_y = ui.text_v_center_y(y, h, font_px)
   let cursor_x = x
   let current = ''
@@ -695,7 +753,7 @@ function draw_breadcrumb(
     current = current ? `${current}/${part}` : part
     const tw = ui.text_width(part, font_px)
     const hover = point_in(input, cursor_x - 2 * scale, y, tw + 4 * scale, h)
-    if (hover) ui.fill_rect(cursor_x - 2 * scale, y + 2 * scale, tw + 4 * scale, h - 4 * scale, col('hover'))
+    if (hover) ui.fill_round_rect(cursor_x - 2 * scale, y + 2 * scale, tw + 4 * scale, h - 4 * scale, 5 * scale, col('hover'))
     ui.draw_text(cursor_x, text_y, part, font_px, col('text'))
     const captured = current
     if (hover && input.mouse_pressed) on_select(captured)
@@ -849,8 +907,8 @@ function node_tree_to_folders(nodes: file_node[], root = 'Project'): file_browse
     const children = (node.children ?? []).map((child) => convert(child, `${path}/${child.name}`)).filter((child): child is file_browser_folder_node => !!child)
     return { path, name: node.name, children }
   }
-  const folders = nodes.map((node) => convert(node, node.name)).filter((node): node is file_browser_folder_node => !!node)
-  return folders.length ? folders : [{ path: root, name: root }]
+  const folders = nodes.map((node) => convert(node, `${root}/${node.name}`)).filter((node): node is file_browser_folder_node => !!node)
+  return [{ path: root, name: root, children: folders }]
 }
 
 function node_tree_to_entries(nodes: file_node[], folder: string): file_browser_entry[] {
@@ -870,8 +928,13 @@ function node_tree_to_entries(nodes: file_node[], folder: string): file_browser_
 
 function find_node_at_path(nodes: file_node[], parts: string[]): file_node | null {
   if (parts.length === 0) return null
-  let current = nodes.find((node) => node.name === parts[0])
-  for (let i = 1; current && i < parts.length; i += 1) current = current.children?.find((node) => node.name === parts[i])
+  let first = 0
+  let current = nodes.find((node) => node.name === parts[first])
+  if (!current && parts.length > 1) {
+    first = 1
+    current = nodes.find((node) => node.name === parts[first])
+  }
+  for (let i = first + 1; current && i < parts.length; i += 1) current = current.children?.find((node) => node.name === parts[i])
   return current ?? null
 }
 

@@ -209,7 +209,7 @@ export class dock_system {
     measure: (title: string) => number,
   ): void {
     const bar_h = leaf.tab_bar_h
-    const radius = 3 * scale
+    const radius = 4 * scale
     // Panel background + tab strip.
     ui.fill_round_rect(leaf.x, leaf.y, leaf.w, leaf.h, radius, col('panel'))
     ui.fill_round_rect_per_corner(leaf.x, leaf.y, leaf.w, bar_h, radius, radius, 0, 0, col('panel_alt'))
@@ -300,6 +300,8 @@ export class dock_system {
       }
       ui.pop_clip()
     }
+
+    ui.stroke_round_rect(leaf.x, leaf.y, leaf.w, leaf.h, radius, 1, col('border'))
   }
 
   private update_tab_drag(

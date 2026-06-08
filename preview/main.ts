@@ -668,7 +668,7 @@ async function main(): Promise<void> {
 
 function render_files(
   renderer: ui_renderer,
-  _widgets: ui_widgets,
+  widgets: ui_widgets,
   theme: theme_definition,
   snapshot: ReturnType<input_collector['begin_frame']>,
   x: number,
@@ -676,9 +676,15 @@ function render_files(
   w: number,
   h: number,
 ): void {
-  const ev = file_browser(renderer, theme, snapshot, x, y, w, h, file_tree, file_state, { default_expanded: true })
-  if (ev.activated) {
-    console_lines.push({ text: `→ opened ${ev.activated.name}`, color: '#4c8bf5' })
+  const ev = file_browser(renderer, theme, snapshot, x, y, w, h, file_tree, file_state, {
+    default_expanded: true,
+    view_mode: 'grid',
+    view_toggle: false,
+    widgets,
+  })
+  if (ev.activated || ev.entry_activated) {
+    const name = ev.entry_activated?.name ?? ev.activated?.name
+    console_lines.push({ text: `→ opened ${name}`, color: '#4c8bf5' })
     console_state.scroll_to_line = console_lines.length - 1
   }
 }

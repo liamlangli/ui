@@ -25,6 +25,7 @@ import type { theme_definition } from '../types'
 import { draw_icon } from '../ui_icon'
 import { FONT_MONO, ui_renderer } from '../ui_renderer'
 import type { ui_input_snapshot, ui_scroll_state } from '../ui_widgets'
+import { hori_split_view, type hori_split_view_state } from './hori_split_view'
 
 // ── Text model ──────────────────────────────────────────────────────────────
 
@@ -354,6 +355,8 @@ export interface code_editor_state {
   tree_selected_id: string | null
   /** Vertical scroll offset for the optional file tree, in physical px. */
   tree_scroll: ui_scroll_state
+  /** Width and drag state for the optional file tree split. */
+  tree_split?: hori_split_view_state
   /** Internal: last file-tree click target, for double-click activation. */
   tree_last_click_id: string | null
   /** Internal: timestamp of the last file-tree click. */
@@ -428,6 +431,7 @@ export function create_code_editor_state(): code_editor_state {
     tree_expanded: new Set<string>(),
     tree_selected_id: null,
     tree_scroll: { offset_y: 0 },
+    tree_split: {},
     tree_last_click_id: null,
     tree_last_click_ms: 0,
   }
@@ -451,6 +455,7 @@ function ensure_code_editor_state(state: code_editor_state): void {
   state.tree_expanded ??= new Set<string>()
   state.tree_selected_id ??= null
   state.tree_scroll ??= { offset_y: 0 }
+  state.tree_split ??= {}
   state.tree_last_click_id ??= null
   state.tree_last_click_ms ??= 0
 }
@@ -527,11 +532,18 @@ export function code_editor(
   const line_count = buffer.line_count()
   const tree_nodes = options?.file_tree ?? []
   const show_tree = tree_nodes.length > 0
-  const tree_gap = show_tree ? 1 * scale : 0
-  const max_tree_w = Math.max(0, w - char_w * 8)
-  const tree_w = show_tree ? Math.min(max_tree_w, Math.max(72 * scale, (options?.tree_width ?? 180) * scale)) : 0
-  const editor_x = x + tree_w + tree_gap
-  const editor_w = Math.max(char_w, w - tree_w - tree_gap)
+  if (show_tree) state.tree_split ??= { left_w: (options?.tree_width ?? 180) * scale }
+  const split = hori_split_view(ui, input, x, y, w, h, state.tree_split ?? {}, {
+    show_left: show_tree,
+    min_left: 72 * scale,
+    min_right: char_w * 8,
+    initial_left_w: (options?.tree_width ?? 180) * scale,
+    separator_w: Math.max(1, scale),
+    hit_pad: 2 * scale,
+  })
+  const tree_w = split.left.w
+  const editor_x = split.right.x
+  const editor_w = Math.max(char_w, split.right.w)
 
   const gutter_digits = Math.max(2, String(line_count).length)
   const gutter_pad = 6 * scale
@@ -580,7 +592,7 @@ export function code_editor(
     if (tree_event.tree_selected) event.tree_selected = tree_event.tree_selected
     if (tree_event.tree_activated) event.tree_activated = tree_event.tree_activated
     if (tree_event.tree_toggled) event.tree_toggled = tree_event.tree_toggled
-    ui.fill_rect(x + tree_w, y, tree_gap, h, col('border'))
+    ui.fill_rect(split.separator.x, split.separator.y, Math.max(1, split.separator.w), split.separator.h, col('border'))
   }
 
   // ── Mouse hit-testing → logical {line, col} ───────────────────────────────
@@ -826,7 +838,7 @@ function draw_file_tree(
       : 'file'
     draw_icon(ui, icon_name, tx + 0.5 * scale, cy - icon_size * 0.5, icon_size, glyph_color)
 
-    const label_x = tx + icon_w
+    const label_x = tx + icon_w + 2 * scale
     ui.push_clip(label_x, ry, Math.max(0, x + w - scrollbar_w - label_x - 4 * scale), row_h)
     ui.draw_text(label_x, ui.text_v_center_y(ry, row_h, font_px, FONT_MONO), row.node.name, font_px, selected ? col('text') : col('text_dim'), FONT_MONO)
     ui.pop_clip()
