@@ -217,6 +217,9 @@ export class dock_system {
 
     let cursor = leaf.x + 4 * scale
     const gap = 4 * scale
+    // Clip the tab strip to the bar: overflowing tabs (and the active tab's
+    // close button) must never spill past the panel into neighbouring leaves.
+    ui.push_clip(leaf.x, leaf.y, leaf.w, bar_h)
     for (let i = 0; i < leaf.tabs.length; i += 1) {
       const tab = leaf.tabs[i]
       const tw = tab_width(tab.title, scale, measure(tab.title))
@@ -260,8 +263,8 @@ export class dock_system {
         if (close_hover) ui.fill_circle(cx, cy, 8 * scale, col('hover'))
         const r = 3.2 * scale
         const cc = close_hover ? col('text') : col('text_dim')
-        ui.stroke_line(cx - r, cy - r, cx + r, cy + r, 1.3 * scale, cc)
-        ui.stroke_line(cx - r, cy + r, cx + r, cy - r, 1.3 * scale, cc)
+        ui.stroke_line(cx - r, cy - r, cx + r, cy + r, 1.3 * scale, cc, 0.75 * scale)
+        ui.stroke_line(cx - r, cy + r, cx + r, cy - r, 1.3 * scale, cc, 0.75 * scale)
         if (close_hover && input.mouse_pressed) {
           close_dock_tab(this.layout, leaf.leaf_id, tab.id)
           this.drag.armed = false
@@ -269,6 +272,7 @@ export class dock_system {
       }
       cursor += tw + gap
     }
+    ui.pop_clip()
 
     // Body.
     const body_x = leaf.x
