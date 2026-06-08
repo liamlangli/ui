@@ -12,8 +12,11 @@ import {
   default_themes,
   ui_renderer,
   ui_widgets,
+  ui_icons,
+  type ui_icon_name,
   hex_to_normalized_rgba,
   pack_color,
+  theme_rgba,
   create_text_view_state,
   FONT_MONO,
   type theme_definition,
@@ -206,6 +209,8 @@ function build_window_layout(): window_layout {
 // --- Persistent widget / plugin state -------------------------------------
 const dock = new dock_system(build_layout())
 const windows = new window_system(build_window_layout())
+// Baked once after the renderer initialises (see main()); drawn in the gallery.
+let icon_set: ui_icons | null = null
 // Which workspace layout engine drives the views this frame.
 let workspace_mode: 'dock' | 'window' = 'dock'
 
@@ -492,6 +497,7 @@ async function main(): Promise<void> {
   const renderer = new ui_renderer(canvas)
   await renderer.init()
   const widgets = new ui_widgets(renderer)
+  icon_set = new ui_icons(renderer)
   const loaded: theme_definition = await load_theme(theme_url)
   init_themes({ name: 'Midnight', theme: loaded })
 
@@ -687,6 +693,21 @@ function render_gallery(
 
   cy = widgets.section(cx, cy, col_w, 'COLOR') + 6 * scale
   gallery.color = widgets.ui_color_picker('g_col', cx, cy, 180 * scale, 28 * scale, gallery.color)
+  cy += row + gap
+
+  cy = widgets.section(cx, cy, col_w, 'ICONS') + 8 * scale
+  if (icon_set) {
+    // Vector icons baked into a single 512² atlas (32² per cell), tinted live.
+    const tint = theme_rgba(theme, 'text')
+    const icon_px = 20 * scale
+    const step = 30 * scale
+    const per_row = Math.max(1, Math.floor(col_w / step))
+    icon_set.names().forEach((name: ui_icon_name, i: number) => {
+      const ix = cx + (i % per_row) * step
+      const iy = cy + Math.floor(i / per_row) * step
+      icon_set!.draw(name, ix, iy, icon_px, tint)
+    })
+  }
 }
 
 function record_metric_sample(fps: number, cpu_ms: number, stats: ui_renderer_stats): void {
