@@ -210,6 +210,9 @@ const dock = new dock_system(build_layout())
 const windows = new window_system(build_window_layout())
 // Baked once after the renderer initialises (see main()); drawn in the gallery.
 let icon_set: ui_icons | null = null
+// Set once the renderer is live (see main()); lets async helpers (console
+// appends, deferred compiles) wake the adaptive renderer outside a frame.
+let active_renderer: ui_renderer | null = null
 // Which workspace layout engine drives the views this frame.
 let workspace_mode: 'dock' | 'window' = 'dock'
 
@@ -255,6 +258,50 @@ const compile_ctrl = {
   sequence: 0,
   last_source_version: 0,
   status: 'Idle' as 'Idle' | 'Queued' | 'Compiling' | 'Built',
+}
+
+// Append a line to the Console view and keep it scrolled to the tail. Wakes the
+// adaptive renderer so the update shows even when called outside a frame.
+function append_console(text: string, color?: string): void {
+  console_lines.push(color ? { text, color } : { text })
+  console_state.scroll_to_line = console_lines.length - 1
+  active_renderer?.request_render()
+}
+
+// Cancel any pending (debounced) compile and reset a queued status to idle.
+function cancel_compile(): void {
+  if (compile_ctrl.timer) {
+    window.clearTimeout(compile_ctrl.timer)
+    compile_ctrl.timer = 0
+  }
+  if (compile_ctrl.status === 'Queued') compile_ctrl.status = 'Idle'
+}
+
+// Debounced auto-compile: schedules a build after the editor goes quiet.
+function schedule_compile(): void {
+  if (!compile_ctrl.auto_compile) return
+  cancel_compile()
+  compile_ctrl.status = 'Queued'
+  compile_ctrl.timer = window.setTimeout(() => {
+    compile_ctrl.timer = 0
+    run_compile()
+  }, compile_ctrl.debounce_ms)
+}
+
+// Run a (simulated) build now. The demo has no real compiler, so this just
+// reports progress to the Console and flips the status flag.
+function run_compile(): void {
+  cancel_compile()
+  const seq = (compile_ctrl.sequence += 1)
+  compile_ctrl.last_source_version = editor_buffer.version
+  compile_ctrl.status = 'Compiling'
+  append_console(`$ build #${seq} — compiling ${editor_buffer.get_text().length} bytes`, '#4c8bf5')
+  window.setTimeout(() => {
+    if (compile_ctrl.sequence !== seq) return // superseded by a newer build
+    compile_ctrl.status = 'Built'
+    append_console(`✓ build #${seq} done`, '#5fb878')
+    active_renderer?.request_render()
+  }, 220)
 }
 
 const main_menu = new ui_main_menu([
@@ -504,6 +551,8 @@ function tick_theme(now: number): theme_definition {
 async function main(): Promise<void> {
   const renderer = new ui_renderer(canvas)
   await renderer.init()
+  active_renderer = renderer
+  compile_ctrl.last_source_version = editor_buffer.version
   const widgets = new ui_widgets(renderer)
   icon_set = new ui_icons(renderer)
   const loaded: theme_definition = await load_theme(theme_url)
@@ -592,6 +641,12 @@ async function main(): Promise<void> {
       windows.frame(renderer, theme, dock_input, bar_x, dock_y, bar_w, dock_h, render_panel)
     } else {
       dock.frame(renderer, theme, dock_input, bar_x, dock_y, bar_w, dock_h, render_panel)
+    }
+
+    // Auto-compile: when the editor buffer changes, (re)arm the debounced build.
+    if (compile_ctrl.auto_compile && editor_buffer.version !== compile_ctrl.last_source_version) {
+      compile_ctrl.last_source_version = editor_buffer.version
+      schedule_compile()
     }
 
     // Refresh the Theme sub-menu against the live selection, then draw the menu
