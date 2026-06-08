@@ -182,11 +182,13 @@ export class dock_system {
       const hot =
         this.dragging_split_id === split.split_id ||
         (!this.drag.active && point_in(input, split.x, split.y, split.w, split.h))
+      // Only render the resize bar while actively resizing or hovered.
+      if (!hot) continue
       const t = Math.max(1 * scale, Math.min(split.w, split.h) * 0.18)
       if (split.axis === 'horizontal') {
-        ui.fill_rect(split.x + split.w * 0.5 - t * 0.5, split.y, t, split.h, hot ? col('accent') : col('border'))
+        ui.fill_rect(split.x + split.w * 0.5 - t * 0.5, split.y, t, split.h, col('accent'))
       } else {
-        ui.fill_rect(split.x, split.y + split.h * 0.5 - t * 0.5, split.w, t, hot ? col('accent') : col('border'))
+        ui.fill_rect(split.x, split.y + split.h * 0.5 - t * 0.5, split.w, t, col('accent'))
       }
     }
 
