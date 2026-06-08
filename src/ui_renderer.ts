@@ -953,10 +953,10 @@ export class ui_renderer {
     this.push_quad(x, y, x + w, y + h, 0, 0, 1, 1, 0xffffffff)
   }
 
-  draw_texture_region(texture_id: number, x: number, y: number, w: number, h: number, u0: number, v0: number, u1: number, v1: number): void {
+  draw_texture_region(texture_id: number, x: number, y: number, w: number, h: number, u0: number, v0: number, u1: number, v1: number, color = 0xffffffff): void {
     if (w <= 0 || h <= 0) return
     this.current_texture_id = texture_id
-    this.push_quad(x, y, x + w, y + h, u0, v0, u1, v1, 0xffffffff)
+    this.push_quad(x, y, x + w, y + h, u0, v0, u1, v1, color)
   }
 
   draw_hsv_saturation_square(x: number, y: number, w: number, h: number, value: number): void {
@@ -1519,6 +1519,91 @@ export class ui_renderer {
     this.encode_render_pass(pass)
     this.vertex_count = 0
     this.commands = []
+  }
+
+  /**
+   * Render `draw` into an offscreen `target` texture sized `width`x`height`
+   * texels, using the very same immediate-mode primitives as on-screen drawing.
+   * The pixel→NDC mapping is temporarily rebased to the target's size, so
+   * geometry emitted over (0,0)..(width,height) covers the target exactly.
+   *
+   * The shared vertex / command buffers and clip stack are saved and restored
+   * around the call, so this is safe to invoke at any time without disturbing an
+   * in-progress frame. `target` must be created with
+   * `GPUTextureUsage.RENDER_ATTACHMENT` and the renderer's colour `format`
+   * (see {@link gpu}). When `clear` is omitted the target's existing contents
+   * are preserved (`loadOp: 'load'`); pass a colour to clear it first. This is
+   * how the icon module bakes a vector-drawn icon atlas into a single texture.
+   */
+  render_to_texture(target: GPUTexture, width: number, height: number, draw: () => void, clear?: GPUColorDict): void {
+    if (!this.device || !this.screen_buffer || !this.pipeline_image || !this.pipeline_sdf || !this.bind_group_white) return
+    const w = Math.max(1, Math.floor(width))
+    const h = Math.max(1, Math.floor(height))
+
+    // Stash the live frame so the bake never clobbers in-progress geometry.
+    const saved_commands = this.commands
+    const saved_vertex_count = this.vertex_count
+    const saved_clip = this.clip_stack
+    const saved_texture_id = this.current_texture_id
+    const saved_break = this.break_command_merge
+
+    this.commands = []
+    this.clip_stack = [make_clip(0, 0, w, h)]
+    this.current_texture_id = white_texture_id
+    this.break_command_merge = true
+    // draw() accumulates into this.commands / this.vertex_data, which
+    // encode_render_pass then consumes directly below.
+    draw()
+    const vertex_byte_length = this.vertex_count * vertex_stride
+
+    if (vertex_byte_length > 0) {
+      const byte_length = Math.max(vertex_byte_length, vertex_stride)
+      if (!this.vertex_buffer || this.vertex_buffer.size < byte_length) {
+        let next_size = Math.max(this.vertex_buffer?.size ?? 0, 4096)
+        while (next_size < byte_length) next_size *= 2
+        this.vertex_buffer?.destroy()
+        this.vertex_buffer = this.device.createBuffer({
+          label: 'ui.vertex_buffer',
+          size: next_size,
+          usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+        })
+      }
+      this.device.queue.writeBuffer(this.vertex_buffer, 0, this.vertex_data, 0, vertex_byte_length)
+      // Rebase pixel→NDC onto the target's size for the duration of the pass.
+      this.device.queue.writeBuffer(this.screen_buffer, 0, new Float32Array([w, h]))
+      const encoder = this.device.createCommandEncoder({ label: 'ui.command_encoder.render_to_texture' })
+      const pass = encoder.beginRenderPass({
+        label: 'ui.render_pass.render_to_texture',
+        colorAttachments: [
+          {
+            view: target.createView({ label: 'ui.render_to_texture_view' }),
+            clearValue: clear ?? { r: 0, g: 0, b: 0, a: 0 },
+            loadOp: clear ? 'clear' : 'load',
+            storeOp: 'store',
+          },
+        ],
+      })
+      this.encode_render_pass(pass)
+      pass.end()
+      this.device.queue.submit([encoder.finish()])
+      // Restore the on-screen pixel→NDC mapping.
+      this.device.queue.writeBuffer(this.screen_buffer, 0, new Float32Array([this.canvas_width, this.canvas_height]))
+    } else if (clear) {
+      // Nothing was drawn but a clear was requested — still clear the target.
+      const encoder = this.device.createCommandEncoder({ label: 'ui.command_encoder.render_to_texture' })
+      const pass = encoder.beginRenderPass({
+        label: 'ui.render_pass.render_to_texture',
+        colorAttachments: [{ view: target.createView({ label: 'ui.render_to_texture_view' }), clearValue: clear, loadOp: 'clear', storeOp: 'store' }],
+      })
+      pass.end()
+      this.device.queue.submit([encoder.finish()])
+    }
+
+    this.commands = saved_commands
+    this.vertex_count = saved_vertex_count
+    this.clip_stack = saved_clip
+    this.current_texture_id = saved_texture_id
+    this.break_command_merge = saved_break
   }
 
   private encode_render_pass(pass: GPURenderPassEncoder): void {

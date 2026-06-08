@@ -6,6 +6,7 @@ It bundles the pieces needed to build a browser-native editor UI on top of WebGP
 
 - **`ui_renderer`** — a batched WebGPU renderer for rectangles, rounded rects, SDF text (Lato main text and jb_mono monospace text in a shared atlas, PingFang SC for Chinese text), images, and the HSV color picker panels.
 - **`ui_widgets`** — an immediate-mode widget layer (buttons, toggles, sliders, dropdowns, text/number inputs, color pickers, scroll regions, menus) drawn through `ui_renderer`.
+- **`ui_icon`** — a set of vector icons (file, folder, folder_open, chevrons, search, settings, …) composed from `ui_renderer` draw commands and baked once into a single cached 512² atlas texture (32² per cell), then drawn tinted to any colour. See [Icons](#icons).
 - **`dock`** — a docking layout engine: split/leaf trees, tab drag-and-drop, drop targets, and (de)serialization.
 - **`theme`** — palette/CSS-variable theming with `load_theme`, `apply_theme`, `theme_color`, `theme_rgba`, `pack_color`, and `hex_to_normalized_rgba`.
 - **`plugins`** — opt-in, higher-level drop-in components (`dock_system`, `window_system`, `file_browser`, `asset_browser`, `graph`, `im_dialog`, `code_editor`) packaged so other projects can reuse them piecemeal. See [Plugins](#plugins).
@@ -323,6 +324,29 @@ renderer.update_texture(tex, rgba /* Uint8ClampedArray | Uint8Array */)
 renderer.draw_texture(tex, x, y, w, h) // sampler chosen at create time
 renderer.destroy_texture(tex)
 ```
+
+### Icons
+
+`ui_icons` composes a set of vector icons from the renderer's own draw commands
+(`stroke_line`, `stroke_round_rect`, `fill_triangle`, `fill_circle`, …) and bakes
+them once into a single cached atlas texture — `512×512` by default, with each
+icon occupying a `32×32` cell (so up to `16×16 = 256` icons share one texture).
+Icons are baked white, so a draw call tints them to any colour for free:
+
+```ts
+const icons = new ui_icons(renderer)             // bake after renderer.init()
+icons.draw('folder', x, y)                        // 32px, untinted
+icons.draw('folder_open', x, y, 16, theme_rgba(theme, 'accent')) // 16px, tinted
+```
+
+Built-in names include `file`, `file_text`, `folder`, `folder_open`,
+`chevron_right` / `chevron_down` / `chevron_up` / `chevron_left`, `plus`,
+`minus`, `close`, `check`, `search`, `settings`, `trash`, `image`, `code`,
+`star`, `circle`, `dot`, and `home` (see `ui_icon_name`). Pass
+`{ atlas_size, cell_size }` to the constructor to change the cache geometry, and
+call `bake()` to refresh the atlas (e.g. after a device reset). The bake is built
+on the general-purpose `renderer.render_to_texture(target, w, h, draw)`, which
+renders any UI draw commands into an offscreen texture.
 
 ### Retained layers (cached panels)
 
