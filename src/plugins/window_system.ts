@@ -291,23 +291,23 @@ export class window_system {
 
     // minimize
     if (hit(min_cx)) ui.fill_circle(min_cx, cy, br + 1.5 * scale, col('hover'))
-    ui.stroke_line(min_cx - 4 * scale, cy + 3 * scale, min_cx + 4 * scale, cy + 3 * scale, 1.4 * scale, glyph)
+    ui.stroke_line(min_cx - 4 * scale, cy + 3 * scale, min_cx + 4 * scale, cy + 3 * scale, 1.4 * scale, glyph, 0.75 * scale)
     // maximize / restore
     if (hit(max_cx)) ui.fill_circle(max_cx, cy, br + 1.5 * scale, col('hover'))
     if (r.win.maximized) {
       const o = 3 * scale
-      ui.stroke_rect(max_cx - o + 1.5 * scale, cy - o - 1.5 * scale, o * 2, o * 2, 1.3 * scale, glyph)
-      ui.stroke_rect(max_cx - o - 1.5 * scale, cy - o + 1.5 * scale, o * 2, o * 2, 1.3 * scale, glyph)
+      ui.stroke_rect(max_cx - o + 1.5 * scale, cy - o - 1.5 * scale, o * 2, o * 2, 1.3 * scale, glyph, 0.75 * scale)
+      ui.stroke_rect(max_cx - o - 1.5 * scale, cy - o + 1.5 * scale, o * 2, o * 2, 1.3 * scale, glyph, 0.75 * scale)
     } else {
-      ui.stroke_rect(max_cx - 3.5 * scale, cy - 3.5 * scale, 7 * scale, 7 * scale, 1.3 * scale, glyph)
+      ui.stroke_rect(max_cx - 3.5 * scale, cy - 3.5 * scale, 7 * scale, 7 * scale, 1.3 * scale, glyph, 0.75 * scale)
     }
     // close
     const close_hot = hit(close_cx)
     if (close_hot) ui.fill_circle(close_cx, cy, br + 1.5 * scale, pack('#e0564b'))
     const x_c = close_hot ? pack('#ffffff') : glyph
     const cr = 3.4 * scale
-    ui.stroke_line(close_cx - cr, cy - cr, close_cx + cr, cy + cr, 1.4 * scale, x_c)
-    ui.stroke_line(close_cx - cr, cy + cr, close_cx + cr, cy - cr, 1.4 * scale, x_c)
+    ui.stroke_line(close_cx - cr, cy - cr, close_cx + cr, cy + cr, 1.4 * scale, x_c, 0.75 * scale)
+    ui.stroke_line(close_cx - cr, cy + cr, close_cx + cr, cy - cr, 1.4 * scale, x_c, 0.75 * scale)
   }
 
   // Body content: rendered live for the focused window (and on the first frame
@@ -419,8 +419,8 @@ export class window_system {
         if (close_hot) ui.fill_circle(close_cx, cy, close_r, pack('#e0564b'))
         const x_c = close_hot ? pack('#ffffff') : col('text_dim')
         const xr = close_r * 0.42
-        ui.stroke_line(close_cx - xr, cy - xr, close_cx + xr, cy + xr, 1.2 * scale, x_c)
-        ui.stroke_line(close_cx - xr, cy + xr, close_cx + xr, cy - xr, 1.2 * scale, x_c)
+        ui.stroke_line(close_cx - xr, cy - xr, close_cx + xr, cy + xr, 1.2 * scale, x_c, 0.75 * scale)
+        ui.stroke_line(close_cx - xr, cy + xr, close_cx + xr, cy - xr, 1.2 * scale, x_c, 0.75 * scale)
       }
       if (input.mouse_pressed) {
         if (close_hot) close_window(this.layout, win.id)
