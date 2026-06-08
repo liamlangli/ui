@@ -123,7 +123,26 @@ type font_bundle_doc = {
   fonts: Record<typeof FONT_MAIN | typeof FONT_MONO, font_face_doc>
 }
 
-type clip_rect = { x: number; y: number; w: number; h: number }
+// A scissor rect plus an optional rounded-corner region (physical px). The
+// scissor clips rectangularly as always; the rounded region lets axis-aligned
+// fills round whichever corners coincide with it, so panel/body backgrounds
+// drawn with fill_rect don't poke past a window's rounded frame. The region is
+// inherited by nested rectangular clips. round_r 0 means "no rounding".
+type clip_rect = {
+  x: number
+  y: number
+  w: number
+  h: number
+  round_x: number
+  round_y: number
+  round_w: number
+  round_h: number
+  round_r: number
+}
+
+function make_clip(x: number, y: number, w: number, h: number): clip_rect {
+  return { x, y, w, h, round_x: 0, round_y: 0, round_w: 0, round_h: 0, round_r: 0 }
+}
 
 type color_panel_texture = {
   texture: GPUTexture
@@ -342,7 +361,9 @@ function is_cjk_codepoint(code: number): boolean {
   )
 }
 
-function clip_intersect(a: clip_rect, b: clip_rect): clip_rect {
+// Intersect scissor bounds while inheriting the parent's rounded region, so a
+// plain push_clip nested inside a rounded clip still rounds the right corners.
+function clip_intersect(a: clip_rect, b: { x: number; y: number; w: number; h: number }): clip_rect {
   const x0 = Math.max(a.x, b.x)
   const y0 = Math.max(a.y, b.y)
   const x1 = Math.min(a.x + a.w, b.x + b.w)
@@ -352,6 +373,11 @@ function clip_intersect(a: clip_rect, b: clip_rect): clip_rect {
     y: y0,
     w: Math.max(0, x1 - x0),
     h: Math.max(0, y1 - y0),
+    round_x: a.round_x,
+    round_y: a.round_y,
+    round_w: a.round_w,
+    round_h: a.round_h,
+    round_r: a.round_r,
   }
 }
 
@@ -800,7 +826,7 @@ export class ui_renderer {
   begin_frame(): void {
     this.vertex_count = 0
     this.commands = []
-    this.clip_stack = [{ x: 0, y: 0, w: this.canvas_width, h: this.canvas_height }]
+    this.clip_stack = [make_clip(0, 0, this.canvas_width, this.canvas_height)]
     this.current_texture_id = white_texture_id
     this.break_command_merge = false
   }
@@ -990,6 +1016,25 @@ export class ui_renderer {
     this.clip_stack.push(next)
   }
 
+  /**
+   * Push a clip that also marks (x, y, w, h) as a rounded-corner region with the
+   * given corner `radius`. The scissor is still rectangular, but {@link fill_rect}
+   * (and other axis-aligned fills) automatically round whichever of their corners
+   * land on this region's corners — so a panel/body background drawn with a plain
+   * rect stays inside a window's rounded frame instead of poking past it. The
+   * region carries through nested {@link push_clip} calls. Balance with
+   * {@link pop_clip}.
+   */
+  push_clip_round(x: number, y: number, w: number, h: number, radius: number): void {
+    const next = clip_intersect(this.current_clip(), { x, y, w, h })
+    next.round_x = x
+    next.round_y = y
+    next.round_w = w
+    next.round_h = h
+    next.round_r = Math.max(0, radius)
+    this.clip_stack.push(next)
+  }
+
   pop_clip(): void {
     if (this.clip_stack.length > 1) this.clip_stack.pop()
   }
@@ -1091,6 +1136,25 @@ export class ui_renderer {
 
   fill_rect(x: number, y: number, w: number, h: number, rgba: number, feather = 0): void {
     if (w <= 0 || h <= 0) return
+    // Under a rounded clip region, round whichever corners of this rect sit on
+    // the region's corners so backgrounds honor the (e.g. window) rounded frame.
+    const clip = this.current_clip()
+    if (clip.round_r > 0) {
+      const eps = 0.5
+      const left = x <= clip.round_x + eps
+      const right = x + w >= clip.round_x + clip.round_w - eps
+      const top = y <= clip.round_y + eps
+      const bottom = y + h >= clip.round_y + clip.round_h - eps
+      const r = clip.round_r
+      const rtl = left && top ? r : 0
+      const rtr = right && top ? r : 0
+      const rbl = left && bottom ? r : 0
+      const rbr = right && bottom ? r : 0
+      if (rtl > 0 || rtr > 0 || rbl > 0 || rbr > 0) {
+        this.fill_round_rect_per_corner(x, y, w, h, rtl, rtr, rbl, rbr, rgba, Math.max(feather, default_round_rect_feather))
+        return
+      }
+    }
     this.current_texture_id = white_texture_id
     const u = this.white_u()
     const v = this.white_v()
@@ -1712,7 +1776,7 @@ export class ui_renderer {
   }
 
   private current_clip(): clip_rect {
-    return this.clip_stack[this.clip_stack.length - 1] ?? { x: 0, y: 0, w: this.canvas_width, h: this.canvas_height }
+    return this.clip_stack[this.clip_stack.length - 1] ?? make_clip(0, 0, this.canvas_width, this.canvas_height)
   }
 
   private ensure_vertices(extra_vertices: number): void {

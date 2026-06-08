@@ -195,7 +195,7 @@ export class window_system {
       // to the panel under the top-most window.
       const interactive = hot === win && this.action.kind === 'none'
       this.draw_window_chrome(ui, interactive ? input : block_input(input), r, title_h, font_px, scale, focused, interactive, col)
-      this.draw_window_body(ui, r, title_h, focused, cache_bodies, render_body)
+      this.draw_window_body(ui, r, title_h, scale, focused, cache_bodies, render_body)
     }
 
     // Prune caches for windows that no longer exist.
@@ -260,10 +260,11 @@ export class window_system {
     col: (slot: Parameters<typeof theme_color>[1]) => number,
   ): void {
     const radius = 6 * scale
-    // Soft drop shadow behind the focused window for depth.
+    // Soft drop shadow behind the focused window for depth. Kept light and
+    // wide so it reads as ambient depth rather than a hard dark halo.
     if (focused) {
-      const s = 7 * scale
-      ui.fill_round_rect(r.x - s, r.y - s + 3 * scale, r.w + s * 2, r.h + s * 2, radius + s, with_alpha(0x000000, 55), s)
+      const s = 9 * scale
+      ui.fill_round_rect(r.x - s, r.y - s + 4 * scale, r.w + s * 2, r.h + s * 2, radius + s, with_alpha(0x000000, 28), s)
     }
     // Frame + header.
     ui.fill_round_rect(r.x, r.y, r.w, r.h, radius, col('panel'))
@@ -316,6 +317,7 @@ export class window_system {
     ui: ui_renderer,
     r: window_rect,
     title_h: number,
+    scale: number,
     focused: boolean,
     cache_bodies: boolean,
     render_body: dock_render_body,
@@ -323,6 +325,13 @@ export class window_system {
     const body_y = r.y + title_h
     const body_h = r.h - title_h
     if (body_h <= 0) return
+    // Mark the window rect as a rounded region so the body's full-area
+    // background fills round their bottom corners to match the frame instead of
+    // poking square corners past it. The region spans the whole window; the
+    // body's top corners sit under the title bar, so only the bottom two round.
+    // The scissor stays the body rect.
+    const radius = 6 * scale
+    ui.push_clip_round(r.x, r.y, r.w, r.h, radius)
     ui.push_clip(r.x, body_y, r.w, body_h)
     const cache = this.body_cache.get(r.win.id)
     // Re-render live when caching is off, the window is focused, there is no
@@ -340,6 +349,7 @@ export class window_system {
     } else {
       ui.replay_layer(cache.layer, r.x - cache.px, body_y - cache.py)
     }
+    ui.pop_clip()
     ui.pop_clip()
   }
 
