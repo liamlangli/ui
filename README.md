@@ -9,7 +9,7 @@ It bundles the pieces needed to build a browser-native editor UI on top of WebGP
 - **`ui_icon`** — a set of vector icons (file, folder, folder_open, chevrons, search, settings, …) composed from `ui_renderer` draw commands and baked once into a single cached 512² atlas texture (32² per cell), then drawn tinted to any colour. See [Icons](#icons).
 - **`dock`** — a docking layout engine: split/leaf trees, tab drag-and-drop, drop targets, and (de)serialization.
 - **`theme`** — palette/CSS-variable theming with `load_theme`, `apply_theme`, `theme_color`, `theme_rgba`, `pack_color`, and `hex_to_normalized_rgba`.
-- **`plugins`** — opt-in, higher-level drop-in components (`dock_system`, `window_system`, `file_browser`, `asset_browser`, `graph`, `im_dialog`, `code_editor`) packaged so other projects can reuse them piecemeal. See [Plugins](#plugins).
+- **`plugins`** — opt-in, higher-level drop-in components (`dock_system`, `window_system`, `file_browser`, `graph`, `im_dialog`, `code_editor`) packaged so other projects can reuse them piecemeal. See [Plugins](#plugins).
 
 ## Live preview
 
@@ -44,7 +44,7 @@ drawing and input handling and takes your `ui_renderer` (+ `ui_widgets` where
 needed), a `theme_definition`, and the per-frame `ui_input_snapshot`.
 
 ```ts
-import { asset_browser, code_editor, dock_system, window_system, file_browser, graph_canvas, im_dialog } from '@liamlangli/ui/plugins'
+import { code_editor, dock_system, window_system, file_browser, graph_canvas, im_dialog } from '@liamlangli/ui/plugins'
 ```
 
 ### `dock_system` — docking workspace
@@ -134,8 +134,6 @@ if (ev.entry_activated) open_asset(ev.entry_activated.path)
 if (ev.toolbar_clicked === 'create') open_create_menu()
 if (ev.context_requested) open_context_menu(ev.context_requested)
 ```
-
-`asset_browser` remains as a compatibility wrapper around `file_browser`.
 
 ### `graph` — node-graph canvas
 
