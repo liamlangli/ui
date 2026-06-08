@@ -233,6 +233,28 @@ const ICON_PATHS: Record<ui_icon_name, icon_path> = {
 const ICON_NAMES = Object.keys(ICON_PATHS) as ui_icon_name[]
 
 /**
+ * Draw a built-in icon straight from its vector path using the renderer's
+ * immediate-mode commands — no baked atlas texture required. Use this where a
+ * cached {@link ui_icons} atlas isn't available (e.g. inside a plugin that only
+ * has the renderer), at the cost of a few extra draw calls per icon.
+ *
+ * The icon fills a `size`×`size` box whose top-left is (x, y) and is tinted by
+ * `color` (packed `0xAABBGGRR`; defaults to opaque white).
+ */
+export function draw_icon(
+  renderer: ui_renderer,
+  name: ui_icon_name,
+  x: number,
+  y: number,
+  size = ICON_CELL_SIZE,
+  color = 0xffffffff,
+): void {
+  const path = ICON_PATHS[name]
+  if (!path) return
+  path(new icon_pen(renderer, x, y, size, color))
+}
+
+/**
  * Bakes the built-in {@link ui_icon_name} set into one cached atlas texture and
  * draws (tinted) icons from it. Construct after `renderer.init()` has resolved.
  */
