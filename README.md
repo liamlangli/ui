@@ -99,7 +99,7 @@ windows costs roughly one live panel plus cheap buffer copies. Call
 `windows.invalidate(id)` when an inactive window's content changes (the preview
 does this for the Chat window when a message arrives).
 
-### `file_browser` — tree view
+### `file_browser` — tree + project browser
 
 A scrollable, expandable file/folder tree. You own the `file_node[]` forest and
 the persistent state; it reports selection / activation (double-click or Enter) /
@@ -113,22 +113,19 @@ const ev = file_browser(renderer, theme, input, x, y, w, h, tree, fb, { default_
 if (ev.activated) open_file(ev.activated.name)
 ```
 
-### `asset_browser` — two-pane content browser
-
-The richer "content browser" pattern (vs the single-column `file_browser`): a
-collapsible folder tree on the left, a wrapped grid of preview cards for the
-selected folder on the right, a breadcrumb + host toolbar buttons across the
-top, and a draggable splitter between the panes. It owns scrolling, hit-testing,
-selection, splitter-drag and double-click, and reports navigation / activation /
-toolbar / context-menu intents back to you. You own the folder forest, the entry
-list for the selected folder, and each card's thumbnail (via `render_preview`).
+The same `file_browser` function also supports the richer content-browser
+pattern: a collapsible folder tree, breadcrumb, file search, list/grid modes,
+host toolbar buttons, context-menu intents, and preview extension hooks. You own
+the folder forest, current-folder entries, optional global search entries, and
+each thumbnail via `render_preview`. Projects such as Union keep 3D image/model
+preview rendering in their own code and hook it in through that callback.
 
 ```ts
-const ab = create_asset_browser_state('Project')
-const folders: asset_folder_node[] = [{ path: 'Project', name: 'Project', children: [{ path: 'Project/Textures', name: 'Textures' }] }]
-const entries: asset_entry[] = [{ path: 'Project/Textures/brick.png', name: 'brick.png', kind: 'file', type_label: 'TEXTURE' }]
+const fb = create_file_browser_state('Project')
+const folders: file_browser_folder_node[] = [{ path: 'Project', name: 'Project', children: [{ path: 'Project/Textures', name: 'Textures' }] }]
+const entries: file_browser_entry[] = [{ path: 'Project/Textures/brick.png', name: 'brick.png', kind: 'file', type_label: 'TEXTURE' }]
 
-const ev = asset_browser(renderer, theme, input, x, y, w, h, folders, entries, ab, {
+const ev = file_browser(renderer, theme, input, x, y, w, h, folders, entries, fb, {
   toolbar: [{ id: 'create', label: 'Create Asset' }, { id: 'import', label: 'Import' }],
   render_preview: (entry, px, py, pw, ph) => draw_thumbnail(entry, px, py, pw, ph),
 })
@@ -137,6 +134,8 @@ if (ev.entry_activated) open_asset(ev.entry_activated.path)
 if (ev.toolbar_clicked === 'create') open_create_menu()
 if (ev.context_requested) open_context_menu(ev.context_requested)
 ```
+
+`asset_browser` remains as a compatibility wrapper around `file_browser`.
 
 ### `graph` — node-graph canvas
 
