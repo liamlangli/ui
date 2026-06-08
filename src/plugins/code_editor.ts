@@ -302,6 +302,15 @@ export interface editor_highlight {
   color?: number | string
 }
 
+export interface code_editor_file_node {
+  /** Stable id; if omitted a path-derived key is used. */
+  id?: string
+  name: string
+  /** `'folder'`/`'dir'` shows a disclosure triangle; inferred from `children` when omitted. */
+  kind?: 'file' | 'folder' | 'dir'
+  children?: code_editor_file_node[]
+}
+
 /** Neutral default syntax palette (works on dark themes). Override per kind via options. */
 const DEFAULT_TOKEN_COLORS: Record<editor_token_kind, string> = {
   keyword: '#7ab4ff',
@@ -338,6 +347,16 @@ export interface code_editor_state {
   last_click_ms: number
   /** Internal: consecutive-click streak (1 single, 2 word, 3 line). */
   click_streak: number
+  /** Expanded folder ids for the optional file tree. */
+  tree_expanded: Set<string>
+  /** Selected node id in the optional file tree. */
+  tree_selected_id: string | null
+  /** Vertical scroll offset for the optional file tree, in physical px. */
+  tree_scroll: ui_scroll_state
+  /** Internal: last file-tree click target, for double-click activation. */
+  tree_last_click_id: string | null
+  /** Internal: timestamp of the last file-tree click. */
+  tree_last_click_ms: number
 }
 
 export interface code_editor_options {
@@ -368,6 +387,16 @@ export interface code_editor_options {
   token_colors?: Partial<Record<editor_token_kind, number | string>>
   /** Extra range highlights drawn behind the text (e.g. find matches). */
   highlights?: editor_highlight[]
+  /** Optional lightweight folder/file tree drawn to the left of the code surface. */
+  file_tree?: code_editor_file_node[]
+  /** Logical width of the optional file tree. Defaults to 180. */
+  tree_width?: number
+  /** Logical row height for the optional file tree. Defaults to 22. */
+  tree_row_h?: number
+  /** Logical per-depth indent for the optional file tree. Defaults to 14. */
+  tree_indent?: number
+  /** Auto-expand folders in the optional file tree on first render. Defaults to true. */
+  tree_default_expanded?: boolean
 }
 
 /** A description of what changed in the editor this frame. */
@@ -376,6 +405,12 @@ export interface code_editor_event {
   changed?: boolean
   /** The cursor or selection moved (without necessarily editing). */
   cursor_moved?: boolean
+  /** Optional file tree: a node was clicked / focused this frame. */
+  tree_selected?: code_editor_file_node
+  /** Optional file tree: a file was double-clicked. */
+  tree_activated?: code_editor_file_node
+  /** Optional file tree: a folder's expanded state was toggled. */
+  tree_toggled?: code_editor_file_node
 }
 
 export function create_code_editor_state(): code_editor_state {
@@ -389,6 +424,11 @@ export function create_code_editor_state(): code_editor_state {
     blink_start_ms: 0,
     last_click_ms: 0,
     click_streak: 1,
+    tree_expanded: new Set<string>(),
+    tree_selected_id: null,
+    tree_scroll: { offset_y: 0 },
+    tree_last_click_id: null,
+    tree_last_click_ms: 0,
   }
 }
 
@@ -406,6 +446,49 @@ function is_word_char(ch: string): boolean {
   return /[\w$]/.test(ch)
 }
 
+function ensure_code_editor_state(state: code_editor_state): void {
+  state.tree_expanded ??= new Set<string>()
+  state.tree_selected_id ??= null
+  state.tree_scroll ??= { offset_y: 0 }
+  state.tree_last_click_id ??= null
+  state.tree_last_click_ms ??= 0
+}
+
+function toggle_tree_expanded(state: code_editor_state, id: string, default_expanded: boolean): void {
+  if (default_expanded) {
+    const collapsed_id = `!${id}`
+    if (state.tree_expanded.has(collapsed_id)) state.tree_expanded.delete(collapsed_id)
+    else state.tree_expanded.add(collapsed_id)
+    return
+  }
+  if (state.tree_expanded.has(id)) state.tree_expanded.delete(id)
+  else state.tree_expanded.add(id)
+}
+
+function is_tree_expanded(state: code_editor_state, id: string, default_expanded: boolean): boolean {
+  return default_expanded ? !state.tree_expanded.has(`!${id}`) : state.tree_expanded.has(id)
+}
+
+type code_editor_tree_row = { node: code_editor_file_node; id: string; depth: number; folder: boolean }
+
+function flatten_code_editor_tree(
+  nodes: code_editor_file_node[],
+  state: code_editor_state,
+  default_expanded: boolean,
+  depth: number,
+  parent_path: string,
+  out: code_editor_tree_row[],
+): void {
+  for (const node of nodes) {
+    const id = node.id ?? (parent_path ? `${parent_path}/${node.name}` : node.name)
+    const folder = node.kind === 'folder' || node.kind === 'dir' || !!node.children?.length
+    out.push({ node, id, depth, folder })
+    if (folder && is_tree_expanded(state, id, default_expanded)) {
+      flatten_code_editor_tree(node.children ?? [], state, default_expanded, depth + 1, id, out)
+    }
+  }
+}
+
 // ── The widget ────────────────────────────────────────────────────────────────
 
 export function code_editor(
@@ -420,6 +503,7 @@ export function code_editor(
   state: code_editor_state,
   options?: code_editor_options,
 ): code_editor_event {
+  ensure_code_editor_state(state)
   const scale = window.devicePixelRatio || 1
   const fpx = (options?.font_px ?? 13) * scale
   const line_pad = (options?.line_pad ?? 2) * scale
@@ -429,6 +513,7 @@ export function code_editor(
   const show_gutter = options?.show_line_numbers !== false
   const tokenize = options?.tokenize
   const start_version = buffer.version
+  const event: code_editor_event = {}
 
   const col = (slot: Parameters<typeof theme_color>[1]) => pack_color(theme_color(theme, slot))
   const token_color = (kind: editor_token_kind): number => {
@@ -439,12 +524,19 @@ export function code_editor(
   const char_w = Math.max(1, ui.mono_char_width(fpx, FONT_MONO))
   const line_h = ui.text_line_height(fpx, FONT_MONO) + line_pad
   const line_count = buffer.line_count()
+  const tree_nodes = options?.file_tree ?? []
+  const show_tree = tree_nodes.length > 0
+  const tree_gap = show_tree ? 1 * scale : 0
+  const max_tree_w = Math.max(0, w - char_w * 8)
+  const tree_w = show_tree ? Math.min(max_tree_w, Math.max(72 * scale, (options?.tree_width ?? 180) * scale)) : 0
+  const editor_x = x + tree_w + tree_gap
+  const editor_w = Math.max(char_w, w - tree_w - tree_gap)
 
   const gutter_digits = Math.max(2, String(line_count).length)
   const gutter_pad = 6 * scale
   const gutter_w = show_gutter ? gutter_digits * char_w + gutter_pad * 2 : 0
-  const code_x = x + gutter_w
-  const code_w = Math.max(char_w, w - gutter_w)
+  const code_x = editor_x + gutter_w
+  const code_w = Math.max(char_w, editor_w - gutter_w)
   const scrollbar_w = 8 * scale
   if (!read_only) {
     const regions = input.native_text_regions ?? []
@@ -465,7 +557,30 @@ export function code_editor(
 
   // ── Background + gutter ───────────────────────────────────────────────────
   ui.fill_rect(x, y, w, h, col('bg'))
-  if (show_gutter) ui.fill_rect(x, y, gutter_w, h, col('panel'))
+  if (show_gutter) ui.fill_rect(editor_x, y, gutter_w, h, col('bg'))
+
+  // ── Optional folder/file tree ─────────────────────────────────────────────
+  if (show_tree) {
+    const tree_event = draw_file_tree(
+      ui,
+      theme,
+      input,
+      x,
+      y,
+      tree_w,
+      h,
+      tree_nodes,
+      state,
+      options?.font_px ?? 13,
+      options?.tree_row_h ?? 22,
+      options?.tree_indent ?? 14,
+      options?.tree_default_expanded ?? true,
+    )
+    if (tree_event.tree_selected) event.tree_selected = tree_event.tree_selected
+    if (tree_event.tree_activated) event.tree_activated = tree_event.tree_activated
+    if (tree_event.tree_toggled) event.tree_toggled = tree_event.tree_toggled
+    ui.fill_rect(x + tree_w, y, tree_gap, h, col('border'))
+  }
 
   // ── Mouse hit-testing → logical {line, col} ───────────────────────────────
   const hit_test = (mx: number, my: number): cursor_pos => {
@@ -476,14 +591,15 @@ export function code_editor(
   }
 
   // ── Wheel scrolling ───────────────────────────────────────────────────────
-  if (point_in(input, x, y, w, h) && input.wheel_y) {
+  if (point_in(input, editor_x, y, editor_w, h) && input.wheel_y) {
     state.scroll.offset_y = Math.max(0, Math.min(max_scroll, state.scroll.offset_y - input.wheel_y * 3 * line_h * 0.33))
   }
 
   // ── Focus + mouse selection ───────────────────────────────────────────────
   const over_code = point_in(input, code_x, y, code_w - scrollbar_w, h)
+  const over_editor = point_in(input, editor_x, y, editor_w, h)
   if (input.mouse_pressed) {
-    if (point_in(input, x, y, w, h)) {
+    if (over_editor) {
       state.focused = true
       state.blink_start_ms = performance.now()
       if (over_code) {
@@ -502,7 +618,7 @@ export function code_editor(
           buffer.move_cursor(pos.line, pos.col, input.shift)
         }
       }
-    } else {
+    } else if (!point_in(input, x, y, w, h)) {
       state.focused = false
     }
   } else if (input.mouse_down && state.focused && over_code && state.click_streak < 2) {
@@ -556,7 +672,7 @@ export function code_editor(
   const first_line = Math.max(0, Math.floor(scroll_t / line_h))
 
   // ── Clip the code area and paint ──────────────────────────────────────────
-  ui.push_clip(x, y, w, h)
+  ui.push_clip(editor_x, y, editor_w, h)
 
   // Selection highlight.
   const sel = buffer.get_selection_range()
@@ -638,7 +754,7 @@ export function code_editor(
 
   // ── Vertical scrollbar ─────────────────────────────────────────────────────
   if (content_h > h) {
-    const track_x = x + w - scrollbar_w
+    const track_x = editor_x + editor_w - scrollbar_w
     ui.fill_rect(track_x, y, scrollbar_w, h, col('track'))
     const thumb_h = Math.max(20 * scale, (h / content_h) * h)
     const thumb_y = y + (state.scroll.offset_y / max_scroll) * (h - thumb_h)
@@ -646,7 +762,106 @@ export function code_editor(
   }
 
   const changed = buffer.version !== start_version
-  return { changed, cursor_moved: changed }
+  event.changed = changed
+  event.cursor_moved = changed
+  return event
+}
+
+function draw_file_tree(
+  ui: ui_renderer,
+  theme: theme_definition,
+  input: ui_input_snapshot,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  nodes: code_editor_file_node[],
+  state: code_editor_state,
+  font_px_logical: number,
+  row_h_logical: number,
+  indent_logical: number,
+  default_expanded: boolean,
+): code_editor_event {
+  const scale = window.devicePixelRatio || 1
+  const font_px = font_px_logical * scale
+  const row_h = row_h_logical * scale
+  const indent = indent_logical * scale
+  const col = (slot: Parameters<typeof theme_color>[1]) => pack_color(theme_color(theme, slot))
+  const rows: code_editor_tree_row[] = []
+  flatten_code_editor_tree(nodes, state, default_expanded, 0, '', rows)
+
+  const content_h = rows.length * row_h
+  const scrollbar_w = content_h > h ? 7 * scale : 0
+  const max_scroll = Math.max(0, content_h - h)
+  if (point_in(input, x, y, w, h) && input.wheel_y) {
+    state.tree_scroll.offset_y = Math.max(0, Math.min(max_scroll, state.tree_scroll.offset_y - input.wheel_y * 20 * scale))
+  }
+  state.tree_scroll.offset_y = Math.max(0, Math.min(max_scroll, state.tree_scroll.offset_y))
+
+  const event: code_editor_event = {}
+  const pad_x = 7 * scale
+  const icon_w = 14 * scale
+
+  ui.fill_rect(x, y, w, h, col('panel'))
+  ui.push_clip(x, y, w, h)
+
+  for (let i = 0; i < rows.length; i += 1) {
+    const row = rows[i]!
+    const ry = y + i * row_h - state.tree_scroll.offset_y
+    if (ry + row_h < y || ry > y + h) continue
+    const hot = point_in(input, x, ry, w - scrollbar_w, row_h)
+    const selected = state.tree_selected_id === row.id
+    if (selected) ui.fill_rect(x + 3 * scale, ry, w - scrollbar_w - 6 * scale, row_h, col('selected'))
+    else if (hot) ui.fill_rect(x + 3 * scale, ry, w - scrollbar_w - 6 * scale, row_h, col('hover'))
+
+    const tx = x + pad_x + row.depth * indent
+    const cy = ry + row_h * 0.5
+    const glyph_color = selected ? col('text') : col('text_dim')
+    if (row.folder) {
+      const tri = 3.3 * scale
+      const tcx = tx + tri
+      if (is_tree_expanded(state, row.id, default_expanded)) {
+        ui.fill_triangle(tcx - tri, cy - tri * 0.6, tcx + tri, cy - tri * 0.6, tcx, cy + tri * 0.8, glyph_color)
+      } else {
+        ui.fill_triangle(tcx - tri * 0.6, cy - tri, tcx - tri * 0.6, cy + tri, tcx + tri * 0.8, cy, glyph_color)
+      }
+    } else {
+      ui.stroke_rect(tx, cy - 4.5 * scale, 7 * scale, 9 * scale, 1 * scale, glyph_color)
+      ui.stroke_line(tx + 4.5 * scale, cy - 4.5 * scale, tx + 7 * scale, cy - 2 * scale, 1 * scale, glyph_color)
+    }
+
+    const label_x = tx + icon_w
+    ui.push_clip(label_x, ry, Math.max(0, x + w - scrollbar_w - label_x - 4 * scale), row_h)
+    ui.draw_text(label_x, ui.text_v_center_y(ry, row_h, font_px, FONT_MONO), row.node.name, font_px, selected ? col('text') : col('text_dim'), FONT_MONO)
+    ui.pop_clip()
+
+    if (hot && input.mouse_pressed) {
+      const now = performance.now()
+      const double = state.tree_last_click_id === row.id && now - state.tree_last_click_ms < 320
+      state.tree_selected_id = row.id
+      state.tree_last_click_id = row.id
+      state.tree_last_click_ms = now
+      event.tree_selected = row.node
+      if (row.folder) {
+        toggle_tree_expanded(state, row.id, default_expanded)
+        event.tree_toggled = row.node
+      } else if (double) {
+        event.tree_activated = row.node
+      }
+    }
+  }
+
+  ui.pop_clip()
+
+  if (scrollbar_w > 0) {
+    const track_x = x + w - scrollbar_w
+    ui.fill_rect(track_x, y, scrollbar_w, h, col('track'))
+    const thumb_h = Math.max(20 * scale, (h / content_h) * h)
+    const thumb_y = y + (state.tree_scroll.offset_y / max_scroll) * (h - thumb_h)
+    ui.fill_round_rect(track_x + 1 * scale, thumb_y, scrollbar_w - 2 * scale, thumb_h, 3 * scale, col('border_strong'))
+  }
+
+  return event
 }
 
 // ── Internal: keyboard + selection ────────────────────────────────────────────

@@ -556,7 +556,10 @@ async function main(): Promise<void> {
           render_files(renderer, widgets, theme, snapshot, px, py, pw, ph)
           break
         case 'editor':
-          code_editor(renderer, theme, snapshot, px, py, pw, ph, editor_buffer, editor_state, { tokenize: demo_tokenize })
+          code_editor(renderer, theme, snapshot, px, py, pw, ph, editor_buffer, editor_state, {
+            tokenize: demo_tokenize,
+            file_tree,
+          })
           break
         case 'gallery':
           render_gallery(renderer, widgets, theme, px, py, pw, ph, scale)

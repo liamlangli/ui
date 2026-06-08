@@ -206,12 +206,12 @@ CJK works once the Chinese atlas has loaded (see [Chinese font loading](#chinese
 
 ### `code_editor` — editable code surface
 
-A GPU-rendered, editable code editor: a line-number gutter, selection
-highlight, blinking caret, mouse selection (click / drag / double-click word /
-triple-click line) and full keyboard editing (typing, Backspace/Delete, Enter
-with auto-indent, Tab→spaces, arrows, Home/End, PageUp/PageDown, Ctrl/Cmd+A,
-Ctrl/Cmd+C). You own the text model (`text_buffer`) and the view state
-(`code_editor_state`).
+A GPU-rendered, editable code editor: an optional folder/file tree, a
+line-number gutter, selection highlight, blinking caret, mouse selection (click
+/ drag / double-click word / triple-click line) and full keyboard editing
+(typing, Backspace/Delete, Enter with auto-indent, Tab→spaces, arrows,
+Home/End, PageUp/PageDown, Ctrl/Cmd+A, Ctrl/Cmd+C). You own the text model
+(`text_buffer`) and the view state (`code_editor_state`).
 
 Syntax highlighting is **pluggable and language-agnostic**: pass a per-line
 `tokenize` function returning `{ kind, text }` tokens — the toolkit ships a
@@ -232,9 +232,11 @@ function my_tokenize(line: string): editor_token[] {
 // each frame, between renderer.begin_frame() and renderer.flush():
 const ev = code_editor(renderer, theme, input, x, y, w, h, buf, ed, {
   tokenize: my_tokenize,           // omit for plain (unhighlighted) text
+  file_tree: [{ name: 'src', kind: 'folder', children: [{ name: 'main.ts' }] }],
   // token_colors: { keyword: '#c678dd' }, read_only, font_px, tab_size, highlights, …
 })
 if (ev.changed) recompile(buf.get_text())
+if (ev.tree_activated) open_file(ev.tree_activated)
 ```
 
 The host forwards the same `ui_input_snapshot` the other plugins use; typed
