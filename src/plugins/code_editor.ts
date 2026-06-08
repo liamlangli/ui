@@ -713,7 +713,7 @@ export function code_editor(
 
     if (show_gutter) {
       const num = String(li + 1).padStart(gutter_digits, ' ')
-      ui.draw_text(x + gutter_pad, text_y, num, fpx, gutter_color, FONT_MONO)
+      ui.draw_text(editor_x + gutter_pad, text_y, num, fpx, gutter_color, FONT_MONO)
     }
 
     const line_str = buffer.line_at(li)
