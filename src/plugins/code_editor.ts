@@ -818,13 +818,13 @@ function draw_file_tree(
     const tx = x + pad_x + row.depth * indent
     const cy = ry + row_h * 0.5
     const glyph_color = selected ? col('text') : col('text_dim')
-    const icon_size = 16 * scale
+    const icon_size = 15 * scale
     const icon_name = row.folder
       ? is_tree_expanded(state, row.id, default_expanded)
         ? 'chevron_down'
         : 'chevron_right'
       : 'file'
-    draw_icon(ui, icon_name, tx, cy - icon_size * 0.5, icon_size, glyph_color)
+    draw_icon(ui, icon_name, tx + 0.5 * scale, cy - icon_size * 0.5, icon_size, glyph_color)
 
     const label_x = tx + icon_w
     ui.push_clip(label_x, ry, Math.max(0, x + w - scrollbar_w - label_x - 4 * scale), row_h)
