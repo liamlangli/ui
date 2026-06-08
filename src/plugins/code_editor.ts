@@ -22,6 +22,7 @@
 
 import { pack_color, theme_color } from '../theme'
 import type { theme_definition } from '../types'
+import { draw_icon } from '../ui_icon'
 import { FONT_MONO, ui_renderer } from '../ui_renderer'
 import type { ui_input_snapshot, ui_scroll_state } from '../ui_widgets'
 
@@ -817,18 +818,13 @@ function draw_file_tree(
     const tx = x + pad_x + row.depth * indent
     const cy = ry + row_h * 0.5
     const glyph_color = selected ? col('text') : col('text_dim')
-    if (row.folder) {
-      const tri = 3.3 * scale
-      const tcx = tx + tri
-      if (is_tree_expanded(state, row.id, default_expanded)) {
-        ui.fill_triangle(tcx - tri, cy - tri * 0.6, tcx + tri, cy - tri * 0.6, tcx, cy + tri * 0.8, glyph_color)
-      } else {
-        ui.fill_triangle(tcx - tri * 0.6, cy - tri, tcx - tri * 0.6, cy + tri, tcx + tri * 0.8, cy, glyph_color)
-      }
-    } else {
-      ui.stroke_rect(tx, cy - 4.5 * scale, 7 * scale, 9 * scale, 1 * scale, glyph_color)
-      ui.stroke_line(tx + 4.5 * scale, cy - 4.5 * scale, tx + 7 * scale, cy - 2 * scale, 1 * scale, glyph_color)
-    }
+    const icon_size = 16 * scale
+    const icon_name = row.folder
+      ? is_tree_expanded(state, row.id, default_expanded)
+        ? 'chevron_down'
+        : 'chevron_right'
+      : 'file'
+    draw_icon(ui, icon_name, tx, cy - icon_size * 0.5, icon_size, glyph_color)
 
     const label_x = tx + icon_w
     ui.push_clip(label_x, ry, Math.max(0, x + w - scrollbar_w - label_x - 4 * scale), row_h)
