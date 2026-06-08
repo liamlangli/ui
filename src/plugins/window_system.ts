@@ -386,12 +386,13 @@ export class window_system {
     ui.stroke_line(clock_x - 12 * scale, bar_y + 8 * scale, clock_x - 12 * scale, bar_y + bar_h - 8 * scale, 1 * scale, col('border'))
 
     // Running-view chips on the left. Each chip is a half-height capsule with
-    // the app title followed by a circular close button (1px padding inset).
+    // the app title; a circular close button only appears — and pushes the
+    // title aside — while the pointer is over the chip.
     let cx = bar_x + 8 * scale
     const chip_h = bar_h - 12 * scale
     const chip_y = bar_y + 6 * scale
     const cap_r = chip_h * 0.5
-    const close_r = cap_r - 1 * scale
+    const close_r = cap_r - 4 * scale
     const limit = clock_x - 16 * scale
     for (const win of this.layout.windows) {
       const label_w = ui.text_width(win.title, font_px)
@@ -399,24 +400,28 @@ export class window_system {
       if (cx + chip_w > limit) break
       const focused = this.layout.focused_id === win.id && !win.minimized
       const cy = chip_y + chip_h * 0.5
-      const close_cx = cx + chip_w - cap_r
-      const close_hot = point_in(input, close_cx - close_r, chip_y, close_r * 2, chip_h)
       const hover = point_in(input, cx, chip_y, chip_w, chip_h)
+      const close_cx = cx + chip_w - cap_r
+      const close_hot = hover && point_in(input, close_cx - close_r, chip_y, close_r * 2, chip_h)
       const bg = focused ? col('selected') : hover ? col('hover') : win.minimized ? col('panel') : col('bg')
       ui.fill_round_rect(cx, chip_y, chip_w, chip_h, cap_r, bg)
-      if (focused) ui.fill_round_rect(cx + cap_r, chip_y + chip_h - 3 * scale, chip_w - cap_r * 2, 2 * scale, 1 * scale, col('accent'))
-      // Title text, clipped to leave 1px before the close button.
+      // Active app: a light border outline rather than an underlying bar.
+      if (focused) ui.stroke_round_rect(cx, chip_y, chip_w, chip_h, cap_r, 1 * scale, col('border_strong'))
+      // Title text. It only keeps its distance from the close button while the
+      // chip is hovered; otherwise it flows across the full chip width.
       const title_x = cx + cap_r
-      const title_w = Math.max(0, close_cx - close_r - 1 * scale - title_x)
-      ui.push_clip(title_x, chip_y, title_w, chip_h)
+      const title_right = hover ? close_cx - close_r - 2 * scale : cx + chip_w - cap_r
+      ui.push_clip(title_x, chip_y, Math.max(0, title_right - title_x), chip_h)
       ui.draw_text(title_x, ui.text_v_center_y(chip_y, chip_h, font_px) + 1 * scale, win.title, font_px, win.minimized ? col('text_dim') : col('text'))
       ui.pop_clip()
-      // Circular close button at the end of the title.
-      if (close_hot) ui.fill_circle(close_cx, cy, close_r, pack('#e0564b'))
-      const x_c = close_hot ? pack('#ffffff') : col('text_dim')
-      const xr = close_r * 0.42
-      ui.stroke_line(close_cx - xr, cy - xr, close_cx + xr, cy + xr, 1.2 * scale, x_c)
-      ui.stroke_line(close_cx - xr, cy + xr, close_cx + xr, cy - xr, 1.2 * scale, x_c)
+      // Circular close button, revealed on hover only.
+      if (hover) {
+        if (close_hot) ui.fill_circle(close_cx, cy, close_r, pack('#e0564b'))
+        const x_c = close_hot ? pack('#ffffff') : col('text_dim')
+        const xr = close_r * 0.42
+        ui.stroke_line(close_cx - xr, cy - xr, close_cx + xr, cy + xr, 1.2 * scale, x_c)
+        ui.stroke_line(close_cx - xr, cy + xr, close_cx + xr, cy - xr, 1.2 * scale, x_c)
+      }
       if (input.mouse_pressed) {
         if (close_hot) close_window(this.layout, win.id)
         else if (hover) {
