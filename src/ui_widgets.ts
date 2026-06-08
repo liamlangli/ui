@@ -1,5 +1,5 @@
-import { theme_color } from './theme'
-import type { theme_definition } from './types'
+import { theme_color } from './ui_theme'
+import type { theme_definition } from './ui_types'
 import { FONT_MONO, ui_renderer } from './ui_renderer'
 
 export interface ui_input_snapshot {

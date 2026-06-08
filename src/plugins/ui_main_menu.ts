@@ -10,8 +10,8 @@
 // drives each frame (it owns the menu tree + the open-state), mirroring how
 // `dock_system` packages the pure dock engine.
 
-import { theme_color } from '../theme'
-import type { theme_definition } from '../types'
+import { theme_color } from '../ui_theme'
+import type { theme_definition } from '../ui_types'
 import { ui_renderer } from '../ui_renderer'
 import type { ui_input_snapshot } from '../ui_widgets'
 
