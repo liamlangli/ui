@@ -410,6 +410,12 @@ function rich_file_browser(
   layout_vstack_into(content_rect.x, content_rect.y, content_rect.w, content_rect.h, content_sizes, 2, content_rects)
   const content_header_rect = rect_at(content_rects, 0)
   const entries_rect = rect_at(content_rects, 1)
+  // Breadcrumb header bar: a full-width backdrop matching the search field's
+  // colour, flush to the top of the content panel (no top spacing), capped by a
+  // bottom separator that mirrors the split-view divider.
+  ui.fill_rect(content_header_rect.x, content_header_rect.y, content_header_rect.w, content_header_rect.h, col('panel_alt'))
+  const header_sep_h = Math.max(1, scale)
+  ui.fill_rect(content_header_rect.x, content_header_rect.y + content_header_rect.h - header_sep_h, content_header_rect.w, header_sep_h, col('border'))
   const header_inner = inset_rect(content_header_rect, content_pad, content_header_pad_y)
   const header_gap = content_search_w > 0 ? 8 * scale : 0
   const breadcrumb_w = Math.max(0, header_inner.w - content_search_w - header_gap)
@@ -417,7 +423,6 @@ function rich_file_browser(
   const header_rects = content_search_w > 0 ? [0, 0, 0, 0, 0, 0, 0, 0] : [0, 0, 0, 0]
   layout_hstack_into(header_inner.x, header_inner.y, header_inner.w, header_inner.h, header_sizes, content_search_w > 0 ? 2 : 1, header_rects, STACK_ALIGN_CENTER_VERT, false, header_gap)
   const breadcrumb_rect = rect_at(header_rects, 0)
-  ui.fill_round_rect(breadcrumb_rect.x, breadcrumb_rect.y, breadcrumb_rect.w, breadcrumb_rect.h, 6 * scale, col('panel_alt'))
   ui.push_clip(breadcrumb_rect.x, breadcrumb_rect.y, breadcrumb_rect.w, breadcrumb_rect.h)
   draw_breadcrumb(ui, breadcrumb_rect.x, breadcrumb_rect.y, breadcrumb_rect.h, state.selected_folder ?? '', input, font_px, scale, (path) => {
     state.selected_folder = path
