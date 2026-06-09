@@ -12,6 +12,16 @@ export class input_collector {
   private released = false
   private middle_down = false
   private right_pressed = false
+  private right_down = false
+  // Two-finger touch gesture: accumulated pan (physical px) and pinch factor for the frame.
+  private pan_dx = 0
+  private pan_dy = 0
+  private pinch = 1
+  // Live gesture reference (centroid + finger distance), persists across frames.
+  private gesturing = false
+  private gesture_cx = 0
+  private gesture_cy = 0
+  private gesture_dist = 0
   // one-shot key edges, consumed each frame
   private keys = new Set<string>()
   // held modifiers, persist across frames until keyup
@@ -62,12 +72,16 @@ export class input_collector {
     canvas.insertAdjacentElement('afterend', this.ime)
 
     canvas.addEventListener('pointermove', (e) => {
+      // While a two-finger gesture is live, ignore touch pointers so a lingering
+      // finger doesn't fight the gesture or drag the cursor.
+      if (this.gesturing && e.pointerType === 'touch') return
       const rect = canvas.getBoundingClientRect()
       this.state.mouse_x = (e.clientX - rect.left) * dpr()
       this.state.mouse_y = (e.clientY - rect.top) * dpr()
       wake()
     })
     canvas.addEventListener('pointerdown', (e) => {
+      if (this.gesturing && e.pointerType === 'touch') return
       const rect = canvas.getBoundingClientRect()
       this.state.mouse_x = (e.clientX - rect.left) * dpr()
       this.state.mouse_y = (e.clientY - rect.top) * dpr()
@@ -75,6 +89,7 @@ export class input_collector {
         this.middle_down = true
       } else if (e.button === 2) {
         this.right_pressed = true
+        this.right_down = true
       } else {
         this.state.mouse_down = true
         this.pressed = true
@@ -106,9 +121,12 @@ export class input_collector {
       if (region) this.focus_native_text_region(region)
     })
     canvas.addEventListener('pointerup', (e) => {
+      if (this.gesturing && e.pointerType === 'touch') return
       if (e.button === 1) {
         this.middle_down = false
-      } else if (e.button !== 2) {
+      } else if (e.button === 2) {
+        this.right_down = false
+      } else {
         this.state.mouse_down = false
         this.released = true
       }
@@ -123,6 +141,50 @@ export class input_collector {
       },
       { passive: false },
     )
+
+    // Two-finger touch: pan by the centroid's motion, scale by the pinch ratio.
+    const touch_metrics = (e: TouchEvent) => {
+      const rect = canvas.getBoundingClientRect()
+      const d = dpr()
+      const a = e.touches[0]!
+      const b = e.touches[1]!
+      const ax = (a.clientX - rect.left) * d
+      const ay = (a.clientY - rect.top) * d
+      const bx = (b.clientX - rect.left) * d
+      const by = (b.clientY - rect.top) * d
+      return { cx: (ax + bx) / 2, cy: (ay + by) / 2, dist: Math.hypot(bx - ax, by - ay) || 1 }
+    }
+    canvas.addEventListener(
+      'touchmove',
+      (e) => {
+        if (e.touches.length < 2) return
+        const { cx, cy, dist } = touch_metrics(e)
+        if (!this.gesturing) {
+          // Entering a gesture: cancel any single-finger press so it can't drag.
+          this.gesturing = true
+          this.state.mouse_down = false
+          this.pressed = false
+          this.released = false
+        } else {
+          this.pan_dx += cx - this.gesture_cx
+          this.pan_dy += cy - this.gesture_cy
+          this.pinch *= dist / this.gesture_dist
+        }
+        this.gesture_cx = cx
+        this.gesture_cy = cy
+        this.gesture_dist = dist
+        this.state.mouse_x = cx
+        this.state.mouse_y = cy
+        e.preventDefault()
+        wake()
+      },
+      { passive: false },
+    )
+    const end_touch = (e: TouchEvent) => {
+      if (e.touches.length < 2) this.gesturing = false
+    }
+    canvas.addEventListener('touchend', end_touch, { passive: true })
+    canvas.addEventListener('touchcancel', end_touch, { passive: true })
 
     window.addEventListener('keydown', (e) => {
       this.keys.add(e.key)
@@ -198,6 +260,10 @@ export class input_collector {
     s.mouse_released = this.released
     s.mouse_middle_down = this.middle_down
     s.mouse_right_pressed = this.right_pressed
+    s.mouse_right_down = this.right_down
+    s.pan_dx = this.pan_dx
+    s.pan_dy = this.pan_dy
+    s.zoom_factor = this.pinch
     s.wheel_y = this.wheel
     s.typed_text = this.typed
     s.ime_composition = this.composition
@@ -229,6 +295,9 @@ export class input_collector {
     this.pressed = false
     this.released = false
     this.right_pressed = false
+    this.pan_dx = 0
+    this.pan_dy = 0
+    this.pinch = 1
     this.wheel = 0
     this.typed = ''
     this.keys.clear()
