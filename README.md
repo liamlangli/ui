@@ -9,7 +9,7 @@ It bundles the pieces needed to build a browser-native editor UI on top of WebGP
 - **`ui_icon`** — a set of vector icons (file, folder, folder_open, chevrons, search, settings, …) composed from `ui_renderer` draw commands and baked once into a single cached 512² atlas texture (32² per cell), then drawn tinted to any colour. See [Icons](#icons).
 - **`dock`** — a docking layout engine: split/leaf trees, tab drag-and-drop, drop targets, and (de)serialization.
 - **`theme`** — palette/CSS-variable theming with `load_theme`, `apply_theme`, `theme_color`, `theme_rgba`, `pack_color`, and `hex_to_normalized_rgba`.
-- **`plugins`** — opt-in, higher-level drop-in components (`dock_system`, `window_system`, `file_browser`, `graph`, `im_dialog`, `code_editor`) packaged so other projects can reuse them piecemeal. See [Plugins](#plugins).
+- **`plugins`** — opt-in, higher-level drop-in components (`dock_system`, `window_system`, `file_browser`, `graph`, `node_graph`, `im_dialog`, `code_editor`) packaged so other projects can reuse them piecemeal. See [Plugins](#plugins).
 
 ## Live preview
 
@@ -44,7 +44,7 @@ drawing and input handling and takes your `ui_renderer` (+ `ui_widgets` where
 needed), a `theme_definition`, and the per-frame `ui_input_snapshot`.
 
 ```ts
-import { code_editor, dock_system, window_system, file_browser, graph_canvas, im_dialog } from '@liamlangli/ui/plugins'
+import { code_editor, dock_system, window_system, file_browser, graph_canvas, node_graph, im_dialog } from '@liamlangli/ui/plugins'
 ```
 
 ### `dock_system` — docking workspace
@@ -173,6 +173,57 @@ const ev = graph_canvas(renderer, theme, input, x, y, w, h, nodes, links, gstate
 if (ev.link_created) recompile()
 if (ev.menu_requested) open_create_menu(ev.menu_requested)    // { screen_x, screen_y, graph_x, graph_y }
 if (ev.delete_requested) remove_selected(gstate.selected)
+```
+
+Pan and the create menu need the middle / right mouse buttons forwarded on the
+`ui_input_snapshot` (`mouse_middle_down`, `mouse_right_pressed`); selection,
+node-drag, marquee, wire-drag and zoom work with the base left-button + wheel
+fields alone.
+
+### `node_graph` — dotted node editor with typed slots
+
+A self-contained node editor with a pannable / zoomable **field of dots** for a
+backdrop, nodes that carry typed input/output *slots*, bezier wires, a marquee
+selection box and a built-in right-click "add node" menu. Every connection is
+**type-gated**: a wire is only created when the output slot's `type` is
+compatible with the input slot's `type` (`compatible` defaults to exact match),
+so a `color` output won't drop onto a `vec3` input. Unlike `graph` (which keeps
+node shape in a host `spec` callback over a line grid), `node_graph` stores
+slots directly on the node, so *adding a node or a slot is a plain data
+mutation* — use the `add_node` / `add_slot` helpers.
+
+It owns all interaction — left-drag a node to move it (or a marquee on empty
+canvas to select; Shift extends), drag from one slot to a compatible slot to
+connect, middle-drag to pan, wheel to zoom, right-click for the create menu,
+Delete/Backspace to remove the selection. You own the `nodes`/`connections`
+arrays; events are returned so you can react.
+
+```ts
+import { node_graph, create_node_graph_state, add_node, add_slot } from '@liamlangli/ui/plugins'
+import type { node_graph_node, node_graph_connection, node_graph_template } from '@liamlangli/ui/plugins'
+
+const state = create_node_graph_state()
+const nodes: node_graph_node[] = [
+  add_node('Input', 20, 40, { id: 'in', outputs: [{ label: 'UV', type: 'vec2' }] }),
+  add_node('Output', 240, 60, { id: 'out', inputs: [{ label: 'Albedo', type: 'color' }] }),
+]
+add_slot(nodes[1], true, { label: 'Normal', type: 'vec3' }) // append a typed slot in place
+const connections: node_graph_connection[] = []
+
+// templates populate the built-in right-click "add node" menu (omit to disable it):
+const node_types: node_graph_template[] = [
+  { type: 'Sample', inputs: [{ label: 'UV', type: 'vec2' }], outputs: [{ label: 'Color', type: 'color' }] },
+]
+
+// each frame, between renderer.begin_frame() and renderer.flush():
+const ev = node_graph(renderer, theme, input, x, y, w, h, nodes, connections, state, {
+  compatible: (out_type, in_type) => out_type === in_type, // gate wire creation by slot type
+  node_types,
+})
+if (ev.connection_created) recompile()
+if (ev.connection_rejected) flash_warning(ev.connection_rejected) // incompatible types
+if (ev.node_created) console.log('spawned', ev.node_created.title)
+if (ev.delete_requested) remove_selected(state.selected)
 ```
 
 Pan and the create menu need the middle / right mouse buttons forwarded on the
