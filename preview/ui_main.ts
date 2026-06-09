@@ -16,6 +16,8 @@ import {
   hex_to_normalized_rgba,
   pack_color,
   create_text_view_state,
+  create_stack_ui_layout,
+  type stack_ui_layout,
   FONT_MONO,
   type theme_definition,
   type theme_preset,
@@ -482,6 +484,12 @@ const gallery = {
   clicks: 0,
 }
 
+// Stack-layout facades over the gallery's widgets. The outer one stacks the
+// labelled sections + controls vertically; the inner one lays the two-button
+// row out horizontally. Both are created once the widgets exist (see below).
+let gallery_col: stack_ui_layout | null = null
+let gallery_row: stack_ui_layout | null = null
+
 // --- icons gallery state ----------------------------------------------------
 const ICON_SIZE_OPTIONS = [16, 24, 32, 48]
 const icons_panel = {
@@ -727,47 +735,48 @@ function render_gallery(
   x: number,
   y: number,
   w: number,
-  _h: number,
+  h: number,
   scale: number,
 ): void {
   const pad = 16 * scale
   const col_w = Math.min(360 * scale, w - pad * 2)
-  let cy = y + pad
   const cx = x + pad
-  const row = 34 * scale
-  const gap = 12 * scale
+  const sec = 22 * scale // section row height
+  const ctrl = 28 * scale // control row height
 
-  cy = widgets.section(cx, cy, col_w, 'THEME') + 6 * scale
+  // A single vertical stack drives the whole panel: each section label and its
+  // control is just the next slot, so there is no x/y cursor bookkeeping here.
+  const stack = (gallery_col ??= create_stack_ui_layout(widgets))
+  stack.vstack(cx, y + pad, col_w, h - pad * 2, 15, { gap: 12 * scale })
+
+  stack.section(sec, 'THEME')
   const theme_names = theme_ctrl.presets.map((p) => p.name)
-  const picked = widgets.dropdown('g_theme', cx, cy, 200 * scale, 28 * scale, theme_names, theme_ctrl.index)
+  const picked = stack.dropdown('g_theme', { w: 200 * scale, h: ctrl }, theme_names, theme_ctrl.index)
   if (picked !== theme_ctrl.index) transition_theme_to(picked, performance.now())
-  cy += row + gap
 
-  cy = widgets.section(cx, cy, col_w, 'BUTTONS') + 6 * scale
-  if (widgets.button('g_btn', cx, cy, 120 * scale, 30 * scale, `Clicked ${gallery.clicks}×`)) gallery.clicks += 1
-  widgets.button('g_btn2', cx + 132 * scale, cy, 120 * scale, 30 * scale, 'Secondary', { active: gallery.clicks % 2 === 1 })
-  cy += row + gap
+  stack.section(sec, 'BUTTONS')
+  // Two buttons share one row — lay them out with a nested horizontal stack.
+  const btn_row = stack.next_rect(30 * scale)
+  const row = (gallery_row ??= create_stack_ui_layout(widgets))
+  row.hstack(btn_row.x, btn_row.y, btn_row.w, btn_row.h, 2, { gap: 12 * scale })
+  if (row.button('g_btn', { w: 120 * scale, h: 30 * scale }, `Clicked ${gallery.clicks}×`)) gallery.clicks += 1
+  row.button('g_btn2', { w: 120 * scale, h: 30 * scale }, 'Secondary', { active: gallery.clicks % 2 === 1 })
 
-  cy = widgets.section(cx, cy, col_w, 'TOGGLES') + 6 * scale
-  gallery.toggle_a = widgets.toggle('g_tg_a', cx, cy, gallery.toggle_a, 'Enable shadows')
-  cy += 26 * scale
-  gallery.toggle_b = widgets.toggle('g_tg_b', cx, cy, gallery.toggle_b, 'Wireframe overlay')
-  cy += row + gap
+  stack.section(sec, 'TOGGLES')
+  gallery.toggle_a = stack.toggle('g_tg_a', 20 * scale, gallery.toggle_a, 'Enable shadows')
+  gallery.toggle_b = stack.toggle('g_tg_b', 20 * scale, gallery.toggle_b, 'Wireframe overlay')
 
-  cy = widgets.section(cx, cy, col_w, 'SLIDER') + 10 * scale
-  gallery.slider = widgets.slider('g_sl', cx, cy, col_w - 60 * scale, 18 * scale, gallery.slider, 0, 1, true)
-  cy += row + gap
+  stack.section(sec, 'SLIDER')
+  gallery.slider = stack.slider('g_sl', { w: col_w - 60 * scale, h: 18 * scale }, gallery.slider, 0, 1, true)
 
-  cy = widgets.section(cx, cy, col_w, 'DROPDOWN') + 6 * scale
-  gallery.dropdown = widgets.dropdown('g_dd', cx, cy, 180 * scale, 28 * scale, ['Low', 'Medium', 'High', 'Ultra'], gallery.dropdown)
-  cy += row + gap
+  stack.section(sec, 'DROPDOWN')
+  gallery.dropdown = stack.dropdown('g_dd', { w: 180 * scale, h: ctrl }, ['Low', 'Medium', 'High', 'Ultra'], gallery.dropdown)
 
-  cy = widgets.section(cx, cy, col_w, 'TEXT INPUT') + 6 * scale
-  gallery.input = widgets.input_field('g_in', cx, cy, col_w, 30 * scale, gallery.input, 'Type something…', gallery.input_state)
-  cy += row + gap
+  stack.section(sec, 'TEXT INPUT')
+  gallery.input = stack.input_field('g_in', { w: col_w, h: 30 * scale }, gallery.input, 'Type something…', gallery.input_state)
 
-  cy = widgets.section(cx, cy, col_w, 'COLOR') + 6 * scale
-  gallery.color = widgets.ui_color_picker('g_col', cx, cy, 180 * scale, 28 * scale, gallery.color)
+  stack.section(sec, 'COLOR')
+  gallery.color = stack.ui_color_picker('g_col', { w: 180 * scale, h: ctrl }, gallery.color)
 }
 
 function render_icons(

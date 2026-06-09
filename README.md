@@ -261,6 +261,40 @@ Chinese font atlas (`assets/ping_fang_sc_regular.{json,webp}`), and shader
 (`assets/ui.wgsl`) via Vite `?url` imports, so consumers are expected to build
 with Vite (or an equivalent bundler that understands the `?url` suffix).
 
+### Stack layout (vstack / hstack / zstack)
+
+`ui_widgets` methods all take explicit `(x, y, w, h)` rects, which means panels
+end up threading a manual `cy +=` cursor between every call. `stack_ui_layout`
+is a thin facade over `ui_widgets` that removes that bookkeeping: pick an axis
+(`vstack`, `hstack`, or `zstack`), then each widget call consumes the next slot
+and forwards to the underlying widget. The preview's **Widgets** gallery is
+built entirely this way.
+
+```ts
+import { create_stack_ui_layout } from '@liamlangli/ui'
+
+const stack = create_stack_ui_layout(widgets) // create once, reuse each frame
+
+// A vertical column of labelled sections + controls — no x/y cursor math.
+stack.vstack(x, y, w, h, /* slot count */ 6, { gap: 12 })
+stack.section(22, 'THEME')
+const theme = stack.dropdown('theme', { w: 200, h: 28 }, theme_names, theme_index)
+stack.section(22, 'VOLUME')
+const volume = stack.slider('vol', { w: w - 60, h: 18 }, volume, 0, 1, true)
+
+// Need a row inside the column? Pull one slot's rect and nest a second stack.
+const row = stack.next_rect(30)
+inner.hstack(row.x, row.y, row.w, row.h, 2, { gap: 12 })
+if (inner.button('ok', { w: 120, h: 30 }, 'OK')) save()
+inner.button('cancel', { w: 120, h: 30 }, 'Cancel')
+```
+
+A numeric `size` fills the cross axis (full width in a `vstack`, full height in
+an `hstack`); pass `{ w, h }` for an explicitly sized slot. Alignment
+(`STACK_ALIGN_*`), `reverse`, and `gap` are all supported, and the pure
+`layout_stack_into` / `layout_*stack_into` functions expose the same math for
+callers that just want rects without the widget facade.
+
 ### Chinese font loading
 
 The Chinese (PingFang SC) atlas is several MB, so it never blocks startup:
