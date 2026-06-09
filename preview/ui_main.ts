@@ -44,6 +44,9 @@ import {
   activate_dock_tab,
   graph_canvas,
   create_graph_state,
+  node_graph,
+  create_node_graph_state,
+  add_node,
   type editor_token,
   type editor_token_kind,
   type file_node,
@@ -52,6 +55,9 @@ import {
   type graph_node_base,
   type graph_node_view,
   type graph_link,
+  type node_graph_node,
+  type node_graph_connection,
+  type node_graph_template,
 } from '../src/index'
 import { input_collector } from './ui_input'
 import theme_url from './theme.json?url'
@@ -192,6 +198,27 @@ const graph_links: graph_link[] = [
 const graph_state_demo = create_graph_state()
 const graph_view = (node: demo_graph_node): graph_node_view => ({ title: node.title, inputs: node.inputs, outputs: node.outputs })
 
+// --- node_graph plugin demo (dotted backdrop + typed slots) ----------------
+const node_graph_nodes: node_graph_node[] = [
+  add_node('Input', 20, 40, { id: 'in', outputs: [{ label: 'Position', type: 'vec3' }, { label: 'UV', type: 'vec2' }] }),
+  add_node('Sample', 240, 60, { id: 'tex', inputs: [{ label: 'UV', type: 'vec2' }], outputs: [{ label: 'Color', type: 'color' }] }),
+  add_node('Tint', 240, 220, { id: 'tint', inputs: [{ label: 'A', type: 'color' }], outputs: [{ label: 'Out', type: 'color' }] }),
+  add_node('Output', 470, 120, { id: 'out', inputs: [{ label: 'Albedo', type: 'color' }, { label: 'Normal', type: 'vec3' }] }),
+]
+const node_graph_connections: node_graph_connection[] = [
+  { from_node: 'in', from_slot: 1, to_node: 'tex', to_slot: 0 },
+  { from_node: 'tex', from_slot: 0, to_node: 'tint', to_slot: 0 },
+  { from_node: 'tint', from_slot: 0, to_node: 'out', to_slot: 0 },
+  { from_node: 'in', from_slot: 0, to_node: 'out', to_slot: 1 },
+]
+const node_graph_state = create_node_graph_state()
+const node_graph_templates: node_graph_template[] = [
+  { type: 'Input', outputs: [{ label: 'Position', type: 'vec3' }, { label: 'UV', type: 'vec2' }] },
+  { type: 'Sample', inputs: [{ label: 'UV', type: 'vec2' }], outputs: [{ label: 'Color', type: 'color' }] },
+  { type: 'Tint', inputs: [{ label: 'A', type: 'color' }], outputs: [{ label: 'Out', type: 'color' }] },
+  { type: 'Output', inputs: [{ label: 'Albedo', type: 'color' }, { label: 'Normal', type: 'vec3' }] },
+]
+
 // A free-floating arrangement of the same views for "window mode".
 function build_window_layout(): window_layout {
   const win = (id: string, title: string, x: number, y: number, w: number, h: number, z: number) =>
@@ -228,6 +255,7 @@ const VIEW_TABS: { id: string; title: string }[] = [
   { id: 'console', title: 'Console' },
   { id: 'metrics', title: 'Metrics' },
   { id: 'graph', title: 'Graph' },
+  { id: 'node_graph', title: 'Node Graph' },
   { id: 'about', title: 'About' },
   { id: 'chat', title: 'Chat' },
 ]
@@ -341,6 +369,7 @@ const main_menu = new ui_main_menu([
         children: [
           { id: 'metrics', label: 'Metrics' },
           { id: 'graph', label: 'Graph' },
+          { id: 'node_graph', label: 'Node Graph' },
           { id: 'gallery', label: 'Widgets' },
           { id: 'icons', label: 'Icons' },
           { id: 'chat', label: 'Chat' },
@@ -639,6 +668,23 @@ async function main(): Promise<void> {
             compatible: (a, b) => a === b || a === 'color' || b === 'color',
           })
           break
+        case 'node_graph': {
+          const ng = node_graph(renderer, theme, snapshot, px, py, pw, ph, node_graph_nodes, node_graph_connections, node_graph_state, {
+            compatible: (a, b) => a === b,
+            node_types: node_graph_templates,
+          })
+          if (ng.delete_requested) {
+            for (let i = node_graph_connections.length - 1; i >= 0; i -= 1) {
+              const c = node_graph_connections[i]
+              if (node_graph_state.selected.has(c.from_node) || node_graph_state.selected.has(c.to_node)) node_graph_connections.splice(i, 1)
+            }
+            for (let i = node_graph_nodes.length - 1; i >= 0; i -= 1) {
+              if (node_graph_state.selected.has(node_graph_nodes[i].id)) node_graph_nodes.splice(i, 1)
+            }
+            node_graph_state.selected.clear()
+          }
+          break
+        }
         case 'chat':
           render_chat(renderer, widgets, theme, snapshot, px, py, pw, ph)
           break
