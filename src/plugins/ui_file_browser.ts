@@ -361,7 +361,9 @@ function rich_file_browser(
     ui.fill_round_rect(tree_rect.x, tree_rect.y, tree_rect.w, tree_rect.h, panel_r, col('panel'))
     const search_pad = 6 * scale
     let tree_list_rect = tree_rect
+    let search_drawn = false
     if (search_enabled && tree_rect.w > search_pad * 2 && tree_rect.h > input_h + search_pad * 2) {
+      search_drawn = true
       // Even gutters on all sides via the stack's `padding`, and `gap` spacing
       // between the search field and the folder list. STACK_FILL lets each child
       // span the padded content width so the search input sits flush inside its
@@ -385,7 +387,11 @@ function rich_file_browser(
         options?.widgets,
       )
     }
-    draw_folder_tree(ui, input, tree_list_rect, flatten_folder_tree(folders, state.collapsed ?? new Set()), state, font_px, scale, col, event)
+    // When a search field sits above the list, the vstack gap already provides
+    // the top gutter (matching the panel-top→search inset), so the list adds no
+    // extra top padding. Without search the list owns its own breathing room.
+    const tree_top_pad = search_drawn ? 0 : 10 * scale
+    draw_folder_tree(ui, input, tree_list_rect, flatten_folder_tree(folders, state.collapsed ?? new Set()), state, font_px, scale, col, event, tree_top_pad)
   }
 
   const search_text = (state.search_text ?? '').trim().toLowerCase()
@@ -582,9 +588,9 @@ function draw_folder_tree(
   scale: number,
   col: (slot: theme_slot) => number,
   event: file_browser_event,
+  top_pad = 10 * scale,
 ): void {
   const row_h = 22 * scale
-  const top_pad = 10 * scale
   const bottom_pad = 12 * scale
   const scroll = state.tree_scroll ?? { offset_y: 0 }
   const content_h = rows.length * row_h + top_pad + bottom_pad
