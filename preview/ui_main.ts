@@ -955,11 +955,12 @@ function draw_summary_row(
   scale: number,
 ): void {
   const cell_gap = 8 * scale
+  const cell_r = 5 * scale
   const cell_w = Math.max(1, (w - cell_gap * (items.length - 1)) / items.length)
   for (let i = 0; i < items.length; i += 1) {
     const px = x + i * (cell_w + cell_gap)
-    renderer.fill_rect(px, y, cell_w, h, pack_color(theme.palette.panel_alt))
-    renderer.stroke_rect(px, y, cell_w, h, 1, pack_color(theme.palette.border))
+    renderer.fill_round_rect(px, y, cell_w, h, cell_r, pack_color(theme.palette.panel_alt))
+    renderer.stroke_round_rect(px, y, cell_w, h, cell_r, 1, pack_color(theme.palette.border))
     renderer.push_clip(px + 7 * scale, y, Math.max(0, cell_w - 14 * scale), h)
     renderer.draw_text(px + 7 * scale, renderer.text_v_center_y(y, h, 10.5 * scale), items[i] ?? '', 10.5 * scale, pack_color(theme.palette.text), FONT_MONO)
     renderer.pop_clip()
@@ -967,8 +968,9 @@ function draw_summary_row(
 }
 
 function draw_chart_frame(renderer: ui_renderer, theme: theme_definition, x: number, y: number, w: number, h: number, scale: number): void {
-  renderer.fill_rect(x, y, w, h, pack_color(theme.palette.track))
-  renderer.stroke_rect(x, y, w, h, 1, pack_color(theme.palette.border))
+  const frame_r = 6 * scale
+  renderer.fill_round_rect(x, y, w, h, frame_r, pack_color(theme.palette.track))
+  renderer.stroke_round_rect(x, y, w, h, frame_r, 1, pack_color(theme.palette.border))
   const grid = pack_color('#3a414d66')
   for (let i = 1; i < 4; i += 1) {
     const gy = y + (h * i) / 4
@@ -996,7 +998,7 @@ function draw_chart_label(
   const dot = 6 * scale
   const label_w = renderer.text_width(label, font, FONT_MONO)
   const px = align === 'left' ? x + 8 * scale : x + w - label_w - 18 * scale
-  renderer.fill_rect(px, y + 8 * scale, dot, dot, pack_color(color))
+  renderer.fill_circle(px + dot / 2, y + 8 * scale + dot / 2, dot / 2, pack_color(color))
   renderer.draw_text(px + dot + 5 * scale, y + 4 * scale, label, font, pack_color(theme.palette.text_dim), FONT_MONO)
 }
 
@@ -1049,9 +1051,11 @@ function draw_buffer_bar(
   renderer.draw_text(x, y + 12 * scale, value, value_font, dim, FONT_MONO)
   renderer.pop_clip()
   const bar_y = y + 25 * scale
-  renderer.fill_rect(x, bar_y, w, bar_h, pack_color(theme.palette.track))
-  renderer.fill_rect(x, bar_y, w * ratio, bar_h, total > 0 ? pack_color(theme.palette.accent) : pack_color(theme.palette.ghost))
-  renderer.stroke_rect(x, bar_y, w, bar_h, 1, pack_color(theme.palette.border))
+  const bar_r = bar_h * 0.5
+  renderer.fill_round_rect(x, bar_y, w, bar_h, bar_r, pack_color(theme.palette.track))
+  const fill_w = w * ratio
+  if (fill_w > 0) renderer.fill_round_rect(x, bar_y, Math.max(fill_w, Math.min(bar_h, w)), bar_h, bar_r, total > 0 ? pack_color(theme.palette.accent) : pack_color(theme.palette.ghost))
+  renderer.stroke_round_rect(x, bar_y, w, bar_h, bar_r, 1, pack_color(theme.palette.border))
   return y + row_h
 }
 
