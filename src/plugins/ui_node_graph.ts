@@ -540,17 +540,19 @@ function draw_bezier(ui: ui_renderer, x0: number, y0: number, x1: number, y1: nu
   const cx0 = x0 + bend
   const cx1 = x1 - bend
   const steps = Math.max(12, Math.ceil(Math.abs(x1 - x0) / Math.max(14 * gs, 1)))
-  let px = x0
-  let py = y0
+  // Sample the curve into a flat point list and stroke it as one continuous
+  // ribbon so the segments share mitered joins and a single feathered outline,
+  // instead of a chain of overlapping per-segment quads.
+  const pts = new Float32Array((steps + 1) * 2)
+  pts[0] = x0
+  pts[1] = y0
   for (let i = 1; i <= steps; i += 1) {
     const t = i / steps
     const mt = 1 - t
-    const xx = mt * mt * mt * x0 + 3 * mt * mt * t * cx0 + 3 * mt * t * t * cx1 + t * t * t * x1
-    const yy = mt * mt * mt * y0 + 3 * mt * mt * t * y0 + 3 * mt * t * t * y1 + t * t * t * y1
-    ui.stroke_line(px, py, xx, yy, line_w, rgba)
-    px = xx
-    py = yy
+    pts[i * 2 + 0] = mt * mt * mt * x0 + 3 * mt * mt * t * cx0 + 3 * mt * t * t * cx1 + t * t * t * x1
+    pts[i * 2 + 1] = mt * mt * mt * y0 + 3 * mt * mt * t * y0 + 3 * mt * t * t * y1 + t * t * t * y1
   }
+  ui.stroke_polyline(pts, steps + 1, line_w, rgba, gs)
 }
 
 function clamp(v: number, lo: number, hi: number): number {
