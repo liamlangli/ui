@@ -291,9 +291,36 @@ inner.button('cancel', { w: 120, h: 30 }, 'Cancel')
 
 A numeric `size` fills the cross axis (full width in a `vstack`, full height in
 an `hstack`); pass `{ w, h }` for an explicitly sized slot. Alignment
-(`STACK_ALIGN_*`), `reverse`, and `gap` are all supported, and the pure
-`layout_stack_into` / `layout_*stack_into` functions expose the same math for
-callers that just want rects without the widget facade.
+(`STACK_ALIGN_*`), `reverse`, `gap`, and `padding` are all supported, and the
+pure `layout_stack_into` / `layout_*stack_into` functions expose the same math
+for callers that just want rects without the widget facade.
+
+`padding` insets every child by the given amount on all four sides, and it is
+applied regardless of alignment — alignment, gaps, and `STACK_FILL` are all
+resolved inside the padded content box. Pass `STACK_FILL` (`-1`) for any width
+or height to make that dimension stretch: on the cross axis it fills the padded
+content extent, and on the main axis it absorbs the leftover space after
+padding, gaps, and fixed-size siblings.
+
+```ts
+import { STACK_FILL } from '@liamlangli/ui'
+
+// A toolbar row: fixed buttons on the ends, a search box that eats the middle.
+// Reserving space around a main-axis fill needs the precomputed `sizes` buffer,
+// so the layout can see every slot up front and split the remainder correctly.
+const sizes = [80, STACK_FILL, STACK_FILL, STACK_FILL, 80, STACK_FILL] // [w, h] per slot
+stack.hstack(x, y, w, h, 3, { gap: 8, padding: 12, sizes })
+stack.button('back', undefined, 'Back')                       // 80 wide, full padded height
+stack.input_field('q', undefined, query, 'Search…', state)    // fills the remaining width
+stack.button('go', undefined, 'Go')                           // 80 wide
+
+// Without a `sizes` buffer the streaming facade can't look ahead, so a
+// main-axis STACK_FILL is greedy — it grabs all space from the cursor to the
+// content edge. That's the right tool when the fill slot is the last one:
+stack.hstack(x, y, w, h, 2, { gap: 8, padding: 12 })
+stack.button('add', { w: 80, h: STACK_FILL }, 'Add')
+stack.input_field('q', { w: STACK_FILL, h: 28 }, query, 'Search…', state) // eats the rest
+```
 
 ### Chinese font loading
 

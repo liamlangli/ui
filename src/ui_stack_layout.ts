@@ -24,6 +24,14 @@ export const STACK_ALIGN_BOTTOM_LEFT = STACK_ALIGN_BOTTOM | STACK_ALIGN_LEFT
 export const STACK_ALIGN_BOTTOM_RIGHT = STACK_ALIGN_BOTTOM | STACK_ALIGN_RIGHT
 export const STACK_ALIGN_CENTER = STACK_ALIGN_CENTER_VERT | STACK_ALIGN_CENTER_HORI
 
+/**
+ * Sentinel size meaning "fill the available space along this dimension". On the
+ * cross axis it fills the padded content extent; on the main axis it grows to
+ * absorb the leftover space after padding, gaps, and fixed-size siblings, split
+ * evenly between all filling siblings.
+ */
+export const STACK_FILL = -1
+
 export const stack_layout_debug = {
   wireframe_hovered_stack: false,
 }
@@ -74,6 +82,7 @@ export interface stack_layout_options {
   alignment?: number
   reverse?: boolean
   gap?: number
+  padding?: number
 }
 
 export type stack_widget_size = number | stack_size
@@ -89,6 +98,7 @@ export interface stack_widget_axis_options {
   alignment?: number
   reverse?: boolean
   gap?: number
+  padding?: number
   sizes?: ArrayLike<number>
   rects?: { [index: number]: number }
   size_stride?: number
@@ -112,6 +122,10 @@ function align_main_start(mask: number, origin: number, available: number, used:
   if (mask & end_bit) return origin + available - used
   if (mask & start_bit) return origin
   return origin
+}
+
+function fill_size(size: number, fill: number): number {
+  return size === STACK_FILL ? fill : size
 }
 
 function read_size_w(sizes: ArrayLike<number>, index: number, size_stride: number): number {
@@ -159,6 +173,7 @@ export function layout_stack_into(
     options.gap ?? 0,
     size_stride,
     out_stride,
+    options.padding ?? 0,
   )
 }
 
@@ -176,43 +191,56 @@ export function layout_stack_params_into(
   gap = 0,
   size_stride = 2,
   out_stride = 4,
+  padding = 0,
 ): void {
   count = Math.max(0, count | 0)
   queue_stack_layout_debug_wireframe(x, y, w, h)
 
+  const px = x + padding
+  const py = y + padding
+  const pw = Math.max(0, w - padding * 2)
+  const ph = Math.max(0, h - padding * 2)
+
   if (kind === 'zstack') {
     for (let i = 0; i < count; i += 1) {
       const child = reverse ? count - 1 - i : i
-      const cw = read_size_w(sizes, child, size_stride)
-      const ch = read_size_h(sizes, child, size_stride)
-      write_rect(out, child, out_stride, align_hori(alignment, x, w, cw), align_vert(alignment, y, h, ch), cw, ch)
+      const cw = fill_size(read_size_w(sizes, child, size_stride), pw)
+      const ch = fill_size(read_size_h(sizes, child, size_stride), ph)
+      write_rect(out, child, out_stride, align_hori(alignment, px, pw, cw), align_vert(alignment, py, ph, ch), cw, ch)
     }
     return
   }
 
-  let used = count > 1 ? gap * (count - 1) : 0
+  const main_content = kind === 'vstack' ? ph : pw
+  let fixed = 0
+  let flex = 0
   for (let i = 0; i < count; i += 1) {
-    used += kind === 'vstack' ? read_size_h(sizes, i, size_stride) : read_size_w(sizes, i, size_stride)
+    const m = kind === 'vstack' ? read_size_h(sizes, i, size_stride) : read_size_w(sizes, i, size_stride)
+    if (m === STACK_FILL) flex += 1
+    else fixed += m
   }
+  const total_gap = count > 1 ? gap * (count - 1) : 0
+  const flex_each = flex > 0 ? Math.max(0, main_content - fixed - total_gap) / flex : 0
+  const used = flex > 0 ? Math.max(main_content, fixed + total_gap) : fixed + total_gap
 
   if (kind === 'vstack') {
-    let cursor = align_main_start(alignment, y, h, used, STACK_ALIGN_TOP, STACK_ALIGN_BOTTOM, STACK_ALIGN_CENTER_VERT)
+    let cursor = align_main_start(alignment, py, ph, used, STACK_ALIGN_TOP, STACK_ALIGN_BOTTOM, STACK_ALIGN_CENTER_VERT)
     for (let i = 0; i < count; i += 1) {
       const child = reverse ? count - 1 - i : i
-      const cw = read_size_w(sizes, child, size_stride)
-      const ch = read_size_h(sizes, child, size_stride)
-      write_rect(out, child, out_stride, align_hori(alignment, x, w, cw), cursor, cw, ch)
+      const cw = fill_size(read_size_w(sizes, child, size_stride), pw)
+      const ch = fill_size(read_size_h(sizes, child, size_stride), flex_each)
+      write_rect(out, child, out_stride, align_hori(alignment, px, pw, cw), cursor, cw, ch)
       cursor += ch + gap
     }
     return
   }
 
-  let cursor = align_main_start(alignment, x, w, used, STACK_ALIGN_LEFT, STACK_ALIGN_RIGHT, STACK_ALIGN_CENTER_HORI)
+  let cursor = align_main_start(alignment, px, pw, used, STACK_ALIGN_LEFT, STACK_ALIGN_RIGHT, STACK_ALIGN_CENTER_HORI)
   for (let i = 0; i < count; i += 1) {
     const child = reverse ? count - 1 - i : i
-    const cw = read_size_w(sizes, child, size_stride)
-    const ch = read_size_h(sizes, child, size_stride)
-    write_rect(out, child, out_stride, cursor, align_vert(alignment, y, h, ch), cw, ch)
+    const cw = fill_size(read_size_w(sizes, child, size_stride), flex_each)
+    const ch = fill_size(read_size_h(sizes, child, size_stride), ph)
+    write_rect(out, child, out_stride, cursor, align_vert(alignment, py, ph, ch), cw, ch)
     cursor += cw + gap
   }
 }
@@ -228,8 +256,9 @@ export function layout_vstack_into(
   alignment = STACK_ALIGN_TOP_LEFT,
   reverse = false,
   gap = 0,
+  padding = 0,
 ): void {
-  layout_stack_params_into('vstack', x, y, w, h, sizes, count, out, alignment, reverse, gap)
+  layout_stack_params_into('vstack', x, y, w, h, sizes, count, out, alignment, reverse, gap, 2, 4, padding)
 }
 
 export function layout_hstack_into(
@@ -243,8 +272,9 @@ export function layout_hstack_into(
   alignment = STACK_ALIGN_TOP_LEFT,
   reverse = false,
   gap = 0,
+  padding = 0,
 ): void {
-  layout_stack_params_into('hstack', x, y, w, h, sizes, count, out, alignment, reverse, gap)
+  layout_stack_params_into('hstack', x, y, w, h, sizes, count, out, alignment, reverse, gap, 2, 4, padding)
 }
 
 export function layout_zstack_into(
@@ -257,8 +287,9 @@ export function layout_zstack_into(
   out: { [index: number]: number },
   alignment = STACK_ALIGN_CENTER,
   reverse = false,
+  padding = 0,
 ): void {
-  layout_stack_params_into('zstack', x, y, w, h, sizes, count, out, alignment, reverse)
+  layout_stack_params_into('zstack', x, y, w, h, sizes, count, out, alignment, reverse, 0, 2, 4, padding)
 }
 
 /**
@@ -276,64 +307,70 @@ export function layout_stack_rects_into(options: stack_layout_options, sizes: Ar
   const alignment = options.alignment ?? STACK_ALIGN_TOP_LEFT
   const reverse = options.reverse === true
   const gap = options.gap ?? 0
+  const padding = options.padding ?? 0
+
+  const px = x + padding
+  const py = y + padding
+  const pw = Math.max(0, w - padding * 2)
+  const ph = Math.max(0, h - padding * 2)
 
   if (kind === 'zstack') {
     for (let i = 0; i < count; i += 1) {
       const child = reverse ? count - 1 - i : i
       const size = sizes[child]
       const rect = out[child]
-      rect.x = align_hori(alignment, x, w, size.w)
-      rect.y = align_vert(alignment, y, h, size.h)
-      rect.w = size.w
-      rect.h = size.h
+      const cw = fill_size(size.w, pw)
+      const ch = fill_size(size.h, ph)
+      rect.x = align_hori(alignment, px, pw, cw)
+      rect.y = align_vert(alignment, py, ph, ch)
+      rect.w = cw
+      rect.h = ch
     }
     return
   }
 
-  let used = count > 1 ? gap * (count - 1) : 0
+  const main_content = kind === 'vstack' ? ph : pw
+  let fixed = 0
+  let flex = 0
   for (let i = 0; i < count; i += 1) {
-    const size = sizes[i]
-    used += kind === 'vstack' ? size.h : size.w
+    const m = kind === 'vstack' ? sizes[i].h : sizes[i].w
+    if (m === STACK_FILL) flex += 1
+    else fixed += m
   }
+  const total_gap = count > 1 ? gap * (count - 1) : 0
+  const flex_each = flex > 0 ? Math.max(0, main_content - fixed - total_gap) / flex : 0
+  const used = flex > 0 ? Math.max(main_content, fixed + total_gap) : fixed + total_gap
 
   if (kind === 'vstack') {
-    let cursor = align_main_start(alignment, y, h, used, STACK_ALIGN_TOP, STACK_ALIGN_BOTTOM, STACK_ALIGN_CENTER_VERT)
+    let cursor = align_main_start(alignment, py, ph, used, STACK_ALIGN_TOP, STACK_ALIGN_BOTTOM, STACK_ALIGN_CENTER_VERT)
     for (let i = 0; i < count; i += 1) {
       const child = reverse ? count - 1 - i : i
       const size = sizes[child]
       const rect = out[child]
-      rect.x = align_hori(alignment, x, w, size.w)
+      const cw = fill_size(size.w, pw)
+      const ch = fill_size(size.h, flex_each)
+      rect.x = align_hori(alignment, px, pw, cw)
       rect.y = cursor
-      rect.w = size.w
-      rect.h = size.h
-      cursor += size.h + gap
+      rect.w = cw
+      rect.h = ch
+      cursor += ch + gap
     }
     return
   }
 
-  let cursor = align_main_start(alignment, x, w, used, STACK_ALIGN_LEFT, STACK_ALIGN_RIGHT, STACK_ALIGN_CENTER_HORI)
+  let cursor = align_main_start(alignment, px, pw, used, STACK_ALIGN_LEFT, STACK_ALIGN_RIGHT, STACK_ALIGN_CENTER_HORI)
   for (let i = 0; i < count; i += 1) {
     const child = reverse ? count - 1 - i : i
     const size = sizes[child]
     const rect = out[child]
+    const cw = fill_size(size.w, flex_each)
+    const ch = fill_size(size.h, ph)
     rect.x = cursor
-    rect.y = align_vert(alignment, y, h, size.h)
-    rect.w = size.w
-    rect.h = size.h
-    cursor += size.w + gap
+    rect.y = align_vert(alignment, py, ph, ch)
+    rect.w = cw
+    rect.h = ch
+    cursor += cw + gap
   }
-}
-
-function numeric_size_w(kind: stack_kind, container_w: number, container_h: number, size: stack_widget_size | undefined): number {
-  if (typeof size === 'number') return kind === 'vstack' || kind === 'zstack' ? container_w : size
-  if (size) return size.w
-  return kind === 'hstack' ? 0 : container_w
-}
-
-function numeric_size_h(kind: stack_kind, container_w: number, container_h: number, size: stack_widget_size | undefined): number {
-  if (typeof size === 'number') return kind === 'hstack' || kind === 'zstack' ? container_h : size
-  if (size) return size.h
-  return kind === 'vstack' ? 0 : container_h
 }
 
 /**
@@ -352,10 +389,15 @@ export class stack_ui_layout {
   private y = 0
   private w = 0
   private h = 0
+  private px = 0
+  private py = 0
+  private pw = 0
+  private ph = 0
   private count = 0
   private alignment = STACK_ALIGN_TOP_LEFT
   private reverse = false
   private gap = 0
+  private padding = 0
   private index = 0
   private cursor = 0
   private sizes: ArrayLike<number> | null = null
@@ -363,6 +405,7 @@ export class stack_ui_layout {
   private size_stride = 2
   private rect_stride = 4
   private main_used = 0
+  private flex_each = 0
   private readonly rect: stack_rect = { x: 0, y: 0, w: 0, h: 0 }
 
   constructor(private readonly widgets: ui_widgets) {}
@@ -382,6 +425,7 @@ export class stack_ui_layout {
       options.rects,
       options.size_stride ?? 2,
       options.rect_stride ?? 4,
+      options.padding ?? 0,
     )
   }
 
@@ -399,12 +443,18 @@ export class stack_ui_layout {
     rects?: { [index: number]: number },
     size_stride = 2,
     rect_stride = 4,
+    padding = 0,
   ): void {
     this.kind = kind
     this.x = x
     this.y = y
     this.w = w
     this.h = h
+    this.padding = padding
+    this.px = x + padding
+    this.py = y + padding
+    this.pw = Math.max(0, w - padding * 2)
+    this.ph = Math.max(0, h - padding * 2)
     this.count = Math.max(0, count | 0)
     this.alignment = alignment
     this.reverse = reverse
@@ -414,31 +464,31 @@ export class stack_ui_layout {
     this.rects = sizes ? rects ?? null : null
     this.size_stride = size_stride
     this.rect_stride = rect_stride
-    this.main_used = this.compute_main_used()
+    this.compute_main_layout()
 
     if (this.rects && this.sizes) {
-      layout_stack_params_into(this.kind, this.x, this.y, this.w, this.h, this.sizes, this.count, this.rects, this.alignment, this.reverse, this.gap, this.size_stride, this.rect_stride)
+      layout_stack_params_into(this.kind, this.x, this.y, this.w, this.h, this.sizes, this.count, this.rects, this.alignment, this.reverse, this.gap, this.size_stride, this.rect_stride, this.padding)
     }
 
     if (this.kind === 'vstack') {
-      this.cursor = align_main_start(this.alignment, this.y, this.h, this.main_used, STACK_ALIGN_TOP, STACK_ALIGN_BOTTOM, STACK_ALIGN_CENTER_VERT)
+      this.cursor = align_main_start(this.alignment, this.py, this.ph, this.main_used, STACK_ALIGN_TOP, STACK_ALIGN_BOTTOM, STACK_ALIGN_CENTER_VERT)
     } else {
-      this.cursor = align_main_start(this.alignment, this.x, this.w, this.main_used, STACK_ALIGN_LEFT, STACK_ALIGN_RIGHT, STACK_ALIGN_CENTER_HORI)
+      this.cursor = align_main_start(this.alignment, this.px, this.pw, this.main_used, STACK_ALIGN_LEFT, STACK_ALIGN_RIGHT, STACK_ALIGN_CENTER_HORI)
     }
 
     if (!this.rects || !this.sizes) queue_stack_layout_debug_wireframe(this.x, this.y, this.w, this.h)
   }
 
   vstack(x: number, y: number, w: number, h: number, count: number, options?: stack_widget_axis_options): void {
-    this.begin_params('vstack', x, y, w, h, count, options?.alignment ?? STACK_ALIGN_TOP_LEFT, options?.reverse === true, options?.gap ?? 0, options?.sizes, options?.rects, options?.size_stride ?? 2, options?.rect_stride ?? 4)
+    this.begin_params('vstack', x, y, w, h, count, options?.alignment ?? STACK_ALIGN_TOP_LEFT, options?.reverse === true, options?.gap ?? 0, options?.sizes, options?.rects, options?.size_stride ?? 2, options?.rect_stride ?? 4, options?.padding ?? 0)
   }
 
   hstack(x: number, y: number, w: number, h: number, count: number, options?: stack_widget_axis_options): void {
-    this.begin_params('hstack', x, y, w, h, count, options?.alignment ?? STACK_ALIGN_TOP_LEFT, options?.reverse === true, options?.gap ?? 0, options?.sizes, options?.rects, options?.size_stride ?? 2, options?.rect_stride ?? 4)
+    this.begin_params('hstack', x, y, w, h, count, options?.alignment ?? STACK_ALIGN_TOP_LEFT, options?.reverse === true, options?.gap ?? 0, options?.sizes, options?.rects, options?.size_stride ?? 2, options?.rect_stride ?? 4, options?.padding ?? 0)
   }
 
   zstack(x: number, y: number, w: number, h: number, count: number, options?: stack_widget_axis_options): void {
-    this.begin_params('zstack', x, y, w, h, count, options?.alignment ?? STACK_ALIGN_CENTER, options?.reverse === true, options?.gap ?? 0, options?.sizes, options?.rects, options?.size_stride ?? 2, options?.rect_stride ?? 4)
+    this.begin_params('zstack', x, y, w, h, count, options?.alignment ?? STACK_ALIGN_CENTER, options?.reverse === true, options?.gap ?? 0, options?.sizes, options?.rects, options?.size_stride ?? 2, options?.rect_stride ?? 4, options?.padding ?? 0)
   }
 
   end(): void {
@@ -460,8 +510,8 @@ export class stack_ui_layout {
     const cw = this.child_w(child, size)
     const ch = this.child_h(child, size)
     if (this.kind === 'zstack') {
-      this.rect.x = align_hori(this.alignment, this.x, this.w, cw)
-      this.rect.y = align_vert(this.alignment, this.y, this.h, ch)
+      this.rect.x = align_hori(this.alignment, this.px, this.pw, cw)
+      this.rect.y = align_vert(this.alignment, this.py, this.ph, ch)
       this.rect.w = cw
       this.rect.h = ch
       return this.rect
@@ -470,19 +520,19 @@ export class stack_ui_layout {
     if (this.sizes && this.reverse) {
       const main = this.reversed_child_main_offset(child)
       if (this.kind === 'vstack') {
-        this.rect.x = align_hori(this.alignment, this.x, this.w, cw)
+        this.rect.x = align_hori(this.alignment, this.px, this.pw, cw)
         this.rect.y = this.cursor + main
       } else {
         this.rect.x = this.cursor + main
-        this.rect.y = align_vert(this.alignment, this.y, this.h, ch)
+        this.rect.y = align_vert(this.alignment, this.py, this.ph, ch)
       }
     } else if (this.kind === 'vstack') {
-      this.rect.x = align_hori(this.alignment, this.x, this.w, cw)
+      this.rect.x = align_hori(this.alignment, this.px, this.pw, cw)
       this.rect.y = this.cursor
       this.cursor += ch + this.gap
     } else {
       this.rect.x = this.cursor
-      this.rect.y = align_vert(this.alignment, this.y, this.h, ch)
+      this.rect.y = align_vert(this.alignment, this.py, this.ph, ch)
       this.cursor += cw + this.gap
     }
     this.rect.w = cw
@@ -620,30 +670,69 @@ export class stack_ui_layout {
     return this.widgets.get_text_view_selected_text(lines, state)
   }
 
-  private compute_main_used(): number {
-    if (!this.sizes) return 0
-    let used = this.count > 1 ? this.gap * (this.count - 1) : 0
+  private compute_main_layout(): void {
+    this.main_used = 0
+    this.flex_each = 0
+    if (!this.sizes || this.kind === 'zstack') return
+    const main_content = this.kind === 'vstack' ? this.ph : this.pw
+    let fixed = 0
+    let flex = 0
     for (let i = 0; i < this.count; i += 1) {
-      used += this.kind === 'vstack' ? read_size_h(this.sizes, i, this.size_stride) : this.kind === 'hstack' ? read_size_w(this.sizes, i, this.size_stride) : 0
+      const m = this.kind === 'vstack' ? read_size_h(this.sizes, i, this.size_stride) : read_size_w(this.sizes, i, this.size_stride)
+      if (m === STACK_FILL) flex += 1
+      else fixed += m
     }
-    return used
+    const total_gap = this.count > 1 ? this.gap * (this.count - 1) : 0
+    this.flex_each = flex > 0 ? Math.max(0, main_content - fixed - total_gap) / flex : 0
+    this.main_used = flex > 0 ? Math.max(main_content, fixed + total_gap) : fixed + total_gap
   }
 
   private child_w(child: number, size?: stack_widget_size): number {
-    if (this.sizes) return read_size_w(this.sizes, child, this.size_stride)
-    return numeric_size_w(this.kind, this.w, this.h, size)
+    if (this.sizes) {
+      const v = read_size_w(this.sizes, child, this.size_stride)
+      if (v !== STACK_FILL) return v
+      return this.kind === 'hstack' ? this.flex_each : this.pw
+    }
+    if (typeof size === 'number') {
+      if (this.kind === 'hstack') return size === STACK_FILL ? this.main_remaining() : size
+      return this.pw
+    }
+    if (size) {
+      if (this.kind === 'hstack') return size.w === STACK_FILL ? this.main_remaining() : size.w
+      return size.w === STACK_FILL ? this.pw : size.w
+    }
+    return this.kind === 'hstack' ? 0 : this.pw
   }
 
   private child_h(child: number, size?: stack_widget_size): number {
-    if (this.sizes) return read_size_h(this.sizes, child, this.size_stride)
-    return numeric_size_h(this.kind, this.w, this.h, size)
+    if (this.sizes) {
+      const v = read_size_h(this.sizes, child, this.size_stride)
+      if (v !== STACK_FILL) return v
+      return this.kind === 'vstack' ? this.flex_each : this.ph
+    }
+    if (typeof size === 'number') {
+      if (this.kind === 'vstack') return size === STACK_FILL ? this.main_remaining() : size
+      return this.ph
+    }
+    if (size) {
+      if (this.kind === 'vstack') return size.h === STACK_FILL ? this.main_remaining() : size.h
+      return size.h === STACK_FILL ? this.ph : size.h
+    }
+    return this.kind === 'vstack' ? 0 : this.ph
+  }
+
+  private main_remaining(): number {
+    if (this.kind === 'vstack') return Math.max(0, this.py + this.ph - this.cursor)
+    if (this.kind === 'hstack') return Math.max(0, this.px + this.pw - this.cursor)
+    return 0
   }
 
   private reversed_child_main_offset(child: number): number {
     if (!this.sizes) return 0
     let offset = 0
     for (let i = this.count - 1; i > child; i -= 1) {
-      offset += this.kind === 'vstack' ? read_size_h(this.sizes, i, this.size_stride) : read_size_w(this.sizes, i, this.size_stride)
+      const m = this.kind === 'vstack' ? read_size_h(this.sizes, i, this.size_stride) : read_size_w(this.sizes, i, this.size_stride)
+      offset += m === STACK_FILL ? this.flex_each : m
       offset += this.gap
     }
     return offset
