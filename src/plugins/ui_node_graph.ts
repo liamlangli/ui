@@ -100,7 +100,7 @@ export interface node_graph_options {
 }
 
 type drag_state = { node_ids: node_graph_id[]; last_x: number; last_y: number }
-type pan_state = { last_x: number; last_y: number }
+type pan_state = { last_x: number; last_y: number; button: 'middle' | 'right'; moved: boolean }
 type marquee_state = { start_x: number; start_y: number; cur_x: number; cur_y: number; base: node_graph_id[] }
 type wire_draft = { node: node_graph_id; slot: number; is_output: boolean }
 type menu_state = { screen_x: number; screen_y: number; graph_x: number; graph_y: number }
@@ -287,14 +287,25 @@ export function node_graph(
     state.zoom = next_zoom
   }
 
+  // --- Two-finger touch: pan + pinch zoom (anchored at the centroid) ------
+  const pan_dx = input.pan_dx ?? 0
+  const pan_dy = input.pan_dy ?? 0
+  const pinch = input.zoom_factor ?? 1
+  if (inside && !state._menu && (pan_dx || pan_dy || pinch !== 1)) {
+    // Graph point under the centroid's previous position; keep it under the new one.
+    const gx = (input.mouse_x - pan_dx - origin_x) / pos_scale
+    const gy = (input.mouse_y - pan_dy - origin_y) / pos_scale
+    const next_zoom = clamp(zoom * pinch, MIN_ZOOM, MAX_ZOOM)
+    const next_pos = UNIT * next_zoom
+    state.pan_x = (input.mouse_x - gx * next_pos - x - 24 * scale) / scale
+    state.pan_y = (input.mouse_y - gy * next_pos - y - 18 * scale) / scale
+    state.zoom = next_zoom
+  }
+
   // --- Press: start an interaction ---------------------------------------
-  if (inside && input.mouse_right_pressed && menu_templates.length > 0 && !state._wire && !state._drag && !state._marquee) {
-    state._menu = {
-      screen_x: Math.min(input.mouse_x, x + w - MENU_W * scale),
-      screen_y: Math.min(input.mouse_y, y + h - menu_templates.length * MENU_ROW_H * scale),
-      graph_x: (input.mouse_x - origin_x) / pos_scale,
-      graph_y: (input.mouse_y - origin_y) / pos_scale,
-    }
+  // Right-drag pans; a right-click without a drag opens the create menu (below).
+  if (inside && input.mouse_right_pressed && !state._pan && !state._wire && !state._drag && !state._marquee && !state._menu) {
+    state._pan = { last_x: input.mouse_x, last_y: input.mouse_y, button: 'right', moved: false }
   }
   if (inside && input.mouse_pressed && !menu_consumed_press && !state._pan) {
     if (hit_slot) {
@@ -320,17 +331,30 @@ export function node_graph(
   }
   // Middle-drag pan (level-triggered).
   if (inside && input.mouse_middle_down && !state._pan && !state._drag && !state._marquee && !state._wire) {
-    state._pan = { last_x: input.mouse_x, last_y: input.mouse_y }
+    state._pan = { last_x: input.mouse_x, last_y: input.mouse_y, button: 'middle', moved: false }
   }
 
   // --- Update active interactions ----------------------------------------
   if (state._pan) {
-    if (input.mouse_middle_down) {
-      state.pan_x += (input.mouse_x - state._pan.last_x) / scale
-      state.pan_y += (input.mouse_y - state._pan.last_y) / scale
+    const held = state._pan.button === 'right' ? !!input.mouse_right_down : !!input.mouse_middle_down
+    if (held) {
+      const dx = input.mouse_x - state._pan.last_x
+      const dy = input.mouse_y - state._pan.last_y
+      if (dx || dy) state._pan.moved = true
+      state.pan_x += dx / scale
+      state.pan_y += dy / scale
       state._pan.last_x = input.mouse_x
       state._pan.last_y = input.mouse_y
     } else {
+      // A right-click that never dragged opens the create menu at the press point.
+      if (state._pan.button === 'right' && !state._pan.moved && menu_templates.length > 0) {
+        state._menu = {
+          screen_x: Math.min(state._pan.last_x, x + w - MENU_W * scale),
+          screen_y: Math.min(state._pan.last_y, y + h - menu_templates.length * MENU_ROW_H * scale),
+          graph_x: (state._pan.last_x - origin_x) / pos_scale,
+          graph_y: (state._pan.last_y - origin_y) / pos_scale,
+        }
+      }
       state._pan = null
     }
   }
