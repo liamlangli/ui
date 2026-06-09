@@ -14,6 +14,7 @@ import {
   STACK_ALIGN_CENTER_VERT,
   STACK_ALIGN_TOP_LEFT,
   STACK_ALIGN_TOP_RIGHT,
+  STACK_FILL,
   layout_hstack_into,
   layout_vstack_into,
   layout_zstack_into,
@@ -359,18 +360,21 @@ function rich_file_browser(
     const panel_r = 7 * scale
     ui.fill_round_rect(tree_rect.x, tree_rect.y, tree_rect.w, tree_rect.h, panel_r, col('panel'))
     const search_pad = 6 * scale
-    const search_tree_gap = 0
     let tree_list_rect = tree_rect
-    if (search_enabled && tree_rect.w > search_pad * 2 && tree_rect.h > input_h + search_pad + search_tree_gap) {
-      const tree_sizes = [tree_rect.w - search_pad * 2, input_h, tree_rect.w, Math.max(0, tree_rect.h - input_h - search_pad - search_tree_gap)]
+    if (search_enabled && tree_rect.w > search_pad * 2 && tree_rect.h > input_h + search_pad * 2) {
+      // Even gutters on all sides via the stack's `padding`, and `gap` spacing
+      // between the search field and the folder list. STACK_FILL lets each child
+      // span the padded content width so the search input sits flush inside its
+      // parent panel with matching left/right/top insets.
+      const tree_sizes = [STACK_FILL, input_h, STACK_FILL, STACK_FILL]
       const tree_rects = [0, 0, 0, 0, 0, 0, 0, 0]
-      layout_vstack_into(tree_rect.x, tree_rect.y + search_pad, tree_rect.w, tree_rect.h - search_pad, tree_sizes, 2, tree_rects, STACK_ALIGN_TOP_LEFT, false, search_tree_gap)
+      layout_vstack_into(tree_rect.x, tree_rect.y, tree_rect.w, tree_rect.h, tree_sizes, 2, tree_rects, STACK_ALIGN_TOP_LEFT, false, search_pad, search_pad)
       const tree_search_rect = rect_at(tree_rects, 0)
       tree_list_rect = rect_at(tree_rects, 1)
       draw_search_field(
         ui,
         input,
-        tree_search_rect.x + search_pad,
+        tree_search_rect.x,
         tree_search_rect.y,
         tree_search_rect.w,
         tree_search_rect.h,
