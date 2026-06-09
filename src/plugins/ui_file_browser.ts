@@ -413,10 +413,11 @@ function rich_file_browser(
   const header_inner = inset_rect(content_header_rect, content_pad, content_header_pad_y)
   const header_gap = content_search_w > 0 ? 8 * scale : 0
   const breadcrumb_w = Math.max(0, header_inner.w - content_search_w - header_gap)
-  const header_sizes = content_search_w > 0 ? [breadcrumb_w, btn_h, content_search_w, input_h] : [header_inner.w, btn_h]
+  const header_sizes = content_search_w > 0 ? [breadcrumb_w, input_h, content_search_w, input_h] : [header_inner.w, input_h]
   const header_rects = content_search_w > 0 ? [0, 0, 0, 0, 0, 0, 0, 0] : [0, 0, 0, 0]
   layout_hstack_into(header_inner.x, header_inner.y, header_inner.w, header_inner.h, header_sizes, content_search_w > 0 ? 2 : 1, header_rects, STACK_ALIGN_CENTER_VERT, false, header_gap)
   const breadcrumb_rect = rect_at(header_rects, 0)
+  ui.fill_round_rect(breadcrumb_rect.x, breadcrumb_rect.y, breadcrumb_rect.w, breadcrumb_rect.h, 6 * scale, col('panel_alt'))
   ui.push_clip(breadcrumb_rect.x, breadcrumb_rect.y, breadcrumb_rect.w, breadcrumb_rect.h)
   draw_breadcrumb(ui, breadcrumb_rect.x, breadcrumb_rect.y, breadcrumb_rect.h, state.selected_folder ?? '', input, font_px, scale, (path) => {
     state.selected_folder = path
@@ -820,18 +821,21 @@ function draw_breadcrumb(
 ): void {
   const parts = folder.split('/').filter(Boolean)
   const text_y = ui.text_v_center_y(y, h, font_px)
-  let cursor_x = x
+  // 1px padding around each segment's path text, plus a matching inset from the
+  // container's left edge so the first segment isn't flush against the panel.
+  const pad = 1 * scale
+  let cursor_x = x + pad
   let current = ''
   for (let i = 0; i < parts.length; i += 1) {
     const part = parts[i]!
     current = current ? `${current}/${part}` : part
     const tw = ui.text_width(part, font_px)
-    const hover = point_in(input, cursor_x - 2 * scale, y, tw + 4 * scale, h)
-    if (hover) ui.fill_round_rect(cursor_x - 2 * scale, y + 2 * scale, tw + 4 * scale, h - 4 * scale, 5 * scale, col('hover'))
+    const hover = point_in(input, cursor_x - pad, y, tw + pad * 2, h)
+    if (hover) ui.fill_round_rect(cursor_x - pad, y + 2 * scale, tw + pad * 2, h - 4 * scale, 5 * scale, col('hover'))
     ui.draw_text(cursor_x, text_y, part, font_px, col('text'))
     const captured = current
     if (hover && input.mouse_pressed) on_select(captured)
-    cursor_x += tw
+    cursor_x += tw + pad
     if (i < parts.length - 1) {
       ui.draw_text(cursor_x + 4 * scale, text_y, '/', font_px, col('text_dim'))
       cursor_x += ui.text_width('/', font_px) + 8 * scale
