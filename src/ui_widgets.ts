@@ -340,6 +340,9 @@ export class ui_widgets {
   section(x: number, y: number, w: number, label: string): number {
     const scale = window.devicePixelRatio || 1
     const section_h = w_section_h * scale
+    // Still advance layout by the section height even when culled, so callers
+    // stacking widgets below keep their positions.
+    if (this.ui.rect_clipped(x, y, w, section_h)) return y + section_h
     const pad = w_pad * scale
     this.ui.draw_text(x + pad, this.ui.text_v_center_y(y, section_h, w_font_px * scale), label, w_font_px * scale, this.color('text_dim'))
     const lw = this.ui.text_width(label, w_font_px * scale) + pad * 2
@@ -348,6 +351,7 @@ export class ui_widgets {
   }
 
   button(id: string, x: number, y: number, w: number, h: number, label: string, options?: { active?: boolean }): boolean {
+    if (this.ui.rect_clipped(x, y, w, h)) return false
     const scale = window.devicePixelRatio || 1
     const hover = this.point_in(x, y, w, h)
     const active = options?.active === true
@@ -370,6 +374,7 @@ export class ui_widgets {
     const label_gap = label ? 7 * scale : 0
     const label_w = label ? this.ui.text_width(label, w_font_px * scale) : 0
     const hit_w = box_size + label_gap + label_w
+    if (this.ui.rect_clipped(x, y, hit_w, box_size)) return value
     const hover = this.point_in(x, y, hit_w, box_size)
     if (hover && this.input.mouse_pressed) value = !value
     const box_r = 2 * scale
@@ -385,6 +390,7 @@ export class ui_widgets {
   }
 
   slider(id: string, x: number, y: number, w: number, h: number, value: number, min: number, max: number, show_value = false): number {
+    if (this.ui.rect_clipped(x, y, w, h)) return Math.max(min, Math.min(max, value))
     const scale = window.devicePixelRatio || 1
     const hover = this.point_in(x, y, w, h)
     if (this.input.mouse_pressed && hover) this.active_id = id
@@ -408,6 +414,7 @@ export class ui_widgets {
   }
 
   list(_id: string, x: number, y: number, w: number, h: number, items: string[], selected: number, scroll: ui_scroll_state): number {
+    if (this.ui.rect_clipped(x, y, w, h)) return selected
     const scale = window.devicePixelRatio || 1
     const row_h = w_row_h * scale
     const scrollbar_w = w_scrollbar_w * scale
@@ -497,6 +504,7 @@ export class ui_widgets {
 
   scrollbar(id: string, x: number, y: number, w: number, h: number, scroll: ui_scroll_state, content_h: number): void {
     if (content_h <= h) return
+    if (this.ui.rect_clipped(x, y, w, h)) return
     const scale = window.devicePixelRatio || 1
     const min_thumb = 20 * scale
     const max_off = Math.max(0, content_h - h)
