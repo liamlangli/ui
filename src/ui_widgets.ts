@@ -1,6 +1,7 @@
 import { theme_color } from './ui_theme'
 import type { theme_definition } from './ui_types'
 import { FONT_MONO, ui_renderer } from './ui_renderer'
+import { set_stack_layout_debug_context } from './ui_stack_layout'
 
 export interface ui_input_snapshot {
   mouse_x: number
@@ -289,6 +290,7 @@ export class ui_widgets {
   private readonly color_picker_values = new Map<string, ui_color_rgba>()
   private readonly color_picker_number_inputs = new Map<string, ui_number_input_state>()
   private is_inside_popup_rendering = false
+  private readonly pending_stack_debug_wireframes: Array<{ x: number; y: number; w: number; h: number }> = []
 
   constructor(private readonly ui: ui_renderer) {}
 
@@ -297,6 +299,8 @@ export class ui_widgets {
     this.input = input
     this.pending_dropdown = null
     this.pending_color_picker = null
+    this.pending_stack_debug_wireframes.length = 0
+    set_stack_layout_debug_context(input, (x, y, w, h) => this.queue_stack_debug_wireframe(x, y, w, h))
     if (this.open_dropdown_id == null) this.open_dropdown_popup_rect = null
     if (this.open_color_picker_id == null) this.open_color_picker_popup_rect = null
     if (!input.mouse_down && this.active_id) this.active_id = null
@@ -309,6 +313,12 @@ export class ui_widgets {
     if (this.pending_dropdown) this.render_dropdown_popup(this.pending_dropdown)
     if (this.pending_color_picker) this.render_color_picker_popup(this.pending_color_picker)
     this.is_inside_popup_rendering = false
+    this.render_stack_debug_wireframes()
+    set_stack_layout_debug_context(null, null)
+  }
+
+  queue_stack_debug_wireframe(x: number, y: number, w: number, h: number): void {
+    this.pending_stack_debug_wireframes.push({ x, y, w, h })
   }
 
   section(x: number, y: number, w: number, label: string): number {
@@ -1344,6 +1354,16 @@ export class ui_widgets {
       g: Number.isFinite(value.g) ? value.g! : 0,
       b: Number.isFinite(value.b) ? value.b! : 0,
       a: Number.isFinite(value.a) ? value.a! : 1,
+    }
+  }
+
+  private render_stack_debug_wireframes(): void {
+    if (this.pending_stack_debug_wireframes.length === 0) return
+    const scale = window.devicePixelRatio || 1
+    const color = pack_rgba(1, 0.95, 0.45, 0.92)
+    const thickness = Math.max(1, Math.round(scale * 0.5))
+    for (const r of this.pending_stack_debug_wireframes) {
+      this.ui.stroke_rect(r.x, r.y, r.w, r.h, thickness, color)
     }
   }
 

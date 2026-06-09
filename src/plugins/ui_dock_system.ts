@@ -215,7 +215,7 @@ export class dock_system {
     ui.fill_round_rect_per_corner(leaf.x, leaf.y, leaf.w, bar_h, radius, radius, 0, 0, col('panel_alt'))
     ui.fill_rect(leaf.x, leaf.y + bar_h - 1 * scale, leaf.w, 1 * scale, col('border'))
 
-    let cursor = leaf.x + 4 * scale
+    let cursor = leaf.x + 1 * scale
     const gap = 4 * scale
     // Clip the tab strip to the bar: overflowing tabs (and the active tab's
     // close button) must never spill past the panel into neighbouring leaves.
@@ -224,6 +224,7 @@ export class dock_system {
       const tab = leaf.tabs[i]
       const tw = tab_width(tab.title, scale, measure(tab.title))
       const active = tab.id === leaf.active_tab_id
+      const label_pad = 6 * scale
       const hover = point_in(input, cursor, leaf.y, tw, bar_h)
       if (active) {
         ui.fill_round_rect_per_corner(cursor, leaf.y, tw, bar_h, radius, radius, 0, 0, col('panel'))
@@ -237,9 +238,9 @@ export class dock_system {
       const close_w = closable && active ? 16 * scale : 0
       const label_y = ui.text_v_center_y(leaf.y, bar_h, font_px) + 2 * scale
       ui.push_clip(cursor, leaf.y, tw - close_w, bar_h)
-      ui.draw_text(cursor + 10 * scale, label_y, tab.title, font_px, label_color)
+      ui.draw_text(cursor + label_pad, label_y, tab.title, font_px, label_color)
       const label_cy = leaf.y + bar_h * 0.5 + 2 * scale
-      if (tab.dirty) ui.fill_circle(cursor + 10 * scale + measure(tab.title) + 6 * scale, label_cy, 2.5 * scale, col('accent'))
+      if (tab.dirty) ui.fill_circle(cursor + label_pad + measure(tab.title) + 6 * scale, label_cy, 2.5 * scale, col('accent'))
       ui.pop_clip()
 
       // Activate on press; arm a drag.

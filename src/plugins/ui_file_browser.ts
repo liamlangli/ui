@@ -10,6 +10,14 @@ import type { theme_definition, theme_slot } from '../ui_types'
 import { draw_icon } from '../ui_icon'
 import { FONT_MAIN, ui_renderer } from '../ui_renderer'
 import type { ui_input_snapshot, ui_input_text_state, ui_scroll_state, ui_widgets } from '../ui_widgets'
+import {
+  STACK_ALIGN_CENTER_VERT,
+  STACK_ALIGN_TOP_LEFT,
+  STACK_ALIGN_TOP_RIGHT,
+  layout_hstack_into,
+  layout_vstack_into,
+  layout_zstack_into,
+} from '../ui_stack_layout'
 import { hori_split_view, type hori_split_view_state } from './ui_hori_split_view'
 
 export interface file_node {
@@ -238,6 +246,21 @@ export function file_browser(
 // --- rich browser ---------------------------------------------------------
 
 type rich_tree_row = { path: string; name: string; depth: number; has_children: boolean; collapsed: boolean }
+type layout_rect = { x: number; y: number; w: number; h: number }
+
+function rect_at(rects: ArrayLike<number>, index: number): layout_rect {
+  const offset = index * 4
+  return { x: rects[offset], y: rects[offset + 1], w: rects[offset + 2], h: rects[offset + 3] }
+}
+
+function inset_rect(rect: layout_rect, x_pad: number, y_pad: number): layout_rect {
+  return {
+    x: rect.x + x_pad,
+    y: rect.y + y_pad,
+    w: Math.max(0, rect.w - x_pad * 2),
+    h: Math.max(0, rect.h - y_pad * 2),
+  }
+}
 
 function rich_file_browser(
   ui: ui_renderer,
@@ -260,47 +283,64 @@ function rich_file_browser(
 
   const gap = 2 * scale
   const show_tree = options?.show_tree !== false
-  const btn_h = 20 * scale
+  const btn_h = 18 * scale
+  const input_h = 24 * scale
   const toolbar_active = (options?.toolbar?.length ?? 0) > 0 || options?.view_toggle === true
-  const toolbar_y = y + gap
-  const toolbar_h = btn_h
-  let bx = x
+  const search_enabled = options?.search !== false
+  const toolbar_search_w = search_enabled && !show_tree ? Math.min(210 * scale, Math.max(130 * scale, w * 0.28)) : 0
+  const toolbar_h = toolbar_active ? Math.max(btn_h, toolbar_search_w > 0 ? input_h : 0) : 0
+  const root_gap = toolbar_active ? gap : 0
+  const body_h = Math.max(0, h - toolbar_h - root_gap)
+  const root_sizes = [w, toolbar_h, w, body_h]
+  const root_rects = [0, 0, 0, 0, 0, 0, 0, 0]
+  layout_vstack_into(x, y + root_gap, w, Math.max(0, h - root_gap), root_sizes, 2, root_rects, STACK_ALIGN_TOP_LEFT, false, root_gap)
+  const toolbar_rect = rect_at(root_rects, 0)
+  const body_rect = rect_at(root_rects, 1)
+
+  const toolbar_count = (options?.toolbar?.length ?? 0) + (options?.view_toggle === true ? 2 : 0)
+  const toolbar_sizes: number[] = []
+  for (const btn of options?.toolbar ?? []) toolbar_sizes.push(Math.ceil(ui.text_width(btn.label, 7.5 * scale) + 8 * scale), btn_h)
+  if (options?.view_toggle === true) {
+    toolbar_sizes.push(Math.ceil(ui.text_width('List', 7.5 * scale) + 10 * scale), btn_h)
+    toolbar_sizes.push(Math.ceil(ui.text_width('Grid', 7.5 * scale) + 10 * scale), btn_h)
+  }
+  const toolbar_item_rects = new Array(toolbar_count * 4).fill(0)
+  if (toolbar_count > 0) {
+    layout_hstack_into(toolbar_rect.x, toolbar_rect.y, toolbar_rect.w, toolbar_rect.h, toolbar_sizes, toolbar_count, toolbar_item_rects, STACK_ALIGN_CENTER_VERT, false, 6 * scale)
+  }
+  let toolbar_item = 0
 
   for (const btn of options?.toolbar ?? []) {
-    const bw = Math.ceil(ui.text_width(btn.label, 7.5 * scale) + 8 * scale)
-    draw_toolbar_button(ui, input, bx, toolbar_y, bw, btn_h, btn.label, !!btn.active, scale, col)
-    if (point_in(input, bx, toolbar_y, bw, btn_h) && input.mouse_pressed) event.toolbar_clicked = btn.id
-    bx += bw + 6 * scale
+    const r = rect_at(toolbar_item_rects, toolbar_item++)
+    draw_toolbar_button(ui, input, r.x, r.y, r.w, r.h, btn.label, !!btn.active, scale, col)
+    if (point_in(input, r.x, r.y, r.w, r.h) && input.mouse_pressed) event.toolbar_clicked = btn.id
   }
 
   if (options?.view_toggle === true) {
     const modes: file_browser_view_mode[] = ['list', 'grid']
     for (const mode of modes) {
+      const r = rect_at(toolbar_item_rects, toolbar_item++)
       const label = mode === 'list' ? 'List' : 'Grid'
-      const bw = Math.ceil(ui.text_width(label, 7.5 * scale) + 10 * scale)
       const active = (options?.view_mode ?? state.view_mode) === mode
-      draw_toolbar_button(ui, input, bx, toolbar_y, bw, btn_h, label, active, scale, col)
-      if (point_in(input, bx, toolbar_y, bw, btn_h) && input.mouse_pressed) {
+      draw_toolbar_button(ui, input, r.x, r.y, r.w, r.h, label, active, scale, col)
+      if (point_in(input, r.x, r.y, r.w, r.h) && input.mouse_pressed) {
         state.view_mode = mode
         event.view_mode_changed = mode
       }
-      bx += bw + 4 * scale
     }
   }
 
-  const search_enabled = options?.search !== false
-  const toolbar_search_w = search_enabled && !show_tree ? Math.min(210 * scale, Math.max(130 * scale, w * 0.28)) : 0
-  const toolbar_search_x = toolbar_search_w > 0 ? x + w - toolbar_search_w : x + w
   if (toolbar_active && toolbar_search_w > 0) {
-    draw_search_field(ui, input, toolbar_search_x, toolbar_y, toolbar_search_w, btn_h, state, event, scale, col, options?.widgets)
+    const search_rects = [0, 0, 0, 0]
+    layout_zstack_into(toolbar_rect.x, toolbar_rect.y, toolbar_rect.w, toolbar_rect.h, [toolbar_search_w, input_h], 1, search_rects, STACK_ALIGN_TOP_RIGHT)
+    const search_rect = rect_at(search_rects, 0)
+    draw_search_field(ui, input, search_rect.x, search_rect.y, search_rect.w, search_rect.h, state, event, scale, col, options?.widgets)
   }
 
-  const body_y = toolbar_active ? toolbar_y + toolbar_h + gap : y
-  const body_h = Math.max(0, y + h - body_y)
   const min_left = 140 * scale
   const min_right = 160 * scale
   state.split_view ??= { ratio: state.split_ratio ?? 0.32 }
-  const split = hori_split_view(ui, input, x, body_y, w, body_h, state.split_view, {
+  const split = hori_split_view(ui, input, body_rect.x, body_rect.y, body_rect.w, body_rect.h, state.split_view, {
     show_left: show_tree,
     min_left,
     min_right,
@@ -319,23 +359,27 @@ function rich_file_browser(
     const panel_r = 7 * scale
     ui.fill_round_rect(tree_rect.x, tree_rect.y, tree_rect.w, tree_rect.h, panel_r, col('panel'))
     const search_pad = 6 * scale
-    const tree_list_rect = { ...tree_rect }
-    if (search_enabled && tree_rect.w > search_pad * 2 && tree_rect.h > btn_h + search_pad * 2) {
+    const search_tree_gap = 0
+    let tree_list_rect = tree_rect
+    if (search_enabled && tree_rect.w > search_pad * 2 && tree_rect.h > input_h + search_pad + search_tree_gap) {
+      const tree_sizes = [tree_rect.w - search_pad * 2, input_h, tree_rect.w, Math.max(0, tree_rect.h - input_h - search_pad - search_tree_gap)]
+      const tree_rects = [0, 0, 0, 0, 0, 0, 0, 0]
+      layout_vstack_into(tree_rect.x, tree_rect.y + search_pad, tree_rect.w, tree_rect.h - search_pad, tree_sizes, 2, tree_rects, STACK_ALIGN_TOP_LEFT, false, search_tree_gap)
+      const tree_search_rect = rect_at(tree_rects, 0)
+      tree_list_rect = rect_at(tree_rects, 1)
       draw_search_field(
         ui,
         input,
-        tree_rect.x + search_pad,
-        tree_rect.y + search_pad,
-        tree_rect.w - search_pad * 2,
-        btn_h,
+        tree_search_rect.x + search_pad,
+        tree_search_rect.y,
+        tree_search_rect.w,
+        tree_search_rect.h,
         state,
         event,
         scale,
         col,
         options?.widgets,
       )
-      tree_list_rect.y += btn_h + search_pad * 2
-      tree_list_rect.h = Math.max(0, tree_list_rect.h - btn_h - search_pad * 2)
     }
     draw_folder_tree(ui, input, tree_list_rect, flatten_folder_tree(folders, state.collapsed ?? new Set()), state, font_px, scale, col, event)
   }
@@ -348,28 +392,31 @@ function rich_file_browser(
   const panel_r = 7 * scale
   ui.fill_round_rect_per_corner(content_rect.x, content_rect.y, content_rect.w, content_rect.h, 0, 0, 0, panel_r, col('bg'))
   const content_pad = 6 * scale
-  const content_header_h = btn_h + content_pad
-  const breadcrumb_x = content_rect.x + content_pad
-  const breadcrumb_y = content_rect.y + content_pad
+  const content_header_pad_y = 3 * scale
+  const content_header_h = input_h + content_header_pad_y * 2
   const content_search_w = !show_tree && search_enabled ? Math.min(210 * scale, Math.max(130 * scale, content_rect.w * 0.34)) : 0
-  const content_search_x = content_search_w > 0 ? content_rect.x + content_rect.w - content_pad - content_search_w : content_rect.x + content_rect.w - content_pad
-  const breadcrumb_w = Math.max(0, content_search_x - breadcrumb_x - 8 * scale)
-  ui.push_clip(breadcrumb_x, breadcrumb_y, breadcrumb_w, btn_h)
-  draw_breadcrumb(ui, breadcrumb_x, breadcrumb_y, btn_h, state.selected_folder ?? '', input, font_px, scale, (path) => {
+  const content_sizes = [content_rect.w, content_header_h, content_rect.w, Math.max(0, content_rect.h - content_header_h)]
+  const content_rects = [0, 0, 0, 0, 0, 0, 0, 0]
+  layout_vstack_into(content_rect.x, content_rect.y, content_rect.w, content_rect.h, content_sizes, 2, content_rects)
+  const content_header_rect = rect_at(content_rects, 0)
+  const entries_rect = rect_at(content_rects, 1)
+  const header_inner = inset_rect(content_header_rect, content_pad, content_header_pad_y)
+  const header_gap = content_search_w > 0 ? 8 * scale : 0
+  const breadcrumb_w = Math.max(0, header_inner.w - content_search_w - header_gap)
+  const header_sizes = content_search_w > 0 ? [breadcrumb_w, btn_h, content_search_w, input_h] : [header_inner.w, btn_h]
+  const header_rects = content_search_w > 0 ? [0, 0, 0, 0, 0, 0, 0, 0] : [0, 0, 0, 0]
+  layout_hstack_into(header_inner.x, header_inner.y, header_inner.w, header_inner.h, header_sizes, content_search_w > 0 ? 2 : 1, header_rects, STACK_ALIGN_CENTER_VERT, false, header_gap)
+  const breadcrumb_rect = rect_at(header_rects, 0)
+  ui.push_clip(breadcrumb_rect.x, breadcrumb_rect.y, breadcrumb_rect.w, breadcrumb_rect.h)
+  draw_breadcrumb(ui, breadcrumb_rect.x, breadcrumb_rect.y, breadcrumb_rect.h, state.selected_folder ?? '', input, font_px, scale, (path) => {
     state.selected_folder = path
     state.selected_paths = []
     event.folder_selected = path
   }, col)
   ui.pop_clip()
   if (content_search_w > 0) {
-    draw_search_field(ui, input, content_search_x, breadcrumb_y, content_search_w, btn_h, state, event, scale, col, options?.widgets)
-  }
-
-  const entries_rect = {
-    x: content_rect.x,
-    y: content_rect.y + content_header_h,
-    w: content_rect.w,
-    h: Math.max(0, content_rect.h - content_header_h),
+    const content_search_rect = rect_at(header_rects, 1)
+    draw_search_field(ui, input, content_search_rect.x, content_search_rect.y, content_search_rect.w, content_search_rect.h, state, event, scale, col, options?.widgets)
   }
   if ((options?.view_mode ?? state.view_mode) === 'list') {
     draw_entry_list(ui, input, entries_rect, visible_entries, state, font_px, scale, col, event)
@@ -533,8 +580,10 @@ function draw_folder_tree(
   event: file_browser_event,
 ): void {
   const row_h = 22 * scale
+  const top_pad = 10 * scale
+  const bottom_pad = 12 * scale
   const scroll = state.tree_scroll ?? { offset_y: 0 }
-  const content_h = rows.length * row_h + 12 * scale
+  const content_h = rows.length * row_h + top_pad + bottom_pad
   const scrollbar_w = content_h > rect.h ? 7 * scale : 0
   const max_off = Math.max(0, content_h - rect.h)
   if (point_in(input, rect.x, rect.y, rect.w, rect.h) && input.wheel_y) {
@@ -544,7 +593,7 @@ function draw_folder_tree(
   state.tree_scroll = scroll
 
   ui.push_clip(rect.x, rect.y, rect.w, rect.h)
-  let ry = rect.y + 6 * scale - scroll.offset_y
+  let ry = rect.y + top_pad - scroll.offset_y
   for (const row of rows) {
     if (ry + row_h >= rect.y && ry <= rect.y + rect.h) {
       const active = row.path === state.selected_folder
@@ -667,8 +716,9 @@ function draw_entry_list(
   event: file_browser_event,
 ): void {
   const row_h = 24 * scale
-  const header_h = 22 * scale
+  const header_h = 20 * scale
   const pad = 8 * scale
+  const header_pad = 6 * scale
   const content_h = header_h + entries.length * row_h + pad
   const max_off = Math.max(0, content_h - rect.h)
   const over_list = point_in(input, rect.x, rect.y, rect.w, rect.h)
@@ -683,8 +733,8 @@ function draw_entry_list(
   const type_x = rect.x + Math.max(150 * scale, rect.w * 0.46)
   const path_x = rect.x + Math.max(230 * scale, rect.w * 0.64)
   ui.push_clip(rect.x, rect.y, rect.w, rect.h)
-  ui.fill_round_rect(rect.x + 3 * scale, rect.y + 3 * scale, Math.max(0, rect.w - 6 * scale), Math.max(0, header_h - 3 * scale), 6 * scale, col('panel_alt'))
-  ui.draw_text(rect.x + pad, ui.text_v_center_y(rect.y, header_h, 6.5 * scale), 'Name', 6.5 * scale, col('text_dim'))
+  ui.fill_round_rect(rect.x + 2 * scale, rect.y + 2 * scale, Math.max(0, rect.w - 4 * scale), Math.max(0, header_h - 2 * scale), 5 * scale, col('panel_alt'))
+  ui.draw_text(rect.x + header_pad, ui.text_v_center_y(rect.y, header_h, 6.5 * scale), 'Name', 6.5 * scale, col('text_dim'))
   ui.draw_text(type_x, ui.text_v_center_y(rect.y, header_h, 6.5 * scale), 'Type', 6.5 * scale, col('text_dim'))
   ui.draw_text(path_x, ui.text_v_center_y(rect.y, header_h, 6.5 * scale), 'Path', 6.5 * scale, col('text_dim'))
 

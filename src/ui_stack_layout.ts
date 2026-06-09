@@ -1,14 +1,14 @@
 import type { theme_definition } from './ui_types'
-import {
+import type {
   ui_widgets,
-  type ui_color_rgba,
-  type ui_input_snapshot,
-  type ui_input_text_state,
-  type ui_number_input_state,
-  type ui_scroll_state,
-  type ui_text_view_line,
-  type ui_text_view_options,
-  type ui_text_view_state,
+  ui_color_rgba,
+  ui_input_snapshot,
+  ui_input_text_state,
+  ui_number_input_state,
+  ui_scroll_state,
+  ui_text_view_line,
+  ui_text_view_options,
+  ui_text_view_state,
 } from './ui_widgets'
 
 export const STACK_ALIGN_TOP = 1 << 0
@@ -23,6 +23,32 @@ export const STACK_ALIGN_TOP_RIGHT = STACK_ALIGN_TOP | STACK_ALIGN_RIGHT
 export const STACK_ALIGN_BOTTOM_LEFT = STACK_ALIGN_BOTTOM | STACK_ALIGN_LEFT
 export const STACK_ALIGN_BOTTOM_RIGHT = STACK_ALIGN_BOTTOM | STACK_ALIGN_RIGHT
 export const STACK_ALIGN_CENTER = STACK_ALIGN_CENTER_VERT | STACK_ALIGN_CENTER_HORI
+
+export const stack_layout_debug = {
+  wireframe_hovered_stack: false,
+}
+
+export function set_stack_layout_debug_wireframe(enabled: boolean): void {
+  stack_layout_debug.wireframe_hovered_stack = enabled
+}
+
+type stack_layout_debug_sink = (x: number, y: number, w: number, h: number) => void
+
+let stack_layout_debug_pointer: Pick<ui_input_snapshot, 'mouse_x' | 'mouse_y'> | null = null
+let stack_layout_debug_sink: stack_layout_debug_sink | null = null
+
+export function set_stack_layout_debug_context(input: Pick<ui_input_snapshot, 'mouse_x' | 'mouse_y'> | null, sink: stack_layout_debug_sink | null): void {
+  stack_layout_debug_pointer = input
+  stack_layout_debug_sink = sink
+}
+
+function queue_stack_layout_debug_wireframe(x: number, y: number, w: number, h: number): void {
+  const pointer = stack_layout_debug_pointer
+  const sink = stack_layout_debug_sink
+  if (!sink || !pointer || !stack_layout_debug.wireframe_hovered_stack || w <= 0 || h <= 0) return
+  if (pointer.mouse_x < x || pointer.mouse_y < y || pointer.mouse_x >= x + w || pointer.mouse_y >= y + h) return
+  sink(x, y, w, h)
+}
 
 export type stack_kind = 'vstack' | 'hstack' | 'zstack'
 
@@ -152,6 +178,7 @@ export function layout_stack_params_into(
   out_stride = 4,
 ): void {
   count = Math.max(0, count | 0)
+  queue_stack_layout_debug_wireframe(x, y, w, h)
 
   if (kind === 'zstack') {
     for (let i = 0; i < count; i += 1) {
@@ -245,6 +272,7 @@ export function layout_stack_rects_into(options: stack_layout_options, sizes: Ar
   const y = options.y
   const w = options.w
   const h = options.h
+  queue_stack_layout_debug_wireframe(x, y, w, h)
   const alignment = options.alignment ?? STACK_ALIGN_TOP_LEFT
   const reverse = options.reverse === true
   const gap = options.gap ?? 0
@@ -397,6 +425,8 @@ export class stack_ui_layout {
     } else {
       this.cursor = align_main_start(this.alignment, this.x, this.w, this.main_used, STACK_ALIGN_LEFT, STACK_ALIGN_RIGHT, STACK_ALIGN_CENTER_HORI)
     }
+
+    if (!this.rects || !this.sizes) queue_stack_layout_debug_wireframe(this.x, this.y, this.w, this.h)
   }
 
   vstack(x: number, y: number, w: number, h: number, count: number, options?: stack_widget_axis_options): void {

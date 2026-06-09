@@ -17,6 +17,7 @@ import {
   pack_color,
   create_text_view_state,
   create_stack_ui_layout,
+  set_stack_layout_debug_wireframe,
   type stack_ui_layout,
   FONT_MONO,
   type theme_definition,
@@ -743,6 +744,7 @@ function render_gallery(
   const cx = x + pad
   const sec = 22 * scale // section row height
   const ctrl = 28 * scale // control row height
+  set_stack_layout_debug_wireframe(gallery.toggle_b)
 
   // A single vertical stack drives the whole panel: each section label and its
   // control is just the next slot, so there is no x/y cursor bookkeeping here.
@@ -765,6 +767,7 @@ function render_gallery(
   stack.section(sec, 'TOGGLES')
   gallery.toggle_a = stack.toggle('g_tg_a', 20 * scale, gallery.toggle_a, 'Enable shadows')
   gallery.toggle_b = stack.toggle('g_tg_b', 20 * scale, gallery.toggle_b, 'Wireframe overlay')
+  set_stack_layout_debug_wireframe(gallery.toggle_b)
 
   stack.section(sec, 'SLIDER')
   gallery.slider = stack.slider('g_sl', { w: col_w - 60 * scale, h: 18 * scale }, gallery.slider, 0, 1, true)
