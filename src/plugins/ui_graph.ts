@@ -3,7 +3,8 @@
 // A reusable node editor surface: it draws a pannable / zoomable grid, nodes
 // with typed input/output pins, bezier wires between them, a marquee selection
 // box and a floating link draft, and it owns all of the interaction (pan, zoom,
-// node drag, marquee select, wire drag-to-connect). It is deliberately
+// node drag, marquee select, wire drag-to-connect, click-a-pin or alt-click-a-
+// wire to disconnect). It is deliberately
 // *content-agnostic*: the host owns the node and link arrays and describes each
 // node through a `graph_node_view` (title + pins), so the same canvas drives a
 // shader graph, a render graph, a material graph, a logic graph, …
@@ -129,6 +130,8 @@ export interface graph_event {
   node_pressed?: graph_id
   /** A wire was created and pushed onto the `links` array. */
   link_created?: graph_link
+  /** One or more wires were removed this frame (pin click or alt-click on a wire). */
+  link_removed?: boolean
   /** One or more nodes finished a move this frame. */
   nodes_moved?: boolean
   /** Right-click on empty canvas: the host should open a create menu here. */
@@ -184,6 +187,11 @@ export function graph_canvas<N extends graph_node_base>(
   const origin_y = y + 18 * scale + state.pan_y * scale
   const event: graph_event = {}
 
+  // O(1) node lookup, shared by wire drawing, link commit and disconnects —
+  // replaces the per-link linear `nodes.find` scans the draw loop used to do.
+  const by_id = new Map<graph_id, N>()
+  for (const node of nodes) by_id.set(node.id, node)
+
   // --- Layout helpers ----------------------------------------------------
   const view_of = new Map<graph_id, graph_node_view>()
   const get_view = (node: N): graph_node_view => {
@@ -202,6 +210,77 @@ export function graph_canvas<N extends graph_node_base>(
   }
   const slot_cy = (ny: number, i: number) => ny + (HEADER_H + BODY_PAD + SLOT_ROW_H * (i + 0.5)) * gs
   const inside = input.mouse_x >= x && input.mouse_x < x + w && input.mouse_y >= y && input.mouse_y < y + h
+
+  // --- Wire hit testing via a uniform spatial grid -----------------------
+  // Bucketing each wire's bounding box into screen-space cells turns "which
+  // wire is under the cursor?" into a lookup of a handful of nearby cells
+  // instead of a distance test against every link. Built lazily — only when an
+  // alt-click actually needs to cut a wire — and cached for the frame.
+  const wire_thresh = Math.max(6, 6 * gs)
+  const cell_size = Math.max(32, 64 * gs)
+  let wire_grid: Map<number, number[]> | null = null
+  const cell_key = (cx: number, cy: number) => (cx & 0xffff) * 0x10000 + (cy & 0xffff)
+  const build_wire_grid = (): Map<number, number[]> => {
+    const grid = new Map<number, number[]>()
+    for (let li = 0; li < links.length; li += 1) {
+      const link = links[li]
+      const src = by_id.get(link.src_node)
+      const dst = by_id.get(link.dst_node)
+      if (!src || !dst) continue
+      if (!get_view(src).outputs[link.src_pin] || !get_view(dst).inputs[link.dst_pin]) continue
+      const s = node_screen(src)
+      const d = node_screen(dst)
+      const x0 = s.nx + node_w * gs
+      const y0 = slot_cy(s.ny, link.src_pin)
+      const x1 = d.nx
+      const y1 = slot_cy(d.ny, link.dst_pin)
+      const bend = Math.max(24 * gs, Math.abs(x1 - x0) * 0.35)
+      const minx = Math.min(x0, x1, x0 + bend, x1 - bend) - wire_thresh
+      const maxx = Math.max(x0, x1, x0 + bend, x1 - bend) + wire_thresh
+      const miny = Math.min(y0, y1) - wire_thresh
+      const maxy = Math.max(y0, y1) + wire_thresh
+      for (let cx = Math.floor(minx / cell_size); cx <= Math.floor(maxx / cell_size); cx += 1) {
+        for (let cy = Math.floor(miny / cell_size); cy <= Math.floor(maxy / cell_size); cy += 1) {
+          const k = cell_key(cx, cy)
+          const bucket = grid.get(k)
+          if (bucket) bucket.push(li)
+          else grid.set(k, [li])
+        }
+      }
+    }
+    return grid
+  }
+  // Nearest wire to (px,py) within the pick threshold, or -1. Only the cells
+  // around the cursor are scanned, then candidates get a precise curve test.
+  const hit_wire = (px: number, py: number): number => {
+    if (!wire_grid) wire_grid = build_wire_grid()
+    const ccx = Math.floor(px / cell_size)
+    const ccy = Math.floor(py / cell_size)
+    let best = -1
+    let best_d = wire_thresh
+    const seen = new Set<number>()
+    for (let cx = ccx - 1; cx <= ccx + 1; cx += 1) {
+      for (let cy = ccy - 1; cy <= ccy + 1; cy += 1) {
+        const bucket = wire_grid.get(cell_key(cx, cy))
+        if (!bucket) continue
+        for (const li of bucket) {
+          if (seen.has(li)) continue
+          seen.add(li)
+          const link = links[li]
+          const src = by_id.get(link.src_node)!
+          const dst = by_id.get(link.dst_node)!
+          const s = node_screen(src)
+          const d = node_screen(dst)
+          const dd = dist_to_bezier(px, py, s.nx + node_w * gs, slot_cy(s.ny, link.src_pin), d.nx, slot_cy(d.ny, link.dst_pin), gs)
+          if (dd < best_d) {
+            best_d = dd
+            best = li
+          }
+        }
+      }
+    }
+    return best
+  }
 
   // --- Hit testing (topmost wins) ----------------------------------------
   const pin_r = Math.max(5, 8 * gs)
@@ -241,7 +320,17 @@ export function graph_canvas<N extends graph_node_base>(
       graph_y: (input.mouse_y - origin_y) / pos_scale,
     }
   }
-  if (inside && input.mouse_pressed && !state._pan) {
+  // Alt-click cuts the wire under the cursor; it never starts another gesture.
+  let alt_cut = false
+  if (inside && input.mouse_pressed && input.alt && !state._pan) {
+    alt_cut = true
+    const li = hit_pin ? -1 : hit_wire(input.mouse_x, input.mouse_y)
+    if (li >= 0) {
+      links.splice(li, 1)
+      event.link_removed = true
+    }
+  }
+  if (inside && input.mouse_pressed && !alt_cut && !state._pan) {
     if (hit_pin) {
       state._link = { node: hit_pin.node.id, pin: hit_pin.pin, is_output: hit_pin.is_output }
     } else if (hit_node) {
@@ -316,14 +405,15 @@ export function graph_canvas<N extends graph_node_base>(
     }
   }
 
-  // --- Release: commit link draft ----------------------------------------
+  // --- Release: commit link draft, or disconnect on a same-pin click ------
   if (state._link && !input.mouse_down) {
     const draft = state._link
+    const on_start_pin = hit_pin && hit_pin.node.id === draft.node && hit_pin.pin === draft.pin && hit_pin.is_output === draft.is_output
     if (hit_pin && hit_pin.is_output !== draft.is_output) {
       const out = draft.is_output ? draft : { node: hit_pin.node.id, pin: hit_pin.pin }
       const inp = draft.is_output ? { node: hit_pin.node.id, pin: hit_pin.pin } : draft
-      const out_node = nodes.find((n) => n.id === out.node)
-      const in_node = nodes.find((n) => n.id === inp.node)
+      const out_node = by_id.get(out.node)
+      const in_node = by_id.get(inp.node)
       if (out_node && in_node && out.node !== inp.node) {
         const ok = compatible(get_view(out_node).outputs[out.pin]?.kind ?? '', get_view(in_node).inputs[inp.pin]?.kind ?? '')
         if (ok) {
@@ -334,6 +424,19 @@ export function graph_canvas<N extends graph_node_base>(
           const link: graph_link = { src_node: out.node, src_pin: out.pin, dst_node: inp.node, dst_pin: inp.pin }
           links.push(link)
           event.link_created = link
+        }
+      }
+    } else if (on_start_pin) {
+      // Pressed and released on the same pin without dragging to a target:
+      // treat it as a click and drop every wire attached to that pin.
+      for (let i = links.length - 1; i >= 0; i -= 1) {
+        const l = links[i]
+        const touches = draft.is_output
+          ? l.src_node === draft.node && l.src_pin === draft.pin
+          : l.dst_node === draft.node && l.dst_pin === draft.pin
+        if (touches) {
+          links.splice(i, 1)
+          event.link_removed = true
         }
       }
     }
@@ -357,8 +460,8 @@ export function graph_canvas<N extends graph_node_base>(
 
   // Committed wires (under the nodes).
   for (const link of links) {
-    const src = nodes.find((n) => n.id === link.src_node)
-    const dst = nodes.find((n) => n.id === link.dst_node)
+    const src = by_id.get(link.src_node)
+    const dst = by_id.get(link.dst_node)
     if (!src || !dst) continue
     const sv = get_view(src)
     const dv = get_view(dst)
@@ -373,7 +476,7 @@ export function graph_canvas<N extends graph_node_base>(
 
   // Link draft following the cursor.
   if (state._link) {
-    const src = nodes.find((n) => n.id === state._link!.node)
+    const src = by_id.get(state._link.node)
     if (src) {
       const v = get_view(src)
       const pin = state._link.is_output ? v.outputs[state._link.pin] : v.inputs[state._link.pin]
@@ -404,10 +507,11 @@ export function graph_canvas<N extends graph_node_base>(
     ui.pop_clip()
 
     const pin_size = Math.max(3, 6 * gs)
+    const pin_radius = Math.max(1, pin_size * 0.3)
     for (let i = 0; i < view.inputs.length; i += 1) {
       const pin = view.inputs[i]
       const cy = slot_cy(ny, i)
-      ui.fill_rect(nx - pin_size * 0.5, cy - pin_size * 0.5, pin_size, pin_size, pin.color ?? options?.pin_color?.(pin.kind, true) ?? pin_hue_color(pin.kind, true))
+      ui.fill_round_rect(nx - pin_size * 0.5, cy - pin_size * 0.5, pin_size, pin_size, pin_radius, pin.color ?? options?.pin_color?.(pin.kind, true) ?? pin_hue_color(pin.kind, true))
       ui.draw_text(nx + 9 * gs, ui.text_v_center_y(cy - 6 * gs, 12 * gs, pin_font), pin.label, pin_font, col('text_dim'))
     }
     for (let i = 0; i < view.outputs.length; i += 1) {
@@ -415,7 +519,7 @@ export function graph_canvas<N extends graph_node_base>(
       const cy = slot_cy(ny, i)
       const lw = ui.text_width(pin.label, pin_font)
       ui.draw_text(nx + nw - lw - 10 * gs, ui.text_v_center_y(cy - 6 * gs, 12 * gs, pin_font), pin.label, pin_font, col('text_dim'))
-      ui.fill_rect(nx + nw - pin_size * 0.5, cy - pin_size * 0.5, pin_size, pin_size, pin.color ?? options?.pin_color?.(pin.kind, false) ?? pin_hue_color(pin.kind, false))
+      ui.fill_round_rect(nx + nw - pin_size * 0.5, cy - pin_size * 0.5, pin_size, pin_size, pin_radius, pin.color ?? options?.pin_color?.(pin.kind, false) ?? pin_hue_color(pin.kind, false))
     }
 
     if (options?.render_body) {
@@ -470,14 +574,13 @@ function draw_grid(
   hz(major, border)
 }
 
-function draw_bezier(ui: ui_renderer, x0: number, y0: number, x1: number, y1: number, line_w: number, rgba: number, gs: number): void {
+// Sample the wire's cubic into a flat point list. The horizontal-only control
+// handles give the classic node-graph S-curve; shared by drawing and hit testing.
+function bezier_points(x0: number, y0: number, x1: number, y1: number, gs: number): Float32Array {
   const bend = Math.max(24 * gs, Math.abs(x1 - x0) * 0.35)
   const cx0 = x0 + bend
   const cx1 = x1 - bend
   const steps = Math.max(12, Math.ceil(Math.abs(x1 - x0) / Math.max(14 * gs, 1)))
-  // Sample the curve into a flat point list and stroke it as one continuous
-  // ribbon so the segments share mitered joins and a single feathered outline,
-  // instead of a chain of overlapping per-segment quads.
   const pts = new Float32Array((steps + 1) * 2)
   pts[0] = x0
   pts[1] = y0
@@ -487,7 +590,36 @@ function draw_bezier(ui: ui_renderer, x0: number, y0: number, x1: number, y1: nu
     pts[i * 2 + 0] = mt * mt * mt * x0 + 3 * mt * mt * t * cx0 + 3 * mt * t * t * cx1 + t * t * t * x1
     pts[i * 2 + 1] = mt * mt * mt * y0 + 3 * mt * mt * t * y0 + 3 * mt * t * t * y1 + t * t * t * y1
   }
-  ui.stroke_polyline(pts, steps + 1, line_w, rgba, gs)
+  return pts
+}
+
+function draw_bezier(ui: ui_renderer, x0: number, y0: number, x1: number, y1: number, line_w: number, rgba: number, gs: number): void {
+  // Stroke the sampled curve as one continuous ribbon so the segments share
+  // mitered joins and a single feathered outline, instead of a chain of
+  // overlapping per-segment quads.
+  const pts = bezier_points(x0, y0, x1, y1, gs)
+  ui.stroke_polyline(pts, pts.length / 2, line_w, rgba, gs)
+}
+
+/** Shortest distance from a point to the sampled wire curve, in physical px. */
+function dist_to_bezier(px: number, py: number, x0: number, y0: number, x1: number, y1: number, gs: number): number {
+  const pts = bezier_points(x0, y0, x1, y1, gs)
+  let best = Infinity
+  for (let i = 0; i + 3 < pts.length; i += 2) {
+    const d = dist_point_segment(px, py, pts[i], pts[i + 1], pts[i + 2], pts[i + 3])
+    if (d < best) best = d
+  }
+  return best
+}
+
+function dist_point_segment(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {
+  const dx = bx - ax
+  const dy = by - ay
+  const len2 = dx * dx + dy * dy
+  const t = len2 > 0 ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / len2)) : 0
+  const cx = ax + t * dx
+  const cy = ay + t * dy
+  return Math.hypot(px - cx, py - cy)
 }
 
 function clamp(v: number, lo: number, hi: number): number {

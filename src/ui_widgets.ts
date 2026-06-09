@@ -29,6 +29,8 @@ export interface ui_input_snapshot {
   ctrl?: boolean
   /** Cmd / Meta modifier (macOS) — used for Cmd+C / Cmd+A in the text view. */
   meta?: boolean
+  /** Alt / Option modifier — used by the graph plugin to alt-click a wire to cut it. */
+  alt?: boolean
   key_up?: boolean
   key_down?: boolean
   key_page_up?: boolean

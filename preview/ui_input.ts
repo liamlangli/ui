@@ -18,6 +18,7 @@ export class input_collector {
   private ctrl = false
   private meta = false
   private shift = false
+  private alt = false
   private readonly ime: HTMLTextAreaElement
   private native_active = false
   private composition = ''
@@ -128,6 +129,7 @@ export class input_collector {
       this.ctrl = e.ctrlKey
       this.meta = e.metaKey
       this.shift = e.shiftKey
+      this.alt = e.altKey
       // Printable text (ignore when a modifier that implies a shortcut is held).
       if (!this.native_active && e.key.length === 1 && !e.ctrlKey && !e.metaKey) this.typed += e.key
       // Keep browser focus shortcuts working but prevent scrolling on space etc.
@@ -143,6 +145,7 @@ export class input_collector {
       this.ctrl = e.ctrlKey
       this.meta = e.metaKey
       this.shift = e.shiftKey
+      this.alt = e.altKey
       wake()
     })
 
@@ -215,6 +218,7 @@ export class input_collector {
     s.shift = this.shift
     s.ctrl = this.ctrl
     s.meta = this.meta
+    s.alt = this.alt
     return s
   }
 

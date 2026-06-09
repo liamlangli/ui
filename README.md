@@ -171,12 +171,16 @@ const ev = graph_canvas(renderer, theme, input, x, y, w, h, nodes, links, gstate
   render_body: (node, view, body) => draw_inline_editor(node, body), // inline node content
 })
 if (ev.link_created) recompile()
+if (ev.link_removed) recompile()                              // pin click or alt-click on a wire
 if (ev.menu_requested) open_create_menu(ev.menu_requested)    // { screen_x, screen_y, graph_x, graph_y }
 if (ev.delete_requested) remove_selected(gstate.selected)
 ```
 
-Pan and the create menu need the middle / right mouse buttons forwarded on the
-`ui_input_snapshot` (`mouse_middle_down`, `mouse_right_pressed`); selection,
+Wires are cut two ways: click a pin to drop every wire on it, or hold Alt and
+click a wire to cut just that one (a spatial grid finds the wire under the
+cursor without testing every link). Pan and the create menu need the middle /
+right mouse buttons forwarded on the `ui_input_snapshot` (`mouse_middle_down`,
+`mouse_right_pressed`), and Alt-cut needs the `alt` modifier; selection,
 node-drag, marquee, wire-drag and zoom work with the base left-button + wheel
 fields alone.
 
