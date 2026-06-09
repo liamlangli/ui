@@ -1272,6 +1272,56 @@ export class ui_renderer {
     }
   }
 
+  stroke_circle(cx: number, cy: number, radius: number, thickness: number, rgba: number, feather = 0): void {
+    if (radius <= 0) return
+    const t = Math.max(1, thickness)
+    const inner_r = Math.max(0, radius - t * 0.5)
+    const outer_r = radius + t * 0.5
+    const f = Math.max(0, feather)
+    const steps = circle_sector_count(outer_r + f)
+    if (steps <= 0) return
+    this.current_texture_id = white_texture_id
+    const u = this.white_u()
+    const v = this.white_v()
+    const transparent = transparent_color(rgba)
+    const fin_r = Math.max(0, inner_r - f)
+    const fout_r = outer_r + f
+    let p_in_x = cx + inner_r
+    let p_in_y = cy
+    let p_out_x = cx + outer_r
+    let p_out_y = cy
+    let p_fin_x = cx + fin_r
+    let p_fin_y = cy
+    let p_fout_x = cx + fout_r
+    let p_fout_y = cy
+    for (let i = 1; i <= steps; i += 1) {
+      const a = (i / steps) * Math.PI * 2
+      const ca = Math.cos(a)
+      const sa = Math.sin(a)
+      const in_x = cx + ca * inner_r
+      const in_y = cy + sa * inner_r
+      const out_x = cx + ca * outer_r
+      const out_y = cy + sa * outer_r
+      this.push_quad_points_colored(p_in_x, p_in_y, in_x, in_y, out_x, out_y, p_out_x, p_out_y, u, v, rgba, rgba, rgba, rgba)
+      if (f > 0) {
+        const fin_x = cx + ca * fin_r
+        const fin_y = cy + sa * fin_r
+        const fout_x = cx + ca * fout_r
+        const fout_y = cy + sa * fout_r
+        this.push_quad_points_colored(p_fin_x, p_fin_y, fin_x, fin_y, in_x, in_y, p_in_x, p_in_y, u, v, transparent, transparent, rgba, rgba)
+        this.push_quad_points_colored(p_out_x, p_out_y, out_x, out_y, fout_x, fout_y, p_fout_x, p_fout_y, u, v, rgba, rgba, transparent, transparent)
+        p_fin_x = fin_x
+        p_fin_y = fin_y
+        p_fout_x = fout_x
+        p_fout_y = fout_y
+      }
+      p_in_x = in_x
+      p_in_y = in_y
+      p_out_x = out_x
+      p_out_y = out_y
+    }
+  }
+
   stroke_rect(x: number, y: number, w: number, h: number, thickness: number, rgba: number, feather = 0): void {
     const t = Math.max(1, thickness)
     this.fill_rect(x, y, w, t, rgba, feather)

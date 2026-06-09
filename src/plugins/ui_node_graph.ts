@@ -217,6 +217,14 @@ export function node_graph(
   const by_id = new Map<node_graph_id, node_graph_node>()
   for (const node of nodes) by_id.set(node.id, node)
 
+  // Slots that have at least one wire attached (used to fill the slot dot).
+  const connected_inputs = new Set<string>()
+  const connected_outputs = new Set<string>()
+  for (const conn of connections) {
+    connected_outputs.add(`${conn.from_node}:${conn.from_slot}`)
+    connected_inputs.add(`${conn.to_node}:${conn.to_slot}`)
+  }
+
   // --- Layout helpers ----------------------------------------------------
   const node_screen = (node: node_graph_node) => ({ nx: origin_x + node.x * pos_scale, ny: origin_y + node.y * pos_scale })
   const node_h_px = (node: node_graph_node): number => {
@@ -481,18 +489,28 @@ export function node_graph(
     ui.pop_clip()
 
     const slot_size = Math.max(3, 6 * gs)
+    const slot_r = slot_size * 0.5
+    // Stroke ring + filled dot. Ring/feather widths stay in device pixels so the
+    // outline keeps a constant on-screen thickness as the canvas zooms.
+    const ring_w = Math.max(1, 1.2 * scale)
+    const slot_feather = scale
+    const dot_r = Math.max(1, slot_r * 0.5)
     for (let i = 0; i < node.inputs.length; i += 1) {
       const slot = node.inputs[i]
       const cy = slot_cy(ny, i)
-      ui.fill_circle(nx, cy, slot_size * 0.5, slot.color ?? options?.slot_color?.(slot.type, true) ?? slot_hue_color(slot.type, true))
+      const sc = slot.color ?? options?.slot_color?.(slot.type, true) ?? slot_hue_color(slot.type, true)
+      ui.stroke_circle(nx, cy, slot_r, ring_w, sc, slot_feather)
+      if (connected_inputs.has(`${node.id}:${i}`)) ui.fill_circle(nx, cy, dot_r, sc, slot_feather)
       ui.draw_text(nx + 9 * gs, ui.text_v_center_y(cy - 6 * gs, 12 * gs, slot_font), slot.label, slot_font, col('text_dim'))
     }
     for (let i = 0; i < node.outputs.length; i += 1) {
       const slot = node.outputs[i]
       const cy = slot_cy(ny, i)
+      const sc = slot.color ?? options?.slot_color?.(slot.type, false) ?? slot_hue_color(slot.type, false)
       const lw = ui.text_width(slot.label, slot_font)
       ui.draw_text(nx + nw - lw - 10 * gs, ui.text_v_center_y(cy - 6 * gs, 12 * gs, slot_font), slot.label, slot_font, col('text_dim'))
-      ui.fill_circle(nx + nw, cy, slot_size * 0.5, slot.color ?? options?.slot_color?.(slot.type, false) ?? slot_hue_color(slot.type, false))
+      ui.stroke_circle(nx + nw, cy, slot_r, ring_w, sc, slot_feather)
+      if (connected_outputs.has(`${node.id}:${i}`)) ui.fill_circle(nx + nw, cy, dot_r, sc, slot_feather)
     }
   }
 
