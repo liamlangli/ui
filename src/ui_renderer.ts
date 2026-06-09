@@ -1308,6 +1308,124 @@ export class ui_renderer {
     this.push_quad_points_colored(x1 - hx, y1 - hy, x1 + hx, y1 + hy, x1 + hx + ux * f, y1 + hy + uy * f, x1 - hx + ux * f, y1 - hy + uy * f, u, v, rgba, rgba, transparent, transparent)
   }
 
+  /**
+   * Stroke an open polyline as a single continuous ribbon. Interior vertices use
+   * a miter join (clamped) so segments meet without the overlap/gap a sequence of
+   * independent `stroke_line` quads produces, and the optional feather skirt runs
+   * along the whole outline for clean antialiased edges. `points` is a flat
+   * [x0, y0, x1, y1, ...] array of `point_count` vertices.
+   */
+  stroke_polyline(points: ArrayLike<number>, point_count: number, thickness: number, rgba: number, feather = 0): void {
+    if (point_count < 2) return
+    const half = Math.max(0.5, thickness * 0.5)
+    const f = Math.max(0, feather)
+    const has_feather = f > 0
+    const outer = new Float32Array(point_count * 2)
+    const inner = new Float32Array(point_count * 2)
+    const feather_outer = has_feather ? new Float32Array(point_count * 2) : null
+    const feather_inner = has_feather ? new Float32Array(point_count * 2) : null
+
+    for (let i = 0; i < point_count; i += 1) {
+      const px = points[i * 2 + 0] ?? 0
+      const py = points[i * 2 + 1] ?? 0
+      // Per-segment unit normals on either side of this vertex (perp = (-dy, dx)).
+      let n0x = 0
+      let n0y = 0
+      let has0 = false
+      if (i > 0) {
+        const dx = px - (points[(i - 1) * 2 + 0] ?? px)
+        const dy = py - (points[(i - 1) * 2 + 1] ?? py)
+        const l = Math.hypot(dx, dy)
+        if (l > 0.0001) {
+          n0x = -dy / l
+          n0y = dx / l
+          has0 = true
+        }
+      }
+      let n1x = 0
+      let n1y = 0
+      let has1 = false
+      if (i < point_count - 1) {
+        const dx = (points[(i + 1) * 2 + 0] ?? px) - px
+        const dy = (points[(i + 1) * 2 + 1] ?? py) - py
+        const l = Math.hypot(dx, dy)
+        if (l > 0.0001) {
+          n1x = -dy / l
+          n1y = dx / l
+          has1 = true
+        }
+      }
+      // Join direction: miter (bisector) on interior vertices, butt cap on the ends.
+      let mx: number
+      let my: number
+      let scale = 1
+      if (has0 && has1) {
+        mx = n0x + n1x
+        my = n0y + n1y
+        const ml = Math.hypot(mx, my)
+        if (ml > 0.0001) {
+          mx /= ml
+          my /= ml
+          const denom = Math.max(0.2, mx * n1x + my * n1y)
+          scale = Math.min(1 / denom, 4)
+        } else {
+          mx = n1x
+          my = n1y
+        }
+      } else if (has1) {
+        mx = n1x
+        my = n1y
+      } else {
+        mx = n0x
+        my = n0y
+      }
+      const ox = mx * half * scale
+      const oy = my * half * scale
+      outer[i * 2 + 0] = px + ox
+      outer[i * 2 + 1] = py + oy
+      inner[i * 2 + 0] = px - ox
+      inner[i * 2 + 1] = py - oy
+      if (feather_outer && feather_inner) {
+        const fx = mx * (half + f) * scale
+        const fy = my * (half + f) * scale
+        feather_outer[i * 2 + 0] = px + fx
+        feather_outer[i * 2 + 1] = py + fy
+        feather_inner[i * 2 + 0] = px - fx
+        feather_inner[i * 2 + 1] = py - fy
+      }
+    }
+
+    this.current_texture_id = white_texture_id
+    const u = this.white_u()
+    const v = this.white_v()
+    const transparent = transparent_color(rgba)
+    for (let i = 0; i < point_count - 1; i += 1) {
+      const j = i + 1
+      const ox0 = outer[i * 2 + 0] ?? 0
+      const oy0 = outer[i * 2 + 1] ?? 0
+      const ox1 = outer[j * 2 + 0] ?? 0
+      const oy1 = outer[j * 2 + 1] ?? 0
+      const ix0 = inner[i * 2 + 0] ?? 0
+      const iy0 = inner[i * 2 + 1] ?? 0
+      const ix1 = inner[j * 2 + 0] ?? 0
+      const iy1 = inner[j * 2 + 1] ?? 0
+      this.push_tri(ox0, oy0, ox1, oy1, ix0, iy0, u, v, rgba)
+      this.push_tri(ix0, iy0, ox1, oy1, ix1, iy1, u, v, rgba)
+      if (feather_outer && feather_inner) {
+        const fox0 = feather_outer[i * 2 + 0] ?? 0
+        const foy0 = feather_outer[i * 2 + 1] ?? 0
+        const fox1 = feather_outer[j * 2 + 0] ?? 0
+        const foy1 = feather_outer[j * 2 + 1] ?? 0
+        const fix0 = feather_inner[i * 2 + 0] ?? 0
+        const fiy0 = feather_inner[i * 2 + 1] ?? 0
+        const fix1 = feather_inner[j * 2 + 0] ?? 0
+        const fiy1 = feather_inner[j * 2 + 1] ?? 0
+        this.push_quad_points_colored(ox0, oy0, ox1, oy1, fox1, foy1, fox0, foy0, u, v, rgba, rgba, transparent, transparent)
+        this.push_quad_points_colored(ix1, iy1, ix0, iy0, fix0, fiy0, fix1, fiy1, u, v, rgba, rgba, transparent, transparent)
+      }
+    }
+  }
+
   draw_text(x: number, y: number, text: string, font_px: number, rgba: number, font_type: ui_font_primitive = FONT_MAIN): void {
     if (!text || !this.font_atlases.size) return
     const effective_font_px = font_px * default_font_scale
