@@ -1,8 +1,8 @@
-// dock_system — a ready-to-use docking workspace plugin.
+// dock_system — a ready-to-use docking workspace, part of the core toolkit.
 //
-// The core `dock` module (../dock) is intentionally pure: it owns the layout
+// The `dock` module (./ui_dock) is intentionally pure: it owns the layout
 // tree, frame geometry and drop resolution, but draws nothing and listens to no
-// input. This plugin is the missing glue: it renders the tab bars, splitters,
+// input. This module is the missing glue: it renders the tab bars, splitters,
 // drag ghost and drop overlay through `ui_renderer`, drives tab activation /
 // drag-to-move / drag-to-split / splitter-resize from an `ui_input_snapshot`,
 // and hands each visible panel body back to the host to fill.
@@ -14,11 +14,11 @@
 //     if (panel.tab.id === 'files') file_browser(ui, widgets, ...)
 //   })
 
-import { theme_color } from '../ui_theme'
-import type { theme_definition, dock_layout, dock_tab } from '../ui_types'
-import { ui_renderer } from '../ui_renderer'
-import type { ui_layer } from '../ui_renderer'
-import type { ui_input_snapshot } from '../ui_widgets'
+import { theme_color } from './ui_theme'
+import type { theme_definition, dock_layout, dock_tab } from './ui_types'
+import { ui_renderer } from './ui_renderer'
+import type { ui_layer } from './ui_renderer'
+import type { ui_input_snapshot } from './ui_widgets'
 import {
   compute_dock_frame,
   create_default_dock_layout,
@@ -33,7 +33,7 @@ import {
   tab_width,
   type dock_drag_state,
   type dock_frame_leaf,
-} from '../ui_dock'
+} from './ui_dock'
 
 export interface dock_system_options {
   /** Logical tab-label font size (scaled by devicePixelRatio). Defaults to 12.5. */

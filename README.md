@@ -8,14 +8,15 @@ It bundles the pieces needed to build a browser-native editor UI on top of WebGP
 - **`ui_widgets`** — an immediate-mode widget layer (buttons, toggles, sliders, dropdowns, text/number inputs, color pickers, scroll regions, menus) drawn through `ui_renderer`.
 - **`ui_icon`** — a set of vector icons (file, folder, folder_open, chevrons, search, settings, …) composed from `ui_renderer` draw commands and baked once into a single cached 512² atlas texture (32² per cell), then drawn tinted to any colour. See [Icons](#icons).
 - **`dock`** — a docking layout engine: split/leaf trees, tab drag-and-drop, drop targets, and (de)serialization.
+- **`dock_system` / `window_system`** — ready-to-use workspace systems built on `dock`/`window`: a docked split workspace and a floating desktop-style window manager, both part of core so third-party projects can build directly on them. See [Workspace systems](#workspace-systems).
 - **`theme`** — palette/CSS-variable theming with `load_theme`, `apply_theme`, `theme_color`, `theme_rgba`, `pack_color`, and `hex_to_normalized_rgba`.
-- **`plugins`** — opt-in, higher-level drop-in components (`dock_system`, `window_system`, `file_browser`, `graph`, `node_graph`, `im_dialog`, `code_editor`) packaged so other projects can reuse them piecemeal. See [Plugins](#plugins).
+- **`plugins`** — opt-in, higher-level drop-in components (`file_browser`, `graph`, `node_graph`, `im_dialog`, `code_editor`) packaged so other projects can reuse them piecemeal. See [Plugins](#plugins).
 
 ## Live preview
 
 An interactive playground lives in [`preview/`](preview) and is wired up with
 Vite. It boots the renderer and lays the whole demo out as a desktop driven by
-the `window_system` plugin: the docked workspace (Explorer, Editor, Console,
+the core `window_system`: the docked workspace (Explorer, Editor, Console,
 Metrics) is a single "Demo Editor" app window powered by `dock_system`, and the
 other views (Widgets gallery, Icons, Graph, Node Graph, About, Chat) float as
 their own windows — every pixel is drawn on the GPU.
@@ -38,15 +39,16 @@ Pages on every push to `main` (or via *Run workflow*). Once enabled
 via the `BASE_PATH` env var, so forks deploy under their own repo name
 automatically.
 
-## Plugins
+## Workspace systems
 
-Import individual plugins from the `@liamlangli/ui/plugins` sub-path (or the
-package root). Each is a self-contained immediate-mode component: it owns its
-drawing and input handling and takes your `ui_renderer` (+ `ui_widgets` where
-needed), a `theme_definition`, and the per-frame `ui_input_snapshot`.
+`dock_system` and `window_system` are part of the core package: they are the
+two ready-to-use workspace shells third-party apps are expected to build on.
+Each is a self-contained immediate-mode component: it owns its drawing and
+input handling and takes your `ui_renderer`, a `theme_definition`, and the
+per-frame `ui_input_snapshot`.
 
 ```ts
-import { code_editor, dock_system, window_system, file_browser, graph_canvas, node_graph, im_dialog } from '@liamlangli/ui/plugins'
+import { dock_system, window_system } from '@liamlangli/ui'
 ```
 
 ### `dock_system` — docking workspace
@@ -100,6 +102,17 @@ each frame; inactive windows have their geometry cached and replayed (see
 windows costs roughly one live panel plus cheap buffer copies. Call
 `windows.invalidate(id)` when an inactive window's content changes (the preview
 does this for the Chat window when a message arrives).
+
+## Plugins
+
+Import individual plugins from the `@liamlangli/ui/plugins` sub-path (or the
+package root). Each is a self-contained immediate-mode component: it owns its
+drawing and input handling and takes your `ui_renderer` (+ `ui_widgets` where
+needed), a `theme_definition`, and the per-frame `ui_input_snapshot`.
+
+```ts
+import { code_editor, file_browser, graph_canvas, node_graph, im_dialog } from '@liamlangli/ui/plugins'
+```
 
 ### `file_browser` — tree + project browser
 

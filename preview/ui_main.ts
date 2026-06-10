@@ -1,7 +1,7 @@
 // @liamlangli/ui — interactive preview / playground.
 //
 // Boots the WebGPU renderer and lays the whole demo out as a desktop driven by
-// the `window_system` plugin: every view floats in its own window. The old
+// the core `window_system`: every view floats in its own window. The old
 // docked workspace (Explorer, Editor, Console, Metrics) is now just one app —
 // "Demo Editor" — whose window body is a `dock_system`. The remaining views
 // (Widgets, Icons, Graph, Node Graph, About, Chat) open as standalone windows.
@@ -30,11 +30,12 @@ import {
   type ui_renderer_stats,
   type ui_scroll_state,
   type ui_text_view_line,
-  // plugins
+  // workspace systems (core)
   dock_system,
   window_system,
   type window_layout,
   type window_new_options,
+  // plugins
   file_browser,
   create_file_browser_state,
   im_dialog,
@@ -102,10 +103,11 @@ const file_tree: file_node[] = [
       { name: 'ui_renderer.ts' },
       { name: 'ui_widgets.ts' },
       { name: 'dock.ts' },
+      { name: 'dock_system.ts' },
+      { name: 'window_system.ts' },
       { name: 'theme.ts' },
       {
         name: 'plugins', kind: 'dir', children: [
-          { name: 'dock_system.ts' },
           { name: 'file_browser.ts' },
           { name: 'im_dialog.ts' },
           { name: 'index.ts' },
