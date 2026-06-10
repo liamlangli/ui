@@ -41,6 +41,14 @@ export interface im_dialog_state {
   stick_to_bottom: boolean
   /** Internal: last message count, to detect appends. */
   last_count: number
+  /** Internal: single-touch drag-to-scroll in progress. */
+  touch_drag: boolean
+  /** Internal: pointer y of the previous drag frame (physical px). */
+  touch_last_y: number
+  /** Internal: timestamp of the previous drag/momentum frame (ms). */
+  touch_last_t: number
+  /** Internal: flick velocity in physical px per ms (positive = finger moving down). */
+  touch_vel: number
 }
 
 export interface im_dialog_options {
@@ -76,6 +84,10 @@ export function create_im_dialog_state(): im_dialog_state {
     input_state: { cursor: 0, sel_anchor: 0, sel_head: 0 },
     stick_to_bottom: true,
     last_count: 0,
+    touch_drag: false,
+    touch_last_y: 0,
+    touch_last_t: 0,
+    touch_vel: 0,
   }
 }
 
@@ -212,6 +224,39 @@ export function im_dialog(
   }
   if (point_in(input, list_x, list_y, list_w, list_h) && input.wheel_y) {
     state.scroll.offset_y = Math.max(0, Math.min(max_off, state.scroll.offset_y - input.wheel_y * 24 * scale))
+    state.touch_vel = 0
+  }
+  // Single-finger touch: drag the list directly, with a flick momentum on release.
+  const now = performance.now()
+  if (input.pointer_is_touch && input.mouse_pressed && point_in(input, list_x, list_y, list_w, list_h)) {
+    state.touch_drag = true
+    state.touch_last_y = input.mouse_y
+    state.touch_last_t = now
+    state.touch_vel = 0
+  }
+  if (state.touch_drag) {
+    if (input.mouse_down && input.pointer_is_touch) {
+      const dy = input.mouse_y - state.touch_last_y
+      if (dy !== 0) {
+        state.scroll.offset_y -= dy
+        state.touch_vel = state.touch_vel * 0.7 + (dy / Math.max(1, now - state.touch_last_t)) * 0.3
+        state.touch_last_y = input.mouse_y
+        state.touch_last_t = now
+      }
+    } else {
+      state.touch_drag = false
+      // A finger that paused before lifting shouldn't fling from a stale velocity.
+      if (now - state.touch_last_t > 90) state.touch_vel = 0
+      state.touch_last_t = now
+    }
+  }
+  if (!state.touch_drag && Math.abs(state.touch_vel) > 0.02 * scale) {
+    const dt = Math.min(48, Math.max(1, now - state.touch_last_t))
+    state.touch_last_t = now
+    state.scroll.offset_y -= state.touch_vel * dt
+    state.touch_vel *= Math.exp(-dt / 325)
+    if (state.scroll.offset_y <= 0 || state.scroll.offset_y >= max_off) state.touch_vel = 0
+    ui.request_render(1)
   }
   state.scroll.offset_y = Math.max(0, Math.min(max_off, state.scroll.offset_y))
   state.stick_to_bottom = max_off - state.scroll.offset_y < 4 * scale

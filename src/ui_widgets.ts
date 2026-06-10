@@ -9,6 +9,8 @@ export interface ui_input_snapshot {
   mouse_down: boolean
   mouse_pressed: boolean
   mouse_released: boolean
+  /** True when the most recent pointer contact came from a touch (vs mouse/pen). */
+  pointer_is_touch?: boolean
   /** Middle mouse button held (level). Optional; used by the graph plugin to pan. */
   mouse_middle_down?: boolean
   /** Right mouse button pressed this frame (edge). Optional; used by the graph plugin to open a create menu. */
@@ -230,6 +232,7 @@ export function create_empty_ui_input(): ui_input_snapshot {
     mouse_down: false,
     mouse_pressed: false,
     mouse_released: false,
+    pointer_is_touch: false,
     mouse_middle_down: false,
     mouse_right_pressed: false,
     mouse_right_down: false,

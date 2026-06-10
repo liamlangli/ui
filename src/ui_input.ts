@@ -13,6 +13,7 @@ export class input_collector {
   private middle_down = false
   private right_pressed = false
   private right_down = false
+  private is_touch = false
   // Two-finger touch gesture: accumulated pan (physical px) and pinch factor for the frame.
   private pan_dx = 0
   private pan_dy = 0
@@ -75,6 +76,7 @@ export class input_collector {
       // While a two-finger gesture is live, ignore touch pointers so a lingering
       // finger doesn't fight the gesture or drag the cursor.
       if (this.gesturing && e.pointerType === 'touch') return
+      this.is_touch = e.pointerType === 'touch'
       const rect = canvas.getBoundingClientRect()
       this.state.mouse_x = (e.clientX - rect.left) * dpr()
       this.state.mouse_y = (e.clientY - rect.top) * dpr()
@@ -82,6 +84,7 @@ export class input_collector {
     })
     canvas.addEventListener('pointerdown', (e) => {
       if (this.gesturing && e.pointerType === 'touch') return
+      this.is_touch = e.pointerType === 'touch'
       const rect = canvas.getBoundingClientRect()
       this.state.mouse_x = (e.clientX - rect.left) * dpr()
       this.state.mouse_y = (e.clientY - rect.top) * dpr()
@@ -258,6 +261,7 @@ export class input_collector {
     const s = this.state
     s.mouse_pressed = this.pressed
     s.mouse_released = this.released
+    s.pointer_is_touch = this.is_touch
     s.mouse_middle_down = this.middle_down
     s.mouse_right_pressed = this.right_pressed
     s.mouse_right_down = this.right_down
