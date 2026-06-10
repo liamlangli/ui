@@ -53,6 +53,9 @@ import {
   node_graph,
   create_node_graph_state,
   add_node,
+  profiler,
+  profiler_panel,
+  create_profiler_panel_state,
   type editor_token,
   type editor_token_kind,
   type file_node,
@@ -287,6 +290,7 @@ const VIEW_TABS: { id: string; title: string; win?: window_new_options }[] = [
   { id: 'node_graph', title: 'Node Graph', win: { w: 640, h: 420 } },
   { id: 'about', title: 'About', win: { w: 540, h: 340 } },
   { id: 'chat', title: 'Chat', win: { w: 300, h: 400 } },
+  { id: 'profiler', title: 'Profiler', win: { w: 760, h: 460 } },
 ]
 
 // Spawn or focus the Demo Editor app window.
@@ -408,6 +412,7 @@ const main_menu = new ui_main_menu([
           { id: 'gallery', label: 'Widgets' },
           { id: 'icons', label: 'Icons' },
           { id: 'chat', label: 'Chat' },
+          { id: 'profiler', label: 'Profiler' },
           { id: 'about', label: 'About' },
         ],
       },
@@ -493,6 +498,7 @@ const chat_state = create_im_dialog_state()
 let chat_is_typing = false
 const console_state = create_text_view_state()
 const about_state = create_text_view_state()
+const profiler_state = create_profiler_panel_state()
 
 // --- code_editor demo -------------------------------------------------------
 const editor_buffer = new text_buffer(
@@ -640,12 +646,17 @@ async function main(): Promise<void> {
     const frame_start_ms = performance.now()
     const frame_delta_ms = frame_start_ms - metrics.last_frame_start_ms
     metrics.last_frame_start_ms = frame_start_ms
+    profiler.begin_frame(frame_start_ms)
+    profiler.begin('input')
     const snapshot = input.begin_frame()
+    profiler.end()
     const safe = renderer.safe_rect()
     const scale = window.devicePixelRatio || 1
     const m = 8 * scale
 
+    profiler.begin('theme')
     const theme = tick_theme(frame_start_ms)
+    profiler.end()
     const clear = hex_to_normalized_rgba(theme.palette.bg)
     // While a cross-fade is in flight the palette changes every frame, so keep
     // waking the (adaptive) renderer until it settles — `lerp_theme` returns the
@@ -674,6 +685,7 @@ async function main(): Promise<void> {
       const py = panel.y + inset
       const pw = panel.w - inset * 2
       const ph = panel.h - inset * 2
+      profiler.begin(`panel:${panel.tab.id}`)
       switch (panel.tab.id) {
         case 'demo-editor':
           // The Demo Editor app: its window body is a whole docked workspace.
@@ -728,11 +740,19 @@ async function main(): Promise<void> {
         case 'chat':
           render_chat(renderer, widgets, theme, snapshot, px, py, pw, ph)
           break
+        case 'profiler':
+          profiler_panel(renderer, theme, snapshot, px, py, pw, ph, profiler, profiler_state)
+          break
       }
+      profiler.end()
     }
 
     // The window system is the workspace; the Demo Editor window nests the dock.
+    // While the profiler records, keep its window redrawing so the capture streams.
+    if (!profiler.paused && windows.layout.windows.some((win) => win.id === 'profiler')) windows.invalidate('profiler')
+    profiler.begin('windows')
     windows.frame(renderer, theme, dock_input, bar_x, dock_y, bar_w, dock_h, render_panel)
+    profiler.end()
 
     // Auto-compile: when the editor buffer changes, (re)arm the debounced build.
     if (compile_ctrl.auto_compile && editor_buffer.version !== compile_ctrl.last_source_version) {
@@ -742,12 +762,17 @@ async function main(): Promise<void> {
 
     // Refresh the Theme sub-menu against the live selection, then draw the menu
     // bar on top of the dock so its dropdowns overlay the panels below.
+    profiler.begin('menu')
     theme_menu.children = theme_ctrl.presets.map((preset, i) => ({ id: `theme:${i}`, label: preset.name, checked: i === theme_ctrl.index }))
     const menu_event = main_menu.frame(renderer, theme, snapshot, bar_x, bar_y, bar_w, menu_h)
+    profiler.end()
     if (menu_event.activated) handle_menu(menu_event.activated)
 
     widgets.end_frame()
+    profiler.begin('flush')
     renderer.flush(clear)
+    profiler.end()
+    profiler.end_frame()
     record_metric_sample(frame_delta_ms > 0 ? 1000 / frame_delta_ms : 0, performance.now() - frame_start_ms, renderer.renderer_stats())
     input.end_frame()
     requestAnimationFrame(frame)
