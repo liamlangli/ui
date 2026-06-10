@@ -3,7 +3,8 @@
 // The sibling of `dock_system`: instead of tiling views in a split tree, it
 // floats each view in its own desktop-style frame — a header bar carrying the
 // title plus minimize / maximize / close buttons, drag-to-move, drag-to-resize
-// from any edge or corner, and click-to-focus z-ordering. A rounded taskbar
+// from any edge or corner, double-click-the-title to maximize / restore, and
+// click-to-focus z-ordering. A rounded taskbar
 // pinned to the bottom lists the currently running views and shows a live
 // clock; clicking a taskbar chip focuses, restores or minimizes its window.
 //
@@ -89,6 +90,9 @@ export class window_system {
   // can detect a size change (forces a re-render) or a move (replay translated).
   private body_cache = new Map<string, { layer: ui_layer; px: number; py: number; w: number; h: number }>()
   private last_focused_id: string | null = null
+  // Last title-bar press, for double-click maximize / restore detection.
+  private title_click_id: string | null = null
+  private title_click_ms = 0
 
   constructor(layout?: window_layout) {
     this.layout = layout ?? create_default_window_layout()
@@ -170,7 +174,16 @@ export class window_system {
       } else if (edges.left || edges.right || edges.top || edges.bottom) {
         this.action = { kind: 'resize', id: hot.id, edges, start_x: input.mouse_x, start_y: input.mouse_y, ox: hot.x, oy: hot.y, ow: hot.w, oh: hot.h }
       } else if (input.mouse_y < r.y + title_h) {
-        this.action = { kind: 'move', id: hot.id, grab_dx: input.mouse_x - r.x, grab_dy: input.mouse_y - r.y, armed: true, start_x: input.mouse_x, start_y: input.mouse_y }
+        const now = performance.now()
+        if (this.title_click_id === hot.id && now - this.title_click_ms < 320) {
+          // Double-click on the title bar toggles maximize / restore.
+          toggle_maximize_window(this.layout, hot.id)
+          this.title_click_id = null
+        } else {
+          this.title_click_id = hot.id
+          this.title_click_ms = now
+          this.action = { kind: 'move', id: hot.id, grab_dx: input.mouse_x - r.x, grab_dy: input.mouse_y - r.y, armed: true, start_x: input.mouse_x, start_y: input.mouse_y }
+        }
       }
     }
 
@@ -374,8 +387,16 @@ export class window_system {
     const bar_y = y + pad
     const bar_w = w - pad * 2
     const bar_h = h - pad * 2
-    ui.fill_round_rect(bar_x, bar_y, bar_w, bar_h, 10 * scale, with_alpha(col('panel_alt'), 235))
-    ui.stroke_round_rect(bar_x, bar_y, bar_w, bar_h, 10 * scale, 1 * scale, col('border'))
+    // The bar's corner radius derives from the app capsules inside it: capsule
+    // radius + inset, so the corner-most capsule nests concentrically in the
+    // bar corner at a constant gap instead of pinching.
+    const chip_pad = 6 * scale
+    const chip_h = bar_h - chip_pad * 2
+    const chip_y = bar_y + chip_pad
+    const cap_r = chip_h * 0.5
+    const bar_r = cap_r + chip_pad
+    ui.fill_round_rect(bar_x, bar_y, bar_w, bar_h, bar_r, with_alpha(col('panel_alt'), 235))
+    ui.stroke_round_rect(bar_x, bar_y, bar_w, bar_h, bar_r, 1 * scale, col('border'))
 
     // Live clock on the right: time over date.
     const now = new Date()
@@ -393,10 +414,7 @@ export class window_system {
     // Running-view chips on the left. Each chip is a half-height capsule with
     // the app title; a circular close button only appears — and pushes the
     // title aside — while the pointer is over the chip.
-    let cx = bar_x + 8 * scale
-    const chip_h = bar_h - 12 * scale
-    const chip_y = bar_y + 6 * scale
-    const cap_r = chip_h * 0.5
+    let cx = bar_x + chip_pad
     const close_r = cap_r - 4 * scale
     const limit = clock_x - 16 * scale
     for (const win of this.layout.windows) {
