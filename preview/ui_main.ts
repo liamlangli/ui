@@ -1,8 +1,10 @@
 // @liamlangli/ui — interactive preview / playground.
 //
-// Boots the WebGPU renderer and lays the whole demo out inside the `dock_system`
-// plugin: an Explorer (file_browser), an Editor (code_editor), a Widgets
-// gallery, a Console (text_view), an About panel, and a Chat panel (im_dialog).
+// Boots the WebGPU renderer and lays the whole demo out as a desktop driven by
+// the `window_system` plugin: every view floats in its own window. The old
+// docked workspace (Explorer, Editor, Console, Metrics) is now just one app —
+// "Demo Editor" — whose window body is a `dock_system`. The remaining views
+// (Widgets, Icons, Graph, Node Graph, About, Chat) open as standalone windows.
 // Everything is drawn on the GPU.
 
 import {
@@ -32,6 +34,7 @@ import {
   dock_system,
   window_system,
   type window_layout,
+  type window_new_options,
   file_browser,
   create_file_browser_state,
   im_dialog,
@@ -64,6 +67,7 @@ import theme_url from './theme.json?url'
 
 const canvas = document.getElementById('app') as HTMLCanvasElement
 
+// The docked workspace that lives inside the "Demo Editor" app window.
 function build_layout(): dock_layout {
   const leaf = (id: string, tabs: { id: string; title: string }[], active: string) =>
     ({ kind: 'leaf', id, tabs, active_tab_id: active, ox: 0, oy: 0, ow: 1, oh: 1 } as const)
@@ -72,30 +76,18 @@ function build_layout(): dock_layout {
       kind: 'split',
       id: 'split-root',
       axis: 'horizontal',
-      ratio: 0.2,
+      ratio: 0.24,
       left: leaf('leaf-files', [{ id: 'files', title: 'Explorer' }], 'files'),
       right: {
         kind: 'split',
-        id: 'split-right',
-        axis: 'horizontal',
+        id: 'split-center',
+        axis: 'vertical',
         ratio: 0.64,
-        left: {
-          kind: 'split',
-          id: 'split-center',
-          axis: 'vertical',
-          ratio: 0.64,
-          left: leaf('leaf-main', [
-            { id: 'editor', title: 'Editor' },
-            { id: 'gallery', title: 'Widgets' },
-            { id: 'icons', title: 'Icons' },
-            { id: 'about', title: 'About' },
-          ], 'editor'),
-          right: leaf('leaf-console', [
-            { id: 'console', title: 'Console' },
-            { id: 'metrics', title: 'Metrics' },
-          ], 'metrics'),
-        },
-        right: leaf('leaf-chat', [{ id: 'chat', title: 'Chat' }], 'chat'),
+        left: leaf('leaf-main', [{ id: 'editor', title: 'Editor' }], 'editor'),
+        right: leaf('leaf-console', [
+          { id: 'console', title: 'Console' },
+          { id: 'metrics', title: 'Metrics' },
+        ], 'console'),
       },
     },
     next_id: 100,
@@ -139,12 +131,13 @@ const about_lines: ui_text_view_line[] = [
   { text: 'splitter, bubble and glyph is drawn through ui_renderer.', color: '#9aa3b0' },
   { text: '' },
   { text: 'Plugins on show:', color: '#4c8bf5' },
-  { text: '  • dock_system  — drag tabs to reorder / split, drag splitters', color: '#9aa3b0' },
-  { text: '  • file_browser — the Explorer panel on the left', color: '#9aa3b0' },
-  { text: '  • code_editor  — the Editor tab (type, select, syntax-highlight)', color: '#9aa3b0' },
-  { text: '  • im_dialog    — the Chat panel on the right', color: '#9aa3b0' },
+  { text: '  • window_system — every view floats in its own desktop window', color: '#9aa3b0' },
+  { text: '  • dock_system   — the Demo Editor app: a docked workspace in a window', color: '#9aa3b0' },
+  { text: '  • file_browser  — the Explorer panel inside Demo Editor', color: '#9aa3b0' },
+  { text: '  • code_editor   — the Editor tab (type, select, syntax-highlight)', color: '#9aa3b0' },
+  { text: '  • im_dialog     — the Chat window', color: '#9aa3b0' },
   { text: '' },
-  { text: 'Try: drag the "Widgets" tab onto another panel edge to split.', color: '#5fb878' },
+  { text: 'Try: drag windows around, then drag a tab inside Demo Editor to split.', color: '#5fb878' },
   { text: '试试中文：渲染器内置 PingFang SC 字形图集。', color: '#d8a24a' },
 ]
 
@@ -219,19 +212,18 @@ const node_graph_templates: node_graph_template[] = [
   { type: 'Output', inputs: [{ label: 'Albedo', type: 'color' }, { label: 'Normal', type: 'vec3' }] },
 ]
 
-// A free-floating arrangement of the same views for "window mode".
+// The desktop: the Demo Editor app window (hosting the dock layout above)
+// next to a floating Chat window. Other apps spawn from the View menu.
 function build_window_layout(): window_layout {
   const win = (id: string, title: string, x: number, y: number, w: number, h: number, z: number) =>
     ({ id, title, x, y, w, h, z, minimized: false, maximized: false, restore_x: x, restore_y: y, restore_w: w, restore_h: h } as const)
   return {
     windows: [
-      win('files', 'Explorer', 24, 24, 240, 380, 1),
-      win('editor', 'Editor', 288, 40, 470, 300, 4),
-      win('console', 'Console', 320, 300, 420, 190, 3),
-      win('chat', 'Chat', 780, 60, 300, 380, 2),
+      win('demo-editor', 'Demo Editor', 24, 16, 820, 540, 2),
+      win('chat', 'Chat', 880, 48, 300, 400, 1),
     ],
-    next_z: 5,
-    focused_id: 'editor',
+    next_z: 3,
+    focused_id: 'demo-editor',
   }
 }
 
@@ -243,44 +235,51 @@ let icon_set: ui_icons | null = null
 // Set once the renderer is live (see main()); lets async helpers (console
 // appends, deferred compiles) wake the adaptive renderer outside a frame.
 let active_renderer: ui_renderer | null = null
-// Which workspace layout engine drives the views this frame.
-let workspace_mode: 'dock' | 'window' = 'dock'
 
-// Every workspace view the top menu can spawn as a dock tab.
-const VIEW_TABS: { id: string; title: string }[] = [
+// Views that live as dock tabs inside the Demo Editor app window. Everything
+// else floats as its own window, so each view exists in exactly one place.
+const EDITOR_VIEW_IDS = new Set(['files', 'editor', 'console', 'metrics'])
+
+// Every view the top menu can spawn, with default geometry for window apps.
+const VIEW_TABS: { id: string; title: string; win?: window_new_options }[] = [
+  { id: 'demo-editor', title: 'Demo Editor', win: { x: 24, y: 16, w: 820, h: 540 } },
   { id: 'files', title: 'Explorer' },
   { id: 'editor', title: 'Editor' },
-  { id: 'gallery', title: 'Widgets' },
-  { id: 'icons', title: 'Icons' },
   { id: 'console', title: 'Console' },
   { id: 'metrics', title: 'Metrics' },
-  { id: 'graph', title: 'Graph' },
-  { id: 'node_graph', title: 'Node Graph' },
-  { id: 'about', title: 'About' },
-  { id: 'chat', title: 'Chat' },
+  { id: 'gallery', title: 'Widgets', win: { w: 420, h: 540 } },
+  { id: 'icons', title: 'Icons', win: { w: 560, h: 420 } },
+  { id: 'graph', title: 'Graph', win: { w: 640, h: 420 } },
+  { id: 'node_graph', title: 'Node Graph', win: { w: 640, h: 420 } },
+  { id: 'about', title: 'About', win: { w: 540, h: 340 } },
+  { id: 'chat', title: 'Chat', win: { w: 300, h: 400 } },
 ]
 
-// Spawn a view — or just focus it if it already exists in the active workspace.
+// Spawn or focus the Demo Editor app window.
+function open_demo_editor(): void {
+  windows.add_window('demo-editor', 'Demo Editor', VIEW_TABS[0]!.win)
+}
+
+// Spawn a view — or just focus it if it already exists. Editor views open as
+// dock tabs inside the Demo Editor window; everything else gets its own window.
 function open_view_tab(id: string, title: string): void {
-  if (workspace_mode === 'window') {
-    windows.add_window(id, title)
+  if (!EDITOR_VIEW_IDS.has(id)) {
+    windows.add_window(id, title, VIEW_TABS.find((t) => t.id === id)?.win)
     return
   }
+  open_demo_editor()
   let found_leaf: string | null = null
   visit_dock_leaves(dock.layout.root, (leaf) => {
     if (!found_leaf && leaf.tabs.some((t) => t.id === id)) found_leaf = leaf.id
   })
   if (found_leaf) activate_dock_tab(dock.layout, found_leaf, id)
   else dock.add_tab({ id, title })
+  windows.invalidate('demo-editor')
 }
 
 // The Theme sub-menu is rebuilt each frame (to reflect the live selection), so
 // keep a reference to splice fresh children into.
 const theme_menu: ui_menu_node = { label: 'Theme', children: [] }
-
-// Layout-mode radio items, kept by reference so their checkmarks track state.
-const mode_dock_item: ui_menu_node = { id: 'mode-dock', label: 'Dock Mode', checked: true }
-const mode_window_item: ui_menu_node = { id: 'mode-window', label: 'Window Mode', checked: false }
 
 const compile_ctrl = {
   auto_compile: true,
@@ -296,6 +295,7 @@ const compile_ctrl = {
 function append_console(text: string, color?: string): void {
   console_lines.push(color ? { text, color } : { text })
   console_state.scroll_to_line = console_lines.length - 1
+  windows.invalidate('demo-editor') // the Console lives inside the Demo Editor window
   active_renderer?.request_render()
 }
 
@@ -359,15 +359,16 @@ const main_menu = new ui_main_menu([
       {
         label: 'Workspace',
         children: [
+          { id: 'demo-editor', label: 'Demo Editor' },
           { id: 'files', label: 'Explorer' },
           { id: 'editor', label: 'Editor' },
           { id: 'console', label: 'Console' },
+          { id: 'metrics', label: 'Metrics' },
         ],
       },
       {
-        label: 'Tools',
+        label: 'Apps',
         children: [
-          { id: 'metrics', label: 'Metrics' },
           { id: 'graph', label: 'Graph' },
           { id: 'node_graph', label: 'Node Graph' },
           { id: 'gallery', label: 'Widgets' },
@@ -376,8 +377,6 @@ const main_menu = new ui_main_menu([
           { id: 'about', label: 'About' },
         ],
       },
-      { label: '', separator: true },
-      { label: 'Layout Mode', children: [mode_dock_item, mode_window_item] },
       { label: '', separator: true },
       { id: 'open-all', label: 'Open all views' },
       { id: 'reset', label: 'Reset layout' },
@@ -404,13 +403,10 @@ function handle_menu(node: ui_menu_node): void {
     for (const tab of VIEW_TABS) open_view_tab(tab.id, tab.title)
     return
   }
-  if (id === 'mode-dock' || id === 'mode-window') {
-    workspace_mode = id === 'mode-window' ? 'window' : 'dock'
-    return
-  }
   if (id === 'reset') {
-    if (workspace_mode === 'window') windows.layout = build_window_layout()
-    else dock.layout = build_layout()
+    windows.layout = build_window_layout()
+    dock.layout = build_layout()
+    windows.invalidate()
     return
   }
   if (id === 'focus-editor') {
@@ -619,7 +615,7 @@ async function main(): Promise<void> {
     renderer.begin_frame()
     widgets.begin_frame(theme, snapshot)
 
-    // Top menu bar reserves a strip; the dock fills the area below it.
+    // Top menu bar reserves a strip; the window desktop fills the area below it.
     const menu_h = 30 * scale
     const bar_x = safe.x + m
     const bar_y = safe.y + m
@@ -639,6 +635,10 @@ async function main(): Promise<void> {
       const pw = panel.w - inset * 2
       const ph = panel.h - inset * 2
       switch (panel.tab.id) {
+        case 'demo-editor':
+          // The Demo Editor app: its window body is a whole docked workspace.
+          dock.frame(renderer, theme, dock_input, px, py, pw, ph, render_panel)
+          break
         case 'files':
           render_files(renderer, widgets, theme, snapshot, px, py, pw, ph)
           break
@@ -691,12 +691,8 @@ async function main(): Promise<void> {
       }
     }
 
-    // Drive the active workspace engine — both hand back the same panel shape.
-    if (workspace_mode === 'window') {
-      windows.frame(renderer, theme, dock_input, bar_x, dock_y, bar_w, dock_h, render_panel)
-    } else {
-      dock.frame(renderer, theme, dock_input, bar_x, dock_y, bar_w, dock_h, render_panel)
-    }
+    // The window system is the workspace; the Demo Editor window nests the dock.
+    windows.frame(renderer, theme, dock_input, bar_x, dock_y, bar_w, dock_h, render_panel)
 
     // Auto-compile: when the editor buffer changes, (re)arm the debounced build.
     if (compile_ctrl.auto_compile && editor_buffer.version !== compile_ctrl.last_source_version) {
@@ -707,8 +703,6 @@ async function main(): Promise<void> {
     // Refresh the Theme sub-menu against the live selection, then draw the menu
     // bar on top of the dock so its dropdowns overlay the panels below.
     theme_menu.children = theme_ctrl.presets.map((preset, i) => ({ id: `theme:${i}`, label: preset.name, checked: i === theme_ctrl.index }))
-    mode_dock_item.checked = workspace_mode === 'dock'
-    mode_window_item.checked = workspace_mode === 'window'
     const menu_event = main_menu.frame(renderer, theme, snapshot, bar_x, bar_y, bar_w, menu_h)
     if (menu_event.activated) handle_menu(menu_event.activated)
 
@@ -739,8 +733,7 @@ function render_files(
   })
   if (ev.activated || ev.entry_activated) {
     const name = ev.entry_activated?.name ?? ev.activated?.name
-    console_lines.push({ text: `→ opened ${name}`, color: '#4c8bf5' })
-    console_state.scroll_to_line = console_lines.length - 1
+    append_console(`→ opened ${name}`, '#4c8bf5')
   }
 }
 
