@@ -33,6 +33,8 @@ import {
   // workspace systems (core)
   dock_system,
   window_system,
+  serialize_window_layout,
+  restore_window_layout,
   type window_layout,
   type window_new_options,
   // plugins
@@ -229,9 +231,39 @@ function build_window_layout(): window_layout {
   }
 }
 
+// --- Window layout persistence ----------------------------------------------
+// The desktop arrangement survives reloads: the layout is snapshotted to
+// localStorage every 5 seconds (when it changed) and restored on boot.
+const WINDOW_LAYOUT_STORAGE_KEY = 'ui.preview.window_layout'
+const WINDOW_LAYOUT_SAVE_INTERVAL_MS = 5000
+
+function load_saved_window_layout(): window_layout | null {
+  try {
+    const raw = window.localStorage.getItem(WINDOW_LAYOUT_STORAGE_KEY)
+    if (!raw) return null
+    return restore_window_layout(JSON.parse(raw))
+  } catch {
+    return null // storage unavailable or corrupt blob — fall back to the default desktop
+  }
+}
+
+let last_saved_window_layout = ''
+
+function save_window_layout(): void {
+  try {
+    const raw = serialize_window_layout(windows.layout)
+    if (raw === last_saved_window_layout) return
+    window.localStorage.setItem(WINDOW_LAYOUT_STORAGE_KEY, raw)
+    last_saved_window_layout = raw
+  } catch {
+    // storage unavailable (private mode / quota) — keep running without persistence
+  }
+}
+
 // --- Persistent widget / plugin state -------------------------------------
 const dock = new dock_system(build_layout())
-const windows = new window_system(build_window_layout())
+const windows = new window_system(load_saved_window_layout() ?? build_window_layout())
+window.setInterval(save_window_layout, WINDOW_LAYOUT_SAVE_INTERVAL_MS)
 // Baked once after the renderer initialises (see main()); drawn in the gallery.
 let icon_set: ui_icons | null = null
 // Set once the renderer is live (see main()); lets async helpers (console
@@ -409,6 +441,12 @@ function handle_menu(node: ui_menu_node): void {
     windows.layout = build_window_layout()
     dock.layout = build_layout()
     windows.invalidate()
+    // Drop the persisted snapshot right away so a reload before the next
+    // periodic save doesn't resurrect the pre-reset desktop.
+    try {
+      window.localStorage.removeItem(WINDOW_LAYOUT_STORAGE_KEY)
+    } catch { /* storage unavailable */ }
+    last_saved_window_layout = ''
     return
   }
   if (id === 'focus-editor') {

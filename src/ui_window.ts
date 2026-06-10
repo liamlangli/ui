@@ -103,7 +103,22 @@ export function serialize_window_layout(layout: window_layout): string {
 export function restore_window_layout(raw: unknown): window_layout | null {
   if (!raw || typeof raw !== 'object') return null
   const layout = raw as window_layout
-  if (!Array.isArray(layout.windows) || typeof layout.next_z !== 'number') return null
+  if (!Array.isArray(layout.windows) || typeof layout.next_z !== 'number' || !Number.isFinite(layout.next_z)) return null
+  // Validate every window entry — the raw value typically comes from persisted
+  // storage, so a stale / corrupt blob must not crash the desktop.
+  const num = (v: unknown) => typeof v === 'number' && Number.isFinite(v)
+  for (const win of layout.windows) {
+    if (!win || typeof win !== 'object') return null
+    if (typeof win.id !== 'string' || typeof win.title !== 'string') return null
+    if (!num(win.x) || !num(win.y) || !num(win.w) || !num(win.h) || !num(win.z)) return null
+    if (!num(win.restore_x) || !num(win.restore_y) || !num(win.restore_w) || !num(win.restore_h)) return null
+    if (typeof win.minimized !== 'boolean' || typeof win.maximized !== 'boolean') return null
+    win.w = Math.max(window_min_w, win.w)
+    win.h = Math.max(window_min_h, win.h)
+  }
+  if (layout.focused_id !== null && (typeof layout.focused_id !== 'string' || !layout.windows.some((w) => w.id === layout.focused_id))) {
+    layout.focused_id = null
+  }
   return layout
 }
 
