@@ -5,8 +5,8 @@
 // bar with minimize / maximize / close affordances, drag-to-move,
 // drag-to-resize, z-order focus and minimize-to-taskbar. Like `dock`, this
 // module is intentionally pure — it owns the data and the geometry maths but
-// draws nothing and listens to no input. The `window_system` plugin is the
-// glue that renders it and drives it from an input snapshot.
+// draws nothing and listens to no input. The core `window_system` module is
+// the glue that renders it and drives it from an input snapshot.
 
 import { clamp } from './ui_math'
 

@@ -1,4 +1,4 @@
-// window_system — a ready-to-use "window mode" workspace plugin.
+// window_system — a ready-to-use "window mode" workspace, part of the core toolkit.
 //
 // The sibling of `dock_system`: instead of tiling views in a split tree, it
 // floats each view in its own desktop-style frame — a header bar carrying the
@@ -17,11 +17,11 @@
 //     if (panel.tab.id === 'files') file_browser(ui, widgets, ...)
 //   })
 
-import { theme_color } from '../ui_theme'
-import type { theme_definition } from '../ui_types'
-import { ui_renderer } from '../ui_renderer'
-import type { ui_layer } from '../ui_renderer'
-import type { ui_input_snapshot } from '../ui_widgets'
+import { theme_color } from './ui_theme'
+import type { theme_definition } from './ui_types'
+import { ui_renderer } from './ui_renderer'
+import type { ui_layer } from './ui_renderer'
+import type { ui_input_snapshot } from './ui_widgets'
 import {
   create_default_window_layout,
   focus_window,
@@ -39,7 +39,7 @@ import {
   type window_layout,
   type window_view,
   type window_new_options,
-} from '../ui_window'
+} from './ui_window'
 import type { dock_panel, dock_render_body } from './ui_dock_system'
 
 export interface window_system_options {
