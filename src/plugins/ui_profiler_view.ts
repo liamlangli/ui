@@ -4,9 +4,12 @@
 //
 //   ┌ toolbar ──────────────────────────────────────────────┐  pause / resume,
 //   │ ⏸ Pause · Clear · live status            window info  │  clear
-//   ├ timeline ─────────────────────────────────────────────┤  the moving
-//   │ ▁▂▁▃▂▇▂▁▂▁▂▃▂▁▇▁▂▃▂▁▂▁▃▂▁▂▃▂▁ [ selected ]▂▁▂▃▂▁▂▁▂▃ │  window: one bar
-//   ├ flame chart ──────────────────────────────────────────┤  per frame
+//   ├ frame chart ──────────────────────────────────────────┤  polylines: frame
+//   │ ─ interval · ─ cpu      ╱╲__╱╲___ ← interval          │  interval vs CPU
+//   │ _________________________________ ← cpu               │  time; the gap is
+//   ├ timeline ─────────────────────────────────────────────┤  GPU/vsync wait
+//   │ ▁▂▁▃▂▇▂▁▂▁▂▃▂▁▇▁▂▃▂▁▂▁▃▂▁▂▃▂▁ [ selected ]▂▁▂▃▂▁▂▁▂▃ │  the moving window:
+//   ├ flame chart ──────────────────────────────────────────┤  one bar per frame
 //   │ 0 ms      4 ms      8 ms      12 ms      16 ms        │  drag-select a
 //   │ █windows███████████████████████ █flush██              │  slice above,
 //   │   █panel:editor████ █panel:chat█                      │  inspect nested
@@ -89,10 +92,12 @@ export function profiler_panel(
 
   // --- Layout --------------------------------------------------------------
   const toolbar_h = 30 * scale
+  const chart_h = 54 * scale
   const timeline_h = 52 * scale
   const detail_h = 20 * scale
   const tb = { x: x + pad, y: y + pad * 0.75, w: w - pad * 2, h: toolbar_h }
-  const tl = { x: x + pad, y: tb.y + tb.h + pad * 0.5, w: w - pad * 2, h: timeline_h }
+  const ch = { x: x + pad, y: tb.y + tb.h + pad * 0.5, w: w - pad * 2, h: chart_h }
+  const tl = { x: x + pad, y: ch.y + ch.h + pad * 0.5, w: w - pad * 2, h: timeline_h }
   const dt = { x: x + pad, y: y + h - detail_h - pad * 0.5, w: w - pad * 2, h: detail_h }
   const fl = { x: x + pad, y: tl.y + tl.h + pad * 0.75, w: w - pad * 2, h: Math.max(0, dt.y - (tl.y + tl.h + pad * 0.75) - pad * 0.5) }
   const ruler_h = 16 * scale
@@ -150,6 +155,9 @@ export function profiler_panel(
   const info = `${prof.frames.length}/${prof.max_frames} frames`
   const info_w = ui.text_width(info, mono, FONT_MONO)
   ui.draw_text(tb.x + tb.w - info_w, ui.text_v_center_y(tb.y, tb.h, mono), info, mono, col('text_dim'), FONT_MONO)
+
+  // --- Frame chart: interval vs CPU polylines over the moving window ----------
+  draw_frame_chart(ui, input, ch, scale, budget, prof, col)
 
   // --- Timeline: the moving window, one bar per frame -------------------------
   const slot_w = tl.w / prof.max_frames
@@ -247,6 +255,114 @@ export function profiler_panel(
 
   // While recording, keep the (adaptive) renderer awake so the window streams.
   if (!prof.paused) ui.request_render()
+  ui.pop_clip()
+}
+
+// --- frame chart -------------------------------------------------------------
+//
+// Two polylines over the same moving window as the bar timeline below (columns
+// align): the frame interval (start-to-start delta between recorded frames —
+// what the user actually sees as frame rate) and the CPU time spent inside the
+// frame callback. JS that finishes in 4 ms but presents at 30 FPS shows up here
+// as a wide gap between the two lines: time spent in GPU work, compositing or
+// waiting for vsync, which begin/end instrumentation cannot see.
+
+function draw_frame_chart(
+  ui: ui_renderer,
+  input: ui_input_snapshot,
+  ch: { x: number; y: number; w: number; h: number },
+  scale: number,
+  budget: number,
+  prof: ui_profiler,
+  col: (slot: theme_slot) => number,
+): void {
+  const mono = 9.5 * scale
+  const frames = prof.frames
+  const interval_col = pack_color('#4c8bf5')
+  const cpu_col = pack_color('#5fb878')
+
+  ui.fill_round_rect(ch.x, ch.y, ch.w, ch.h, 4 * scale, col('track'))
+  ui.stroke_round_rect(ch.x, ch.y, ch.w, ch.h, 4 * scale, 1, col('border'))
+  ui.push_clip(ch.x, ch.y, ch.w, ch.h)
+
+  // Vertical scale: at least 2.5× budget so 30 FPS-on-60 Hz sits mid-chart, but
+  // capped so one multi-hundred-ms hitch doesn't flatten everything for the
+  // 10 s it takes to scroll out of the window. Values are clamped to the cap.
+  const interval_at = (p: number) => (p > 0 ? frames[p].start_ms - frames[p - 1].start_ms : 0)
+  let y_max = budget * 2.5
+  for (let p = 0; p < frames.length; p += 1) y_max = Math.max(y_max, frames[p].cpu_ms, interval_at(p))
+  y_max = Math.min(y_max, budget * 6)
+
+  const legend_h = 15 * scale
+  const top = ch.y + legend_h + 2 * scale
+  const bottom = ch.y + ch.h - 4 * scale
+  const value_y = (v: number) => bottom - (Math.min(v, y_max) / y_max) * (bottom - top)
+
+  // Same right-aligned slot mapping as the timeline bars below, so the chart's
+  // columns line up with them.
+  const slot_w = ch.w / prof.max_frames
+  const slot_x = (p: number) => ch.x + ch.w - (frames.length - p) * slot_w + slot_w * 0.5
+
+  // Reference lines at the budget (16.7 ms ≈ 60 FPS) and twice it (30 FPS).
+  for (const ref of [budget, budget * 2]) {
+    if (ref >= y_max) continue
+    const ry = value_y(ref)
+    ui.stroke_line(ch.x, ry, ch.x + ch.w, ry, 1, with_alpha(col('text_dim'), 60))
+    const label = `${format_ms(ref)} · ${Math.round(1000 / ref)} FPS`
+    const lw = ui.text_width(label, mono, FONT_MONO)
+    ui.draw_text(ch.x + ch.w - lw - 4 * scale, ry - 11 * scale, label, mono, with_alpha(col('text_dim'), 150), FONT_MONO)
+  }
+
+  if (frames.length >= 2) {
+    const pts = new Float32Array(frames.length * 2)
+    let n = 0
+    for (let p = 1; p < frames.length; p += 1) {
+      pts[n * 2] = slot_x(p)
+      pts[n * 2 + 1] = value_y(interval_at(p))
+      n += 1
+    }
+    ui.stroke_polyline(pts, n, 1.5 * scale, interval_col, 0.75)
+    n = 0
+    for (let p = 0; p < frames.length; p += 1) {
+      pts[n * 2] = slot_x(p)
+      pts[n * 2 + 1] = value_y(frames[p].cpu_ms)
+      n += 1
+    }
+    ui.stroke_polyline(pts, n, 1.5 * scale, cpu_col, 0.75)
+  }
+
+  // Hover probes a frame (vertical guide); otherwise the legend tracks the
+  // latest one.
+  const inside_ch = input.mouse_x >= ch.x && input.mouse_x < ch.x + ch.w && input.mouse_y >= ch.y && input.mouse_y < ch.y + ch.h
+  let probe = frames.length - 1
+  if (inside_ch && frames.length > 0) {
+    const pos = frames.length - 1 - Math.floor((ch.x + ch.w - input.mouse_x) / slot_w)
+    probe = Math.max(0, Math.min(frames.length - 1, pos))
+    ui.stroke_line(slot_x(probe), top, slot_x(probe), bottom, 1, with_alpha(col('text'), 80))
+  }
+
+  // Legend: colored swatches + the probed frame's numbers. `gap` is the part
+  // of the interval the CPU instrumentation can't see (GPU / compositor / vsync).
+  let lx = ch.x + 6 * scale
+  const ly = ch.y + 4 * scale
+  const swatch = (color: number, label: string) => {
+    ui.fill_rect(lx, ly + 4 * scale, 9 * scale, 2.5 * scale, color)
+    lx += 12 * scale
+    ui.draw_text(lx, ly, label, mono, col('text_dim'), FONT_MONO)
+    lx += ui.text_width(label, mono, FONT_MONO) + 12 * scale
+  }
+  const f = frames[probe]
+  if (f) {
+    const interval = interval_at(probe)
+    const fps = interval > 0 ? ` · ${(1000 / interval).toFixed(1)} FPS` : ''
+    swatch(interval_col, `interval ${probe > 0 ? format_ms(interval) : '—'}${fps}`)
+    swatch(cpu_col, `cpu ${format_ms(f.cpu_ms)}`)
+    if (probe > 0) ui.draw_text(lx, ly, `gap ${format_ms(Math.max(0, interval - f.cpu_ms))}`, mono, with_alpha(col('text_dim'), 170), FONT_MONO)
+  } else {
+    swatch(interval_col, 'interval')
+    swatch(cpu_col, 'cpu')
+  }
+
   ui.pop_clip()
 }
 
