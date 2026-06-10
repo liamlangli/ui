@@ -1040,6 +1040,18 @@ export class ui_renderer {
     if (this.clip_stack.length > 1) this.clip_stack.pop()
   }
 
+  /**
+   * True when the axis-aligned rect (x, y, w, h) lies fully outside the current
+   * clip rectangle, so nothing drawn within it could be visible. Callers can use
+   * this to cull widgets on the CPU and early-return before doing any layout,
+   * text shaping, or geometry work for fully scrolled-out / off-screen content.
+   * Mirrors the per-primitive clip test used by {@link push_quad}/{@link push_tri}.
+   */
+  rect_clipped(x: number, y: number, w: number, h: number): boolean {
+    const clip = this.current_clip()
+    return x + w <= clip.x || y + h <= clip.y || x >= clip.x + clip.w || y >= clip.y + clip.h
+  }
+
   set_cursor(cursor: string | null): void {
     this.canvas.style.cursor = cursor ?? ''
   }
@@ -1478,6 +1490,14 @@ export class ui_renderer {
 
   draw_text(x: number, y: number, text: string, font_px: number, rgba: number, font_type: ui_font_primitive = FONT_MAIN): void {
     if (!text || !this.font_atlases.size) return
+    // CPU cull: text advances rightward and downward from (x, y), so a run whose
+    // top-left starts past the clip's right/bottom edge can never be visible, and
+    // a single line ending above the clip's top is fully clipped too. Skip the
+    // whole shaping loop in those cases; partial overlap still relies on the
+    // per-glyph clip test in push_quad.
+    const clip = this.current_clip()
+    if (x >= clip.x + clip.w || y >= clip.y + clip.h) return
+    if (text.indexOf('\n') < 0 && y + this.text_line_height(font_px, font_type) <= clip.y) return
     const effective_font_px = font_px * default_font_scale
     const primary = this.font_atlases.get(font_type) ?? this.font_atlases.get(FONT_MAIN)
     let cx = x
