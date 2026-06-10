@@ -715,9 +715,11 @@ function draw_internal_grid_node(
   col: (slot: theme_slot) => number,
 ): void {
   const pad = 3 * scale
-  const radius = 2 * scale
+  // Match the card's corner radius (node_r) so the preview's top corners line up
+  // with the card's rounded top corners instead of leaving a mismatched sliver.
+  const radius = 4 * scale
   // Preview rect: flush to the card's left/top/right edges (no padding), keeping
-  // only the bottom inset. Top corners get the reduced radius; bottom corners are
+  // only the bottom inset. Top corners reuse the card radius; bottom corners are
   // square so the preview meets the label area cleanly.
   ui.fill_round_rect_per_corner(x, y, w, Math.max(0, h - pad), radius, radius, 0, 0, col('panel'))
   ui.draw_text(x + 8 * scale, ui.text_v_center_y(y + 12 * scale, 20 * scale, 6 * scale), entry.kind === 'folder' ? 'DIR' : 'FILE', 6 * scale, col('text_dim'))
