@@ -180,6 +180,11 @@ export class window_system {
     else if (this.action.kind === 'move' && !this.action.armed) cursor = 'grabbing'
     else if (hot && this.action.kind === 'none') cursor = resize_cursor(resize_hit(input, rect_of(hot), scale, hot.maximized))
 
+    // Reset the cursor before the draw loop so window bodies (e.g. a nested
+    // dock_system with its splitter cursors) can claim it; our own move/resize
+    // feedback is applied after the loop and wins when active.
+    ui.set_cursor(null)
+
     // When focus moves, drop the freshly-unfocused window's cache so it gets
     // one live re-render in its inactive (no hover / no caret) state.
     if (this.layout.focused_id !== this.last_focused_id) {
@@ -208,7 +213,7 @@ export class window_system {
     // --- Taskbar ------------------------------------------------------------
     if (show_taskbar) this.draw_taskbar(ui, input, x, this.area_y + this.area_h, w, taskbar_h, font_px, scale, col)
 
-    ui.set_cursor(cursor)
+    if (cursor) ui.set_cursor(cursor)
   }
 
   private update_action(input: ui_input_snapshot, scale: number): void {

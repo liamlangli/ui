@@ -14,9 +14,11 @@ It bundles the pieces needed to build a browser-native editor UI on top of WebGP
 ## Live preview
 
 An interactive playground lives in [`preview/`](preview) and is wired up with
-Vite. It boots the renderer and lays the whole demo out inside the `dock_system`
-plugin (Explorer, an Editor, Widgets gallery, Console, a node Graph, About, and a
-Chat panel) — every pixel is drawn on the GPU.
+Vite. It boots the renderer and lays the whole demo out as a desktop driven by
+the `window_system` plugin: the docked workspace (Explorer, Editor, Console,
+Metrics) is a single "Demo Editor" app window powered by `dock_system`, and the
+other views (Widgets gallery, Icons, Graph, Node Graph, About, Chat) float as
+their own windows — every pixel is drawn on the GPU.
 
 ```bash
 npm install
