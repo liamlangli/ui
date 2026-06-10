@@ -1,6 +1,7 @@
-// profiler_view — a Chrome-performance-style CPU profiler panel plugin.
+// profiler_view — a Chrome-performance-style profiler panel plugin.
 //
-// Renders a `ui_profiler` capture (see core `ui_profiler.ts`) as:
+// Two tabs share one panel. The CPU tab renders a `ui_profiler` capture (see
+// core `ui_profiler.ts`) as:
 //
 //   ┌ toolbar ──────────────────────────────────────────────┐  pause / resume,
 //   │ ⏸ Pause · Clear · live status            window info  │  clear
@@ -23,6 +24,21 @@
 // cursor and drag pans it; hover shows a tooltip, click pins a zone to the
 // detail bar; Escape clears selection and pin.
 //
+// The Memory tab renders a `ui_memory` registry (see core `ui_memory.ts`) —
+// every tracked CPU/GPU resource — as:
+//
+//   ┌ toolbar ──────────────────────────────────────────────┐  search box
+//   │ [CPU][Memory] 🔍 filter…       18 resources · 24.3 MB │  filters by name
+//   ├ treemap ──────────────────────────────────────────────┤  area ∝ bytes,
+//   │ ┌texture───────────────┐┌font────────┐┌geometry┐      │  grouped by
+//   │ │ ███████  ████  ██    ││ ████  ██   ││ ██  █  │      │  resource type;
+//   │ └──────────────────────┘└────────────┘└────────┘      │  click selects
+//   ├ table ────────────────────────────────────────────────┤
+//   │ Name              Type        Dev       Size ▼        │  sortable columns,
+//   │ ▾ texture — 6 · 12.4 MB                                │  type groups
+//   │   ui.icon_atlas   texture     gpu       1.0 MB        │  collapse
+//   └────────────────────────────────────────────────────────┘
+//
 // Usage (once per frame, inside begin_frame()/flush()):
 //
 //   profiler_panel(ui, theme, input, x, y, w, h, profiler, state)
@@ -30,18 +46,27 @@
 import { theme_color, pack_color } from '../ui_theme'
 import type { theme_definition, theme_slot } from '../ui_types'
 import { ui_renderer, FONT_MONO } from '../ui_renderer'
+import { draw_icon } from '../ui_icon'
 import type { ui_input_snapshot } from '../ui_widgets'
 import type { ui_profiler, profiler_frame, profiler_span } from '../ui_profiler'
+import { memory as shared_memory, format_bytes } from '../ui_memory'
+import type { ui_memory, memory_resource } from '../ui_memory'
 
 export interface profiler_panel_options {
   /** Frame budget used to color the timeline bars (green ≤ budget ≤ amber ≤ 2× ≤ red). Defaults to 16.7 ms. */
   frame_budget_ms?: number
+  /** Resource registry shown by the Memory tab. Defaults to the shared `memory` instance. */
+  memory?: ui_memory
 }
 
 type timeline_drag = { anchor: number }
 type flame_pan = { last_x: number; moved: boolean }
 
+export type memory_sort_key = 'name' | 'kind' | 'size'
+
 export interface profiler_panel_state {
+  /** Active inspector tab. */
+  tab: 'cpu' | 'memory'
   /** Selected frame-id range (inclusive), or null when following the live frame. */
   sel_lo: number | null
   sel_hi: number | null
@@ -50,22 +75,45 @@ export interface profiler_panel_state {
   view_t1: number
   /** Zone pinned to the detail bar by clicking it. */
   pinned: profiler_span | null
+  /** Memory tab: name filter typed into the search box. */
+  mem_search: string
+  mem_search_focused: boolean
+  /** Memory tab: table sort column and direction. */
+  mem_sort_key: memory_sort_key
+  mem_sort_asc: boolean
+  mem_scroll_y: number
+  /** Memory tab: name of the resource selected in the treemap / table. */
+  mem_selected: string | null
+  /** Memory tab: resource types whose table group is collapsed. */
+  mem_collapsed: string[]
   /** Internal transient interaction state. */
   _view_sig: string
   _tl_drag: timeline_drag | null
   _pan: flame_pan | null
+  _mem_scroll_to: string | null
+  _mem_generation: number
 }
 
 export function create_profiler_panel_state(): profiler_panel_state {
   return {
+    tab: 'cpu',
     sel_lo: null,
     sel_hi: null,
     view_t0: 0,
     view_t1: 0,
     pinned: null,
+    mem_search: '',
+    mem_search_focused: false,
+    mem_sort_key: 'kind',
+    mem_sort_asc: false,
+    mem_scroll_y: 0,
+    mem_selected: null,
+    mem_collapsed: [],
     _view_sig: '',
     _tl_drag: null,
     _pan: null,
+    _mem_scroll_to: null,
+    _mem_generation: -1,
   }
 }
 
@@ -106,21 +154,10 @@ export function profiler_panel(
   ui.push_clip(x, y, w, h)
   ui.fill_rect(x, y, w, h, col('panel'))
 
-  // --- Keep the selection inside the moving window --------------------------
-  const first = prof.frames[0]
-  const last = prof.frames[prof.frames.length - 1]
-  if (state.sel_lo !== null && state.sel_hi !== null) {
-    if (!first || state.sel_hi < first.index) {
-      state.sel_lo = state.sel_hi = null // slice scrolled out of the window
-    } else {
-      state.sel_lo = Math.max(state.sel_lo, first.index)
-    }
-  }
-
   const inside = (r: { x: number; y: number; w: number; h: number }) =>
     input.mouse_x >= r.x && input.mouse_x < r.x + r.w && input.mouse_y >= r.y && input.mouse_y < r.y + r.h
 
-  // --- Toolbar ---------------------------------------------------------------
+  // --- Toolbar: inspector tabs, then the active tab's own controls ------------
   let bx = tb.x
   const btn = (label: string, active = false): boolean => {
     const bw = ui.text_width(label, font) + 18 * scale
@@ -133,6 +170,28 @@ export function profiler_panel(
     if (hover) ui.set_cursor('pointer')
     return hover && input.mouse_pressed
   }
+  if (btn('CPU', state.tab === 'cpu')) state.tab = 'cpu'
+  if (btn('Memory', state.tab === 'memory')) state.tab = 'memory'
+  ui.stroke_line(bx, tb.y + tb.h * 0.5 - 8 * scale, bx, tb.y + tb.h * 0.5 + 8 * scale, 1, col('border'))
+  bx += 8 * scale
+
+  if (state.tab === 'memory') {
+    draw_memory_tab(ui, input, { x, y, w, h }, tb, bx, options?.memory ?? shared_memory, state, scale, col, inside)
+    ui.pop_clip()
+    return
+  }
+
+  // --- Keep the selection inside the moving window --------------------------
+  const first = prof.frames[0]
+  const last = prof.frames[prof.frames.length - 1]
+  if (state.sel_lo !== null && state.sel_hi !== null) {
+    if (!first || state.sel_hi < first.index) {
+      state.sel_lo = state.sel_hi = null // slice scrolled out of the window
+    } else {
+      state.sel_lo = Math.max(state.sel_lo, first.index)
+    }
+  }
+
   if (btn(prof.paused ? '▶ Resume' : '⏸ Pause', prof.paused)) {
     prof.toggle()
     if (!prof.paused) {
@@ -520,19 +579,489 @@ function draw_tooltip(
     `total ${format_ms(dur)} · ${((dur / Math.max(range_ms, 1e-6)) * 100).toFixed(1)}% of range`,
     `self  ${format_ms(Math.max(0, dur - child_ms))} · frame #${frame.index}`,
   ]
+  draw_tooltip_box(ui, fl, scale, font, col, mx, my, lines)
+}
+
+/** A multi-line overlay tooltip near the cursor, clamped inside `bounds`. First line is the title. */
+function draw_tooltip_box(
+  ui: ui_renderer,
+  bounds: { x: number; y: number; w: number; h: number },
+  scale: number,
+  font: number,
+  col: (slot: theme_slot) => number,
+  mx: number,
+  my: number,
+  lines: string[],
+): void {
   const pad = 7 * scale
   const line_h = 13 * scale
   let tw = 0
   for (const line of lines) tw = Math.max(tw, ui.text_width(line, font, FONT_MONO))
   const bw = tw + pad * 2
   const bh = lines.length * line_h + pad * 2 - 3 * scale
-  const bx = Math.min(mx + 14 * scale, fl.x + fl.w - bw - 2 * scale)
-  const by = Math.min(my + 16 * scale, fl.y + fl.h - bh - 2 * scale)
+  const bx = Math.min(mx + 14 * scale, bounds.x + bounds.w - bw - 2 * scale)
+  const by = Math.min(my + 16 * scale, bounds.y + bounds.h - bh - 2 * scale)
   ui.fill_round_rect(bx, by, bw, bh, 4 * scale, with_alpha(col('overlay'), 240))
   ui.stroke_round_rect(bx, by, bw, bh, 4 * scale, 1, col('border_strong'))
   for (let i = 0; i < lines.length; i += 1) {
     ui.draw_text(bx + pad, by + pad * 0.75 + i * line_h, lines[i], font, i === 0 ? col('text') : col('text_dim'), FONT_MONO)
   }
+}
+
+// --- memory tab --------------------------------------------------------------
+//
+// Treemap (area ∝ bytes, grouped by resource type) over a sortable, searchable
+// table of every resource in the `ui_memory` registry. The search box filters
+// by name; clicking a treemap cell selects the resource and scrolls the table
+// to it; clicking a column header sorts (Type keeps the type groups and orders
+// them by total bytes; Name / Size flatten the list).
+
+type mem_rect = { x: number; y: number; w: number; h: number }
+type mem_group = { kind: string; bytes: number; items: memory_resource[] }
+type mem_row = { header: mem_group | null; res: memory_resource | null }
+type mem_hover = { res: memory_resource }
+
+function draw_memory_tab(
+  ui: ui_renderer,
+  input: ui_input_snapshot,
+  panel: mem_rect,
+  tb: mem_rect,
+  toolbar_x: number,
+  mem: ui_memory,
+  state: profiler_panel_state,
+  scale: number,
+  col: (slot: theme_slot) => number,
+  inside: (r: mem_rect) => boolean,
+): void {
+  const pad = 8 * scale
+  const font = 10.5 * scale
+  const mono = 9.5 * scale
+
+  const all = mem.list()
+  const total_bytes = mem.total_bytes()
+  const gpu_bytes = mem.total_bytes('gpu')
+
+  // Repaint whenever the registry mutates so live sizes stream like the CPU tab.
+  if (mem.generation !== state._mem_generation) {
+    state._mem_generation = mem.generation
+    ui.request_render()
+  }
+
+  // --- Toolbar: search box (filters by name) + registry totals ---------------
+  const sb = { x: toolbar_x, y: tb.y + (tb.h - 22 * scale) * 0.5, w: Math.max(90 * scale, Math.min(230 * scale, tb.x + tb.w - toolbar_x)), h: 22 * scale }
+  draw_memory_search(ui, input, sb, scale, font, col, state, inside)
+  const info_full = `${all.length} resources · ${format_bytes(total_bytes)} (gpu ${format_bytes(gpu_bytes)} · cpu ${format_bytes(total_bytes - gpu_bytes)})`
+  const info = ui.text_width(info_full, mono, FONT_MONO) <= tb.x + tb.w - (sb.x + sb.w) - 10 * scale ? info_full : format_bytes(total_bytes)
+  const info_w = ui.text_width(info, mono, FONT_MONO)
+  if (info_w <= tb.x + tb.w - (sb.x + sb.w) - 10 * scale) {
+    ui.draw_text(tb.x + tb.w - info_w, ui.text_v_center_y(tb.y, tb.h, mono), info, mono, col('text_dim'), FONT_MONO)
+  }
+
+  // --- Filter + group by resource type ---------------------------------------
+  const query = state.mem_search.trim().toLowerCase()
+  const items = query ? all.filter((r) => r.name.toLowerCase().includes(query)) : [...all]
+  if (state.mem_selected && !items.some((r) => r.name === state.mem_selected)) state.mem_selected = null
+  const group_map = new Map<string, mem_group>()
+  for (const res of items) {
+    let group = group_map.get(res.kind)
+    if (!group) group_map.set(res.kind, (group = { kind: res.kind, bytes: 0, items: [] }))
+    group.bytes += res.size_bytes
+    group.items.push(res)
+  }
+  const groups = [...group_map.values()].sort((a, b) => b.bytes - a.bytes || a.kind.localeCompare(b.kind))
+
+  // --- Layout: treemap over table ---------------------------------------------
+  const content_top = tb.y + tb.h + pad * 0.5
+  const content_h = panel.y + panel.h - pad * 0.5 - content_top
+  let tm_h = clamp(content_h * 0.46, 80 * scale, 340 * scale)
+  if (content_h - tm_h < 70 * scale) tm_h = Math.max(0, content_h - 70 * scale)
+  const tm = { x: panel.x + pad, y: content_top, w: panel.w - pad * 2, h: tm_h }
+  const tbl_y = tm.h > 0 ? tm.y + tm.h + pad * 0.5 : content_top
+  const tbl = { x: tm.x, y: tbl_y, w: tm.w, h: panel.y + panel.h - pad * 0.5 - tbl_y }
+
+  let hovered: mem_hover | null = null
+  if (tm.h > 0) hovered = draw_memory_treemap(ui, input, tm, scale, col, state, groups, query, inside)
+  if (tbl.h > 24 * scale) draw_memory_table(ui, input, tbl, scale, col, state, groups, items, query, inside)
+
+  if (hovered) {
+    const res = hovered.res
+    const pct = total_bytes > 0 ? ((res.size_bytes / total_bytes) * 100).toFixed(1) : '0.0'
+    const lines = [res.name, `${format_bytes(res.size_bytes)} · ${pct}% of tracked`, `${res.kind} · ${res.device}${res.detail ? ` · ${res.detail}` : ''}`]
+    draw_tooltip_box(ui, panel, scale, mono, col, input.mouse_x, input.mouse_y, lines)
+  }
+}
+
+function draw_memory_search(
+  ui: ui_renderer,
+  input: ui_input_snapshot,
+  r: mem_rect,
+  scale: number,
+  font: number,
+  col: (slot: theme_slot) => number,
+  state: profiler_panel_state,
+  inside: (r: mem_rect) => boolean,
+): void {
+  ui.fill_round_rect(r.x, r.y, r.w, r.h, 4 * scale, col('panel_alt'))
+  ui.stroke_round_rect(r.x, r.y, r.w, r.h, 4 * scale, 1, state.mem_search_focused ? col('accent') : col('border'))
+  const icon = 12 * scale
+  draw_icon(ui, 'search', r.x + 6 * scale, r.y + (r.h - icon) * 0.5, icon, col('text_dim'))
+  const tx = r.x + 6 * scale + icon + 5 * scale
+  const clear_r = { x: r.x + r.w - 19 * scale, y: r.y + (r.h - 14 * scale) * 0.5, w: 14 * scale, h: 14 * scale }
+  const has_text = state.mem_search.length > 0
+  const over_clear = has_text && inside(clear_r)
+
+  if (input.mouse_pressed) {
+    if (over_clear) {
+      state.mem_search = ''
+      state.mem_scroll_y = 0
+    } else {
+      state.mem_search_focused = inside(r)
+    }
+  }
+  if (state.mem_search_focused) {
+    if (input.typed_text) {
+      state.mem_search += input.typed_text
+      state.mem_scroll_y = 0
+    }
+    if (input.key_backspace && state.mem_search) {
+      state.mem_search = state.mem_search.slice(0, -1)
+      state.mem_scroll_y = 0
+    }
+    if (input.key_escape) {
+      if (state.mem_search) state.mem_search = ''
+      else state.mem_search_focused = false
+      state.mem_scroll_y = 0
+    }
+    ui.request_render() // keep the caret blinking
+  }
+
+  const text_w_max = (has_text ? clear_r.x : r.x + r.w) - tx - 4 * scale
+  ui.push_clip(tx, r.y, Math.max(0, text_w_max), r.h)
+  if (has_text) {
+    ui.draw_text(tx, ui.text_v_center_y(r.y, r.h, font), state.mem_search, font, col('text'))
+  } else if (!state.mem_search_focused) {
+    ui.draw_text(tx, ui.text_v_center_y(r.y, r.h, font), 'Search by name…', font, with_alpha(col('text_dim'), 170))
+  }
+  if (state.mem_search_focused && performance.now() % 1060 < 530) {
+    const caret_x = Math.min(tx + ui.text_width(state.mem_search, font), tx + text_w_max - 1)
+    ui.fill_rect(caret_x, r.y + 4.5 * scale, 1.2 * scale, r.h - 9 * scale, col('accent'))
+  }
+  ui.pop_clip()
+  if (has_text) {
+    draw_icon(ui, 'close', clear_r.x + 2 * scale, clear_r.y + 2 * scale, 10 * scale, over_clear ? col('text') : col('text_dim'))
+    if (over_clear) ui.set_cursor('pointer')
+  }
+  if (inside(r) && !over_clear) ui.set_cursor('text')
+}
+
+function draw_memory_treemap(
+  ui: ui_renderer,
+  input: ui_input_snapshot,
+  tm: mem_rect,
+  scale: number,
+  col: (slot: theme_slot) => number,
+  state: profiler_panel_state,
+  groups: mem_group[],
+  query: string,
+  inside: (r: mem_rect) => boolean,
+): mem_hover | null {
+  const mono = 9.5 * scale
+  ui.fill_round_rect(tm.x, tm.y, tm.w, tm.h, 4 * scale, col('panel_alt'))
+  ui.stroke_round_rect(tm.x, tm.y, tm.w, tm.h, 4 * scale, 1, col('border'))
+  if (groups.length === 0) {
+    const msg = query ? `No resources match “${state.mem_search.trim()}”.` : 'Nothing tracked — report allocations via memory.track().'
+    ui.draw_text(tm.x + 10 * scale, tm.y + 10 * scale, msg, 10.5 * scale, col('text_dim'))
+    return null
+  }
+
+  let hovered: mem_hover | null = null
+  const gap = 2 * scale
+  const group_cells = squarify(groups.map((g) => ({ value: Math.max(g.bytes, 1), data: g })), tm.x + gap, tm.y + gap, tm.w - gap * 2, tm.h - gap * 2)
+  ui.push_clip(tm.x, tm.y, tm.w, tm.h)
+  for (const cell of group_cells) {
+    const group = cell.data
+    const hue = str_hash(group.kind) % 360
+    const gx = cell.x + 1 * scale
+    const gy = cell.y + 1 * scale
+    const gw = cell.w - 2 * scale
+    const gh = cell.h - 2 * scale
+    if (gw < 2 || gh < 2) continue
+    ui.fill_round_rect(gx, gy, gw, gh, 3 * scale, with_alpha(hsv_color(hue, 0.45, 0.6), 40))
+    ui.stroke_round_rect(gx, gy, gw, gh, 3 * scale, 1, with_alpha(hsv_color(hue, 0.5, 0.8), 140))
+    const header_h = gh >= 34 * scale && gw >= 46 * scale ? 13 * scale : 0
+    if (header_h > 0) {
+      ui.push_clip(gx + 4 * scale, gy, Math.max(0, gw - 8 * scale), header_h + 2 * scale)
+      ui.draw_text(gx + 4 * scale, gy + 2.5 * scale, `${group.kind} · ${format_bytes(group.bytes)}`, mono, col('text_dim'), FONT_MONO)
+      ui.pop_clip()
+    }
+    const inner = {
+      x: gx + 2 * scale,
+      y: gy + (header_h > 0 ? header_h + 2 * scale : 2 * scale),
+      w: gw - 4 * scale,
+      h: gh - (header_h > 0 ? header_h + 4 * scale : 4 * scale),
+    }
+    if (inner.w < 2 || inner.h < 2) continue
+    const members = [...group.items].sort((a, b) => b.size_bytes - a.size_bytes || a.name.localeCompare(b.name))
+    const member_cells = squarify(members.map((r) => ({ value: Math.max(r.size_bytes, 1), data: r })), inner.x, inner.y, inner.w, inner.h)
+    for (const mc of member_cells) {
+      const res = mc.data
+      const cw = Math.max(mc.w - 0.75 * scale, 0.75)
+      const ch = Math.max(mc.h - 0.75 * scale, 0.75)
+      const rect = { x: mc.x, y: mc.y, w: cw, h: ch }
+      const hover = inside(rect)
+      const selected = state.mem_selected === res.name
+      // CPU-resident cells get a hollower fill so residency reads at a glance.
+      const value = hover || selected ? 0.95 : 0.7 + (str_hash(res.name) % 4) * 0.05
+      const fill = hsv_color(hue, res.device === 'cpu' ? 0.24 : 0.42, value)
+      ui.fill_round_rect(rect.x, rect.y, rect.w, rect.h, 2 * scale, fill)
+      if (selected) ui.stroke_round_rect(rect.x, rect.y, rect.w, rect.h, 2 * scale, 1.5 * scale, col('accent'))
+      if (cw > 44 * scale && ch > 13 * scale) {
+        const label = `${short_name(res.name)} ${format_bytes(res.size_bytes)}`
+        ui.push_clip(rect.x + 3 * scale, rect.y, Math.max(0, cw - 6 * scale), ch)
+        ui.draw_text(rect.x + 3 * scale, ui.text_v_center_y(rect.y, Math.min(ch, 16 * scale), mono), label, mono, pack_color('#0e1116'), FONT_MONO)
+        ui.pop_clip()
+      }
+      if (hover) {
+        hovered = { res }
+        ui.set_cursor('pointer')
+        if (input.mouse_pressed) {
+          state.mem_selected = selected ? null : res.name
+          if (!selected) state._mem_scroll_to = res.name
+        }
+      }
+    }
+  }
+  ui.pop_clip()
+  return hovered
+}
+
+function draw_memory_table(
+  ui: ui_renderer,
+  input: ui_input_snapshot,
+  tbl: mem_rect,
+  scale: number,
+  col: (slot: theme_slot) => number,
+  state: profiler_panel_state,
+  groups: mem_group[],
+  items: memory_resource[],
+  query: string,
+  inside: (r: mem_rect) => boolean,
+): void {
+  const font = 10.5 * scale
+  const mono = 9.5 * scale
+  const header_h = 21 * scale
+  const row_h = 20 * scale
+  ui.fill_round_rect(tbl.x, tbl.y, tbl.w, tbl.h, 4 * scale, col('panel_alt'))
+  ui.stroke_round_rect(tbl.x, tbl.y, tbl.w, tbl.h, 4 * scale, 1, col('border'))
+
+  // --- Columns, laid out from the right edge ----------------------------------
+  const size_x = tbl.x + tbl.w - 92 * scale
+  const dev_x = tbl.w >= 320 * scale ? size_x - 44 * scale : size_x
+  const kind_x = tbl.w >= 250 * scale ? dev_x - 92 * scale : dev_x
+  const name_x = tbl.x + 8 * scale
+
+  // --- Header: click a column to sort, click again to flip --------------------
+  const grouped = state.mem_sort_key === 'kind'
+  const sort_header = (label: string, key: memory_sort_key | null, hx: number, hw: number, align_right: boolean): void => {
+    if (hw <= 0) return
+    const r = { x: hx, y: tbl.y, w: hw, h: header_h }
+    const hover = key !== null && inside(r)
+    if (hover) ui.set_cursor('pointer')
+    const active = key !== null && state.mem_sort_key === key
+    const color = active || hover ? col('text') : col('text_dim')
+    const tw = ui.text_width(label, font)
+    const text_x = align_right ? hx + hw - tw - (active ? 13 * scale : 0) - 8 * scale : hx
+    ui.draw_text(text_x, ui.text_v_center_y(tbl.y, header_h, font), label, font, color)
+    if (active) draw_icon(ui, state.mem_sort_asc ? 'chevron_up' : 'chevron_down', text_x + tw + 2 * scale, tbl.y + (header_h - 11 * scale) * 0.5, 11 * scale, color)
+    if (hover && input.mouse_pressed && key !== null) {
+      if (state.mem_sort_key === key) {
+        state.mem_sort_asc = !state.mem_sort_asc
+      } else {
+        state.mem_sort_key = key
+        state.mem_sort_asc = key === 'name' // size and type default to big-first
+      }
+    }
+  }
+  sort_header('Name', 'name', name_x, kind_x - name_x - 6 * scale, false)
+  if (kind_x < dev_x) sort_header('Type', 'kind', kind_x, dev_x - kind_x - 6 * scale, false)
+  if (dev_x < size_x) ui.draw_text(dev_x, ui.text_v_center_y(tbl.y, header_h, font), 'Dev', font, col('text_dim'))
+  sort_header('Size', 'size', size_x, tbl.x + tbl.w - size_x, true)
+  ui.stroke_line(tbl.x, tbl.y + header_h, tbl.x + tbl.w, tbl.y + header_h, 1, col('border'))
+
+  // --- Rows: type groups (collapsible) or a flat sorted list ------------------
+  const dir = state.mem_sort_asc ? 1 : -1
+  if (state._mem_scroll_to && grouped) {
+    const target = items.find((r) => r.name === state._mem_scroll_to)
+    if (target) state.mem_collapsed = state.mem_collapsed.filter((k) => k !== target.kind)
+  }
+  const rows: mem_row[] = []
+  if (grouped) {
+    const ordered = [...groups].sort((a, b) => (a.bytes - b.bytes) * dir || a.kind.localeCompare(b.kind))
+    for (const group of ordered) {
+      rows.push({ header: group, res: null })
+      if (state.mem_collapsed.includes(group.kind)) continue
+      const members = [...group.items].sort((a, b) => b.size_bytes - a.size_bytes || a.name.localeCompare(b.name))
+      for (const res of members) rows.push({ header: null, res })
+    }
+  } else {
+    const sorted = [...items].sort((a, b) =>
+      state.mem_sort_key === 'name' ? a.name.localeCompare(b.name) * dir : (a.size_bytes - b.size_bytes) * dir || a.name.localeCompare(b.name),
+    )
+    for (const res of sorted) rows.push({ header: null, res })
+  }
+
+  const view = { x: tbl.x, y: tbl.y + header_h + 1, w: tbl.w, h: tbl.h - header_h - 2 }
+  const total_h = rows.length * row_h
+  if (state._mem_scroll_to) {
+    const idx = rows.findIndex((r) => r.res?.name === state._mem_scroll_to)
+    if (idx >= 0) {
+      const top = idx * row_h
+      if (top < state.mem_scroll_y) state.mem_scroll_y = top
+      else if (top + row_h > state.mem_scroll_y + view.h) state.mem_scroll_y = top + row_h - view.h
+    }
+    state._mem_scroll_to = null
+  }
+  if (inside(view) && input.wheel_y) state.mem_scroll_y -= input.wheel_y * 20 * scale
+  state.mem_scroll_y = clamp(state.mem_scroll_y, 0, Math.max(0, total_h - view.h))
+
+  ui.push_clip(view.x, view.y, view.w, view.h)
+  if (rows.length === 0) {
+    const msg = query ? `No resources match “${state.mem_search.trim()}”.` : 'Nothing tracked yet.'
+    ui.draw_text(view.x + 8 * scale, view.y + 8 * scale, msg, font, col('text_dim'))
+  }
+  const first_row = Math.max(0, Math.floor(state.mem_scroll_y / row_h))
+  for (let i = first_row; i < rows.length; i += 1) {
+    const ry = view.y + i * row_h - state.mem_scroll_y
+    if (ry >= view.y + view.h) break
+    const row = rows[i]
+    const row_rect = { x: view.x, y: ry, w: view.w, h: row_h }
+    const hover = inside(row_rect)
+    if (row.header) {
+      const group = row.header
+      const collapsed = state.mem_collapsed.includes(group.kind)
+      ui.fill_rect(row_rect.x, row_rect.y, row_rect.w, row_rect.h, hover ? col('hover') : col('track'))
+      draw_icon(ui, collapsed ? 'chevron_right' : 'chevron_down', view.x + 4 * scale, ry + (row_h - 12 * scale) * 0.5, 12 * scale, col('text_dim'))
+      const hue = str_hash(group.kind) % 360
+      ui.fill_round_rect(view.x + 19 * scale, ry + (row_h - 8 * scale) * 0.5, 8 * scale, 8 * scale, 2 * scale, hsv_color(hue, 0.42, 0.78))
+      ui.draw_text(view.x + 31 * scale, ui.text_v_center_y(ry, row_h, font), group.kind, font, col('text'))
+      const sub = `${group.items.length} · ${format_bytes(group.bytes)}`
+      ui.draw_text(view.x + 31 * scale + ui.text_width(group.kind, font) + 8 * scale, ui.text_v_center_y(ry, row_h, mono), sub, mono, col('text_dim'), FONT_MONO)
+      if (hover) {
+        ui.set_cursor('pointer')
+        if (input.mouse_pressed) {
+          state.mem_collapsed = collapsed ? state.mem_collapsed.filter((k) => k !== group.kind) : [...state.mem_collapsed, group.kind]
+        }
+      }
+      continue
+    }
+    const res = row.res
+    if (!res) continue
+    const selected = state.mem_selected === res.name
+    if (selected) {
+      ui.fill_rect(row_rect.x, row_rect.y, row_rect.w, row_rect.h, with_alpha(col('accent'), 52))
+      ui.fill_rect(row_rect.x, row_rect.y, 2 * scale, row_rect.h, col('accent'))
+    } else if (hover) {
+      ui.fill_rect(row_rect.x, row_rect.y, row_rect.w, row_rect.h, col('hover'))
+    }
+    const nx = name_x + (grouped ? 16 * scale : 0)
+    ui.push_clip(nx, ry, Math.max(0, kind_x - nx - 8 * scale), row_h)
+    ui.draw_text(nx, ui.text_v_center_y(ry, row_h, font), res.name, font, col('text'))
+    if (res.detail) {
+      const name_w = ui.text_width(res.name, font)
+      ui.draw_text(nx + name_w + 7 * scale, ui.text_v_center_y(ry, row_h, mono), res.detail, mono, with_alpha(col('text_dim'), 180), FONT_MONO)
+    }
+    ui.pop_clip()
+    if (kind_x < dev_x) {
+      ui.push_clip(kind_x, ry, dev_x - kind_x - 6 * scale, row_h)
+      ui.draw_text(kind_x, ui.text_v_center_y(ry, row_h, font), res.kind, font, col('text_dim'))
+      ui.pop_clip()
+    }
+    if (dev_x < size_x) ui.draw_text(dev_x, ui.text_v_center_y(ry, row_h, mono), res.device, mono, col('text_dim'), FONT_MONO)
+    const size_label = format_bytes(res.size_bytes)
+    const size_w = ui.text_width(size_label, mono, FONT_MONO)
+    ui.draw_text(tbl.x + tbl.w - size_w - 8 * scale, ui.text_v_center_y(ry, row_h, mono), size_label, mono, col('text'), FONT_MONO)
+    if (hover) {
+      ui.set_cursor('pointer')
+      if (input.mouse_pressed) state.mem_selected = selected ? null : res.name
+    }
+  }
+  ui.pop_clip()
+
+  // --- Scrollbar ---------------------------------------------------------------
+  if (total_h > view.h) {
+    const track_x = tbl.x + tbl.w - 5 * scale
+    const knob_h = Math.max(18 * scale, (view.h / total_h) * view.h)
+    const knob_y = view.y + (state.mem_scroll_y / (total_h - view.h)) * (view.h - knob_h)
+    ui.fill_round_rect(track_x, knob_y, 3 * scale, knob_h, 1.5 * scale, with_alpha(col('text_dim'), 110))
+  }
+}
+
+/** `ui.font_texture.cjk` → `font_texture.cjk` — drop the common `ui.` prefix for compact treemap labels. */
+function short_name(name: string): string {
+  return name.startsWith('ui.') ? name.slice(3) : name
+}
+
+// --- squarified treemap layout ------------------------------------------------
+
+type tm_cell<T> = { x: number; y: number; w: number; h: number; data: T }
+
+/**
+ * Squarified treemap: split `rect` into one cell per entry with area ∝ value,
+ * laying rows along the shorter edge while that keeps cells closest to square.
+ * Entries must be sorted by descending value.
+ */
+function squarify<T>(entries: { value: number; data: T }[], x: number, y: number, w: number, h: number): tm_cell<T>[] {
+  const out: tm_cell<T>[] = []
+  let total = 0
+  for (const e of entries) total += e.value
+  if (total <= 0 || w <= 1 || h <= 1) return out
+  const area_scale = (w * h) / total
+  let i = 0
+  while (i < entries.length) {
+    const side = Math.min(w, h)
+    let count = 1
+    let worst = squarify_row_worst(entries, i, 1, area_scale, side)
+    while (i + count < entries.length) {
+      const next = squarify_row_worst(entries, i, count + 1, area_scale, side)
+      if (next > worst) break
+      worst = next
+      count += 1
+    }
+    let row_area = 0
+    for (let k = i; k < i + count; k += 1) row_area += entries[k].value * area_scale
+    const thickness = side > 0 ? row_area / side : 0
+    let off = 0
+    for (let k = i; k < i + count; k += 1) {
+      const len = thickness > 0 ? (entries[k].value * area_scale) / thickness : 0
+      if (w >= h) out.push({ x, y: y + off, w: thickness, h: len, data: entries[k].data })
+      else out.push({ x: x + off, y, w: len, h: thickness, data: entries[k].data })
+      off += len
+    }
+    if (w >= h) {
+      x += thickness
+      w -= thickness
+    } else {
+      y += thickness
+      h -= thickness
+    }
+    i += count
+  }
+  return out
+}
+
+/** Worst (most stretched) aspect ratio in the row `entries[start, start+count)` laid along `side`. */
+function squarify_row_worst<T>(entries: { value: number; data: T }[], start: number, count: number, area_scale: number, side: number): number {
+  let sum = 0
+  let lo = Infinity
+  let hi = 0
+  for (let k = start; k < start + count; k += 1) {
+    const area = Math.max(1e-6, entries[k].value * area_scale)
+    sum += area
+    lo = Math.min(lo, area)
+    hi = Math.max(hi, area)
+  }
+  const s2 = side * side
+  return Math.max((sum * sum) / (s2 * lo), (s2 * hi) / (sum * sum))
 }
 
 // --- helpers ----------------------------------------------------------------
@@ -557,11 +1086,15 @@ function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v))
 }
 
+function str_hash(text: string): number {
+  let hash = 0
+  for (let i = 0; i < text.length; i += 1) hash = (hash * 31 + text.charCodeAt(i)) >>> 0
+  return hash
+}
+
 /** Stable pastel color per zone name (hashed hue), brighter when highlighted. */
 function name_color(name: string, highlight: boolean): number {
-  let hash = 0
-  for (let i = 0; i < name.length; i += 1) hash = (hash * 31 + name.charCodeAt(i)) >>> 0
-  return hsv_color(hash % 360, 0.42, highlight ? 0.95 : 0.78)
+  return hsv_color(str_hash(name) % 360, 0.42, highlight ? 0.95 : 0.78)
 }
 
 function hsv_color(hue_deg: number, saturation: number, value: number): number {
