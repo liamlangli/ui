@@ -58,8 +58,8 @@ import {
   type node_graph_node,
   type node_graph_connection,
   type node_graph_template,
+  input_collector,
 } from '../src/index'
-import { input_collector } from './ui_input'
 import theme_url from './theme.json?url'
 
 const canvas = document.getElementById('app') as HTMLCanvasElement

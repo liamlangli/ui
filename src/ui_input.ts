@@ -2,7 +2,7 @@
 // the toolkit consumes. Coordinates are reported in *physical* pixels
 // (clientX * devicePixelRatio) to match the renderer's coordinate space.
 
-import { create_empty_ui_input, type ui_input_snapshot, type ui_native_text_input, type ui_native_text_region } from '../src'
+import { create_empty_ui_input, type ui_input_snapshot, type ui_native_text_input, type ui_native_text_region } from './ui_widgets'
 
 export class input_collector {
   private state: ui_input_snapshot = create_empty_ui_input()
