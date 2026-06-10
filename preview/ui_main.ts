@@ -56,6 +56,7 @@ import {
   profiler,
   profiler_panel,
   create_profiler_panel_state,
+  memory,
   type editor_token,
   type editor_token_kind,
   type file_node,
@@ -580,6 +581,16 @@ const metrics = {
   last_frame_start_ms: performance.now(),
 }
 
+// Report the demo's own CPU-side captures to the shared memory registry, so the
+// profiler's Memory tab shows host resources next to the renderer's. Sizes are
+// rough per-record estimates — enough to see the moving windows grow and settle.
+function track_host_memory(): void {
+  let span_count = 0
+  for (const f of profiler.frames) span_count += f.spans.length
+  memory.track('app.profiler_capture', 'profiler', 'cpu', profiler.frames.length * 96 + span_count * 72, `${profiler.frames.length} frames`)
+  memory.track('app.metrics_samples', 'profiler', 'cpu', metrics.samples.length * 120, `${metrics.samples.length} samples`)
+}
+
 // --- Theme switching with a linear cross-fade ------------------------------
 const theme_ctrl = {
   presets: [] as theme_preset[],
@@ -773,6 +784,7 @@ async function main(): Promise<void> {
     renderer.flush(clear)
     profiler.end()
     profiler.end_frame()
+    track_host_memory()
     record_metric_sample(frame_delta_ms > 0 ? 1000 / frame_delta_ms : 0, performance.now() - frame_start_ms, renderer.renderer_stats())
     input.end_frame()
     requestAnimationFrame(frame)

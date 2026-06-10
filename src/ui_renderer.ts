@@ -4,6 +4,7 @@ import ping_fang_font_json_url from '../assets/ping_fang_sc_regular.json?url'
 import ping_fang_font_image_url from '../assets/ping_fang_sc_regular.webp?url'
 import ui_shader_url from '../assets/ui.wgsl?url'
 import { clamp } from './ui_math'
+import { memory } from './ui_memory'
 
 export interface ui_draw_command {
   vertex_offset: number
@@ -288,6 +289,26 @@ async function load_json<t>(url: string): Promise<t> {
   return res.json() as Promise<t>
 }
 
+// Estimated bytes per texel for the formats the UI touches; unknown formats
+// assume 4 (every 8-bit RGBA swapchain format).
+const texture_format_bytes: Partial<Record<GPUTextureFormat, number>> = {
+  r8unorm: 1,
+  rg8unorm: 2,
+  rgba8unorm: 4,
+  'rgba8unorm-srgb': 4,
+  bgra8unorm: 4,
+  'bgra8unorm-srgb': 4,
+  rgba16float: 8,
+  rgba32float: 16,
+}
+
+function gpu_texture_bytes(texture: GPUTexture): number {
+  return texture.width * texture.height * Math.max(1, texture.depthOrArrayLayers) * (texture_format_bytes[texture.format] ?? 4)
+}
+
+// Rough per-glyph CPU footprint of a font atlas table: 7 numbers + map entry overhead.
+const glyph_table_bytes_per_entry = 88
+
 async function load_image_bitmap_asset(url: string): Promise<ImageBitmap> {
   const res = await fetch(url)
   if (!res.ok) throw new Error(`fetch ${url}: ${res.status}`)
@@ -532,6 +553,7 @@ export class ui_renderer {
   private sampler: GPUSampler | null = null
   private sampler_nearest: GPUSampler | null = null
   private readonly data_textures = new Map<number, data_texture>()
+  private readonly external_texture_names = new Map<number, string>()
   private next_texture_id = first_external_texture_id
   private color_panel_uniform: GPUBuffer | null = null
   private color_square_texture: color_panel_texture | null = null
@@ -545,7 +567,9 @@ export class ui_renderer {
   private render_mode_: ui_renderer_render_mode = 'adaptive'
   private pending_render_frames = 0
 
-  constructor(private readonly canvas: HTMLCanvasElement) {}
+  constructor(private readonly canvas: HTMLCanvasElement) {
+    memory.track('ui.primitive_buffer', 'geometry', 'cpu', this.vertex_data.byteLength, 'frame vertex staging')
+  }
 
   async init(options?: ui_renderer_init_options): Promise<void> {
     this.render_mode_ = options?.mode ?? 'adaptive'
@@ -567,6 +591,8 @@ export class ui_renderer {
     this.font_atlases.set(FONT_MAIN, glyph_map(font_face(latin_mono_font_doc, FONT_MAIN), latin_mono_font_doc.width, latin_mono_font_doc.height))
     this.font_atlases.set(FONT_MONO, glyph_map(font_face(latin_mono_font_doc, FONT_MONO), latin_mono_font_doc.width, latin_mono_font_doc.height))
     this.screen_buffer = this.device.createBuffer({ label: 'ui.screen_buffer', size: 8, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST })
+    memory.track('ui.screen_buffer', 'buffer', 'gpu', 8, 'screen-size uniform')
+    this.track_glyph_tables()
 
     const f16 = this.device.features.has('shader-f16')
     const shader_module = this.device.createShaderModule({ label: 'ui.shader_module', code: apply_f16(shader_code, f16) })
@@ -632,6 +658,7 @@ export class ui_renderer {
       format: 'rgba8unorm',
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     })
+    memory.track('ui.white_texture', 'texture', 'gpu', 4, '1×1 rgba8')
     this.device.queue.writeTexture({ texture: white_texture }, new Uint8Array([255, 255, 255, 255]), { bytesPerRow: 4 }, { width: 1, height: 1, depthOrArrayLayers: 1 })
     this.bind_group_white = this.device.createBindGroup({
       label: 'ui.bind_group.white',
@@ -649,6 +676,7 @@ export class ui_renderer {
       size: 32,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
+    memory.track('ui.buffer.color_panel', 'buffer', 'gpu', 32, 'color panel uniform')
     this.resize()
 
     // The Chinese atlas is large, so load it off the critical path. The CJK
@@ -671,6 +699,8 @@ export class ui_renderer {
     this.font_atlases.set(FONT_MAIN, glyph_map(font_face(latin_mono_font_doc, FONT_MAIN), latin_mono_font_doc.width, latin_mono_font_doc.height))
     this.font_atlases.set(FONT_MONO, glyph_map(font_face(latin_mono_font_doc, FONT_MONO), latin_mono_font_doc.width, latin_mono_font_doc.height))
     this.screen_buffer = this.device.createBuffer({ label: 'ui.screen_buffer', size: 8, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST })
+    memory.track('ui.screen_buffer', 'buffer', 'gpu', 8, 'screen-size uniform')
+    this.track_glyph_tables()
 
     const f16 = this.device.features.has('shader-f16')
     const shader_module = this.device.createShaderModule({ label: 'ui.shader_module', code: apply_f16(shader_code, f16) })
@@ -736,6 +766,7 @@ export class ui_renderer {
       format: 'rgba8unorm',
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     })
+    memory.track('ui.white_texture', 'texture', 'gpu', 4, '1×1 rgba8')
     this.device.queue.writeTexture({ texture: white_texture }, new Uint8Array([255, 255, 255, 255]), { bytesPerRow: 4 }, { width: 1, height: 1, depthOrArrayLayers: 1 })
     this.bind_group_white = this.device.createBindGroup({
       label: 'ui.bind_group.white',
@@ -753,6 +784,7 @@ export class ui_renderer {
       size: 32,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
+    memory.track('ui.buffer.color_panel', 'buffer', 'gpu', 32, 'color panel uniform')
     this.resize_to(this.canvas.width || 1, this.canvas.height || 1)
 
     if (options?.chinese_font ?? true) void this.load_chinese_font()
@@ -780,6 +812,16 @@ export class ui_renderer {
     if (!this.device || !this.sampler || !this.bind_group_layout || !this.screen_buffer) return
     this.font_atlases.set(FONT_ZH, glyph_map(cjk_font_doc, cjk_font_doc.width, cjk_font_doc.height, { cjk_punctuation_fallbacks: true }))
     this.font_bind_groups.set(cjk_font_texture_id, this.create_texture_bind_group('ui.font_texture.cjk', cjk_font_image, this.sampler, this.bind_group_layout))
+    memory.untrack('ui.font_texture.cjk.placeholder')
+    this.track_glyph_tables()
+  }
+
+  /** Report the CPU-side glyph metric tables of every loaded font atlas. */
+  private track_glyph_tables(): void {
+    for (const [type, atlas] of this.font_atlases) {
+      const label = type === FONT_MAIN ? 'main' : type === FONT_MONO ? 'mono' : 'cjk'
+      memory.track(`ui.font_glyphs.${label}`, 'font', 'cpu', atlas.glyphs.size * glyph_table_bytes_per_entry, `${atlas.glyphs.size} glyphs`)
+    }
   }
 
   resize(): void {
@@ -844,6 +886,7 @@ export class ui_renderer {
         { binding: 2, resource: { buffer: this.screen_buffer } },
       ],
     }))
+    this.track_external_texture(id, texture)
     return id
   }
 
@@ -858,6 +901,15 @@ export class ui_renderer {
         { binding: 2, resource: { buffer: this.screen_buffer } },
       ],
     }))
+    this.track_external_texture(texture_id, texture)
+  }
+
+  private track_external_texture(texture_id: number, texture: GPUTexture): void {
+    const prev_name = this.external_texture_names.get(texture_id)
+    const name = texture.label || prev_name || `ui.external_texture.${texture_id}`
+    if (prev_name && prev_name !== name) memory.untrack(prev_name)
+    this.external_texture_names.set(texture_id, name)
+    memory.track(name, 'texture', 'gpu', gpu_texture_bytes(texture), `${texture.width}×${texture.height} ${texture.format}`)
   }
 
   /**
@@ -883,6 +935,7 @@ export class ui_renderer {
     const id = this.next_texture_id++
     this.extra_bind_groups.set(id, this.create_data_texture_bind_group(id, texture, filter))
     this.data_textures.set(id, { texture, width: w, height: h, filter })
+    memory.track(`ui.data_texture.${id}`, 'texture', 'gpu', w * h * 4, `${w}×${h} rgba8`)
     return id
   }
 
@@ -908,6 +961,7 @@ export class ui_renderer {
       entry.width = w
       entry.height = h
       this.extra_bind_groups.set(texture_id, this.create_data_texture_bind_group(texture_id, entry.texture, entry.filter))
+      memory.track(`ui.data_texture.${texture_id}`, 'texture', 'gpu', w * h * 4, `${w}×${h} rgba8`)
     }
     this.device.queue.writeTexture(
       { texture: entry.texture },
@@ -924,6 +978,7 @@ export class ui_renderer {
     entry.texture.destroy()
     this.data_textures.delete(texture_id)
     this.extra_bind_groups.delete(texture_id)
+    memory.untrack(`ui.data_texture.${texture_id}`)
   }
 
   private create_data_texture_bind_group(id: number, texture: GPUTexture, filter: ui_texture_filter): GPUBindGroup {
@@ -1653,16 +1708,7 @@ export class ui_renderer {
       if (this.render_mode_ === 'adaptive') this.pending_render_frames -= 1
       // Grow the GPU vertex buffer only here, right before we render. The CPU
       // side buffer is grown per primitive during the frame, never per vertex.
-      if (!this.vertex_buffer || this.vertex_buffer.size < byte_length) {
-        let next_size = Math.max(this.vertex_buffer?.size ?? 0, 4096)
-        while (next_size < byte_length) next_size *= 2
-        this.vertex_buffer?.destroy()
-        this.vertex_buffer = this.device.createBuffer({
-          label: 'ui.vertex_buffer',
-          size: next_size,
-          usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-        })
-      }
+      this.ensure_vertex_buffer(byte_length)
       this.last_frame_stats = this.capture_stats(byte_length)
       this.device.queue.writeBuffer(this.vertex_buffer, 0, this.vertex_data, 0, vertex_byte_length)
       const encoder = this.device.createCommandEncoder({ label: 'ui.command_encoder' })
@@ -1694,16 +1740,7 @@ export class ui_renderer {
     if (!this.device || !this.pipeline_image || !this.pipeline_sdf || !this.bind_group_white) return
     const vertex_byte_length = this.vertex_count * vertex_stride
     const byte_length = Math.max(vertex_byte_length, vertex_stride)
-    if (!this.vertex_buffer || this.vertex_buffer.size < byte_length) {
-      let next_size = Math.max(this.vertex_buffer?.size ?? 0, 4096)
-      while (next_size < byte_length) next_size *= 2
-      this.vertex_buffer?.destroy()
-      this.vertex_buffer = this.device.createBuffer({
-        label: 'ui.vertex_buffer',
-        size: next_size,
-        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-      })
-    }
+    this.ensure_vertex_buffer(byte_length)
     this.last_frame_stats = this.capture_stats(byte_length)
     this.device.queue.writeBuffer(this.vertex_buffer, 0, this.vertex_data, 0, vertex_byte_length)
     this.encode_render_pass(pass)
@@ -1749,16 +1786,7 @@ export class ui_renderer {
 
     if (vertex_byte_length > 0) {
       const byte_length = Math.max(vertex_byte_length, vertex_stride)
-      if (!this.vertex_buffer || this.vertex_buffer.size < byte_length) {
-        let next_size = Math.max(this.vertex_buffer?.size ?? 0, 4096)
-        while (next_size < byte_length) next_size *= 2
-        this.vertex_buffer?.destroy()
-        this.vertex_buffer = this.device.createBuffer({
-          label: 'ui.vertex_buffer',
-          size: next_size,
-          usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-        })
-      }
+      this.ensure_vertex_buffer(byte_length)
       this.device.queue.writeBuffer(this.vertex_buffer, 0, this.vertex_data, 0, vertex_byte_length)
       // Rebase pixel→NDC onto the target's size for the duration of the pass.
       this.device.queue.writeBuffer(this.screen_buffer, 0, new Float32Array([w, h]))
@@ -1798,6 +1826,21 @@ export class ui_renderer {
     this.enlarge_if_needed()
   }
 
+  /** Grow (power-of-two) the GPU vertex buffer to hold at least `byte_length` bytes. */
+  private ensure_vertex_buffer(byte_length: number): void {
+    if (!this.device) return
+    if (this.vertex_buffer && this.vertex_buffer.size >= byte_length) return
+    let next_size = Math.max(this.vertex_buffer?.size ?? 0, 4096)
+    while (next_size < byte_length) next_size *= 2
+    this.vertex_buffer?.destroy()
+    this.vertex_buffer = this.device.createBuffer({
+      label: 'ui.vertex_buffer',
+      size: next_size,
+      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+    })
+    memory.track('ui.vertex_buffer', 'geometry', 'gpu', next_size, 'frame vertex buffer')
+  }
+
   private encode_render_pass(pass: GPURenderPassEncoder): void {
     if (!this.vertex_buffer || !this.pipeline_image || !this.pipeline_sdf || !this.bind_group_white) return
     pass.setVertexBuffer(0, this.vertex_buffer)
@@ -1827,6 +1870,7 @@ export class ui_renderer {
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     })
     this.device.queue.writeTexture({ texture }, new Uint8Array([0, 0, 0, 0]), { bytesPerRow: 4 }, { width: 1, height: 1, depthOrArrayLayers: 1 })
+    memory.track(label, 'font', 'gpu', 4, '1×1 rgba8')
     return this.device.createBindGroup({
       label: label.replace('texture', 'bind_group'),
       layout,
@@ -1847,6 +1891,7 @@ export class ui_renderer {
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
     })
     this.device.queue.copyExternalImageToTexture({ source: image }, { texture }, { width: image.width, height: image.height })
+    memory.track(label, 'font', 'gpu', gpu_texture_bytes(texture), `${image.width}×${image.height} rgba8`)
     return this.device.createBindGroup({
       label: label.replace('texture', 'bind_group'),
       layout,
@@ -2065,6 +2110,7 @@ export class ui_renderer {
     new Uint8Array(next_buffer).set(new Uint8Array(this.vertex_data))
     this.vertex_data = next_buffer
     this.view = new DataView(this.vertex_data)
+    memory.track('ui.primitive_buffer', 'geometry', 'cpu', this.vertex_data.byteLength, 'frame vertex staging')
   }
 
   private enlarge_if_needed(): void {
@@ -2074,6 +2120,7 @@ export class ui_renderer {
     new Uint8Array(next_buffer).set(new Uint8Array(this.vertex_data))
     this.vertex_data = next_buffer
     this.view = new DataView(this.vertex_data)
+    memory.track('ui.primitive_buffer', 'geometry', 'cpu', this.vertex_data.byteLength, 'frame vertex staging')
   }
 
   private push_vertex(x: number, y: number, u: number, v: number, color: number): boolean {
