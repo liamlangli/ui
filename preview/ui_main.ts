@@ -814,6 +814,11 @@ async function main(): Promise<void> {
       key_a: false, key_c: false,
     }
     const desktop_snapshot = dashboard_open ? blank_input : snapshot
+    // The menu activates on mouse_pressed, so when it opens the dashboard the
+    // press edge is still live in this frame's snapshot — feed the dashboard
+    // blank input on its opening frame so that click can't instantly launch a
+    // tile under the cursor or dismiss the dashboard again.
+    const dashboard_open_at_frame_start = dashboard_open
     const safe = renderer.safe_rect()
     const scale = window.devicePixelRatio || 1
     const m = 8 * scale
@@ -958,7 +963,7 @@ async function main(): Promise<void> {
     // registry, drawn above the desktop and the menu bar.
     if (dashboard_open) {
       profiler.begin('dashboard')
-      const ev = dashboard(renderer, theme, snapshot, safe.x, safe.y, safe.w, safe.h, registry.apps, dashboard_state, { icons: icon_set ?? undefined })
+      const ev = dashboard(renderer, theme, dashboard_open_at_frame_start ? snapshot : blank_input, safe.x, safe.y, safe.w, safe.h, registry.apps, dashboard_state, { icons: icon_set ?? undefined })
       profiler.end()
       if (ev.launched) launch_app(ev.launched)
       if (ev.dismissed) dashboard_open = false
@@ -1477,6 +1482,17 @@ function format_count(value: number): string {
   if (value < 1000) return `${value}`
   if (value < 1000000) return `${(value / 1000).toFixed(1)}k`
   return `${(value / 1000000).toFixed(1)}m`
+}
+
+// A small live-state handle for automated smoke tests and console debugging
+// (drives nothing by itself — everything stays plain preview state).
+;(window as unknown as Record<string, unknown>).__ui_preview = {
+  registry,
+  windows,
+  dock,
+  main_menu,
+  dashboard_state,
+  is_dashboard_open: () => dashboard_open,
 }
 
 main().catch((err) => {
