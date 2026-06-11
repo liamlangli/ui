@@ -5,6 +5,7 @@
 // '@liamlangli/ui'); they are re-exported here for backwards compatibility.
 
 export * from './ui_code_editor'
+export * from './ui_dashboard'
 export * from './ui_file_browser'
 export * from './ui_gamepad_test'
 export * from './ui_graph'

@@ -15,6 +15,7 @@ import {
   ui_renderer,
   ui_widgets,
   ui_icons,
+  type ui_icon_name,
   hex_to_normalized_rgba,
   pack_color,
   create_text_view_state,
@@ -37,7 +38,14 @@ import {
   restore_window_layout,
   type window_layout,
   type window_new_options,
+  // installed-app registry (core)
+  app_registry,
+  serialize_app_registry,
+  type installed_app,
   // plugins
+  dashboard,
+  create_dashboard_state,
+  dashboard_drop_target,
   file_browser,
   create_file_browser_state,
   im_dialog,
@@ -151,6 +159,11 @@ const about_lines: ui_text_view_line[] = [
   { text: '  • code_editor   — the Editor tab (type, select, syntax-highlight)', color: '#9aa3b0' },
   { text: '  • im_dialog     — the Chat window', color: '#9aa3b0' },
   { text: '  • gamepad_test  — Controller Test (plug in a game controller)', color: '#9aa3b0' },
+  { text: '  • dashboard     — View ▸ Apps ▸ Dashboard: a full-screen launcher over', color: '#9aa3b0' },
+  { text: '                    the app_registry. Drop an app description .json to', color: '#9aa3b0' },
+  { text: '                    install (try apps/notes_v1.json — its shipping path', color: '#9aa3b0' },
+  { text: '                    serves v2.1.0, so Check for Updates offers an update);', color: '#9aa3b0' },
+  { text: '                    right-click a tile to update or uninstall.', color: '#9aa3b0' },
   { text: '' },
   { text: 'Try: drag windows around, then drag a tab inside Demo Editor to split.', color: '#5fb878' },
   { text: '试试中文：渲染器内置 PingFang SC 字形图集。', color: '#d8a24a' },
@@ -280,6 +293,94 @@ let icon_set: ui_icons | null = null
 // Set once the renderer is live (see main()); lets async helpers (console
 // appends, deferred compiles) wake the adaptive renderer outside a frame.
 let active_renderer: ui_renderer | null = null
+
+// --- Installed apps + Dashboard ---------------------------------------------
+// Every desktop app is an entry in the core `app_registry`. The built-in views
+// are seeded as builtin apps; further apps install by dragging a description
+// .json onto the page (try public/apps/notes_v1.json — its shipping path points
+// at the newer apps/notes.json, so "Check for Updates" offers an update). The
+// installed set persists in localStorage alongside the window layout.
+const APP_REGISTRY_STORAGE_KEY = 'ui.preview.app_registry'
+
+function load_saved_app_registry(): string | null {
+  try {
+    return window.localStorage.getItem(APP_REGISTRY_STORAGE_KEY)
+  } catch {
+    return null
+  }
+}
+
+const registry = new app_registry(load_saved_app_registry())
+
+// Apps shipped with the preview itself: no shipping path (they update with the
+// host), so the dashboard greys out "Check for Updates" and "Uninstall" on them.
+const BUILTIN_APPS: { id: string; name: string; icon: string; accent?: string; description: string }[] = [
+  { id: 'demo-editor', name: 'Demo Editor', icon: 'code', accent: '#3d4f6b', description: 'Docked workspace: Explorer, Editor, Console, Metrics.' },
+  { id: 'gallery', name: 'Widgets', icon: 'settings', description: 'Widget gallery built on the stack layout.' },
+  { id: 'icons', name: 'Icons', icon: 'image', description: 'Built-in vector icon atlas.' },
+  { id: 'graph', name: 'Graph', icon: 'star', description: 'Generic node-graph canvas.' },
+  { id: 'node_graph', name: 'Node Graph', icon: 'dot', description: 'Dotted node editor with typed slots.' },
+  { id: 'chat', name: 'Chat', icon: 'file_text', accent: '#3d6b4f', description: 'IM dialog plugin.' },
+  { id: 'profiler', name: 'Profiler', icon: 'search', description: 'Frame profiler and memory registry.' },
+  { id: 'gamepad', name: 'Controller Test', icon: 'circle', description: 'Game controller visualiser.' },
+  { id: 'about', name: 'About', icon: 'home', description: 'About this demo.' },
+]
+for (const def of BUILTIN_APPS) {
+  if (!registry.get(def.id)) {
+    registry.install(
+      { id: def.id, name: def.name, version: '1.0.0', icon: def.icon, accent: def.accent, description: def.description },
+      { builtin: true },
+    )
+  }
+}
+
+registry.on_change = () => {
+  try {
+    window.localStorage.setItem(APP_REGISTRY_STORAGE_KEY, serialize_app_registry(registry))
+  } catch {
+    // storage unavailable — keep running without persistence
+  }
+  windows.invalidate() // installed-app windows render manifest state
+  active_renderer?.request_render()
+}
+
+const dashboard_state = create_dashboard_state()
+let dashboard_open = false
+let last_update_check = 0
+
+// Show the full-screen dashboard; piggyback a (throttled) update sweep so
+// freshly published manifests show their badge without a manual check.
+function open_dashboard(): void {
+  dashboard_open = true
+  active_renderer?.request_render()
+  const now = Date.now()
+  if (now - last_update_check > 30_000) {
+    last_update_check = now
+    void registry.check_all_updates()
+  }
+}
+
+// Open an app from the dashboard: built-ins route to their view/window, apps
+// installed from a description JSON get a generic manifest window.
+function launch_app(app: installed_app): void {
+  dashboard_open = false
+  if (app.builtin) {
+    const tab = VIEW_TABS.find((t) => t.id === app.manifest.id)
+    open_view_tab(app.manifest.id, tab?.title ?? app.manifest.name)
+  } else {
+    windows.add_window(`app:${app.manifest.id}`, app.manifest.name, { w: 460, h: 320 })
+  }
+}
+
+function report_update_check(id: string): void {
+  void registry.check_update(id).then((update) => {
+    const app = registry.get(id)
+    if (!app) return
+    if (update) append_console(`${app.manifest.name}: update v${update.version} available`, '#4c8bf5')
+    else if (app.last_error) append_console(`${app.manifest.name}: update check failed — ${app.last_error}`, '#d9534f')
+    else append_console(`${app.manifest.name}: up to date (v${app.manifest.version})`, '#5fb878')
+  })
+}
 
 // Views that live as dock tabs inside the Demo Editor app window. Everything
 // else floats as its own window, so each view exists in exactly one place.
@@ -416,6 +517,7 @@ const main_menu = new ui_main_menu([
       {
         label: 'Apps',
         children: [
+          { id: 'dashboard', label: 'Dashboard' },
           { id: 'graph', label: 'Graph' },
           { id: 'node_graph', label: 'Node Graph' },
           { id: 'gallery', label: 'Widgets' },
@@ -444,6 +546,10 @@ const main_menu = new ui_main_menu([
 function handle_menu(node: ui_menu_node): void {
   const id = node.id
   if (!id) return
+  if (id === 'dashboard') {
+    open_dashboard()
+    return
+  }
   if (id.startsWith('theme:')) {
     transition_theme_to(Number(id.slice('theme:'.length)), performance.now())
     return
@@ -670,6 +776,23 @@ async function main(): Promise<void> {
   const resize = () => renderer.resize()
   window.addEventListener('resize', resize)
 
+  // Drag-to-install: dropping an app description .json (or a manifest URL)
+  // anywhere on the canvas installs it; the dashboard opens as the drop zone.
+  dashboard_drop_target(canvas, registry, dashboard_state, {
+    on_installed: (app) => {
+      append_console(`installed ${app.manifest.name} v${app.manifest.version}`, '#5fb878')
+      open_dashboard()
+    },
+    on_error: (message) => {
+      append_console(message, '#d9534f')
+      renderer.request_render()
+    },
+    on_drag_state: (active) => {
+      if (active) open_dashboard()
+      renderer.request_render()
+    },
+  })
+
   function frame(): void {
     const frame_start_ms = performance.now()
     const frame_delta_ms = frame_start_ms - metrics.last_frame_start_ms
@@ -678,6 +801,19 @@ async function main(): Promise<void> {
     profiler.begin('input')
     const snapshot = input.begin_frame()
     profiler.end()
+    // While the dashboard covers the screen, everything beneath it (menu bar,
+    // windows, widgets) sees neutered input so clicks can't fall through.
+    const blank_input = {
+      ...snapshot,
+      mouse_pressed: false, mouse_down: false, mouse_released: false,
+      mouse_right_pressed: false, mouse_right_down: false, wheel_y: 0,
+      typed_text: '', ime_composition: '',
+      key_backspace: false, key_delete: false, key_enter: false, key_escape: false,
+      key_left: false, key_right: false, key_up: false, key_down: false,
+      key_home: false, key_end: false, key_page_up: false, key_page_down: false,
+      key_a: false, key_c: false,
+    }
+    const desktop_snapshot = dashboard_open ? blank_input : snapshot
     const safe = renderer.safe_rect()
     const scale = window.devicePixelRatio || 1
     const m = 8 * scale
@@ -704,7 +840,7 @@ async function main(): Promise<void> {
     if (theme !== theme_ctrl.to) renderer.request_render()
 
     renderer.begin_frame()
-    widgets.begin_frame(theme, snapshot)
+    widgets.begin_frame(theme, desktop_snapshot)
 
     // Top menu bar reserves a strip; the window desktop fills the area below it.
     const menu_h = 30 * scale
@@ -717,15 +853,22 @@ async function main(): Promise<void> {
     // When a dropdown is open over the dock, swallow the click so the panel
     // underneath doesn't also react to it.
     const block = main_menu.blocks_point(snapshot.mouse_x, snapshot.mouse_y)
-    const dock_input = block ? { ...snapshot, mouse_pressed: false, mouse_down: false, mouse_released: false, wheel_y: 0 } : snapshot
+    const dock_input = block && !dashboard_open ? { ...snapshot, mouse_pressed: false, mouse_down: false, mouse_released: false, wheel_y: 0 } : desktop_snapshot
 
     const render_panel = (panel: { x: number; y: number; w: number; h: number; tab: { id: string } }) => {
+      const snapshot = desktop_snapshot // panel bodies are blocked while the dashboard is up
       const inset = 0
       const px = panel.x + inset
       const py = panel.y + inset
       const pw = panel.w - inset * 2
       const ph = panel.h - inset * 2
       profiler.begin(`panel:${panel.tab.id}`)
+      if (panel.tab.id.startsWith('app:')) {
+        // A window for an app installed from a description JSON: show its manifest.
+        render_installed_app(renderer, widgets, theme, panel.tab.id.slice('app:'.length), px, py, pw, ph, scale)
+        profiler.end()
+        return
+      }
       switch (panel.tab.id) {
         case 'demo-editor':
           // The Demo Editor app: its window body is a whole docked workspace.
@@ -807,9 +950,31 @@ async function main(): Promise<void> {
     // bar on top of the dock so its dropdowns overlay the panels below.
     profiler.begin('menu')
     theme_menu.children = theme_ctrl.presets.map((preset, i) => ({ id: `theme:${i}`, label: preset.name, checked: i === theme_ctrl.index }))
-    const menu_event = main_menu.frame(renderer, theme, snapshot, bar_x, bar_y, bar_w, menu_h)
+    const menu_event = main_menu.frame(renderer, theme, desktop_snapshot, bar_x, bar_y, bar_w, menu_h)
     profiler.end()
     if (menu_event.activated) handle_menu(menu_event.activated)
+
+    // The Dashboard app: a full-screen launcher over the installed-app
+    // registry, drawn above the desktop and the menu bar.
+    if (dashboard_open) {
+      profiler.begin('dashboard')
+      const ev = dashboard(renderer, theme, snapshot, safe.x, safe.y, safe.w, safe.h, registry.apps, dashboard_state, { icons: icon_set ?? undefined })
+      profiler.end()
+      if (ev.launched) launch_app(ev.launched)
+      if (ev.dismissed) dashboard_open = false
+      if (ev.uninstall_requested) {
+        const name = ev.uninstall_requested.manifest.name
+        if (registry.uninstall(ev.uninstall_requested.manifest.id)) append_console(`uninstalled ${name}`, '#d8a24a')
+      }
+      if (ev.check_updates_requested) report_update_check(ev.check_updates_requested.manifest.id)
+      if (ev.update_requested) {
+        const id = ev.update_requested.manifest.id
+        void registry.apply_update(id).then((updated) => {
+          const app = registry.get(id)
+          if (updated && app) append_console(`updated ${app.manifest.name} to v${app.manifest.version}`, '#5fb878')
+        })
+      }
+    }
 
     widgets.end_frame()
     // Controller cursor rides above every window, menu and popup.
@@ -845,6 +1010,85 @@ function render_files(
   if (ev.activated || ev.entry_activated) {
     const name = ev.entry_activated?.name ?? ev.activated?.name
     append_console(`→ opened ${name}`, '#4c8bf5')
+  }
+}
+
+// Body of a window for an app installed from a description JSON: the demo has
+// no real code to run, so it shows the manifest plus live update controls.
+function render_installed_app(
+  renderer: ui_renderer,
+  widgets: ui_widgets,
+  theme: theme_definition,
+  id: string,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  scale: number,
+): void {
+  const slot = (name: keyof theme_definition['palette']) => pack_color(theme.palette[name])
+  const pad = 16 * scale
+  renderer.fill_rect(x, y, w, h, slot('panel'))
+  const app = registry.get(id)
+  if (!app) {
+    renderer.draw_text(x + pad, y + pad, 'This app has been uninstalled.', 11.5 * scale, slot('text_dim'))
+    return
+  }
+
+  // Icon plate + name/version header.
+  const icon_s = 44 * scale
+  const plate = app.manifest.accent ? pack_color(app.manifest.accent) : slot('accent_dim')
+  renderer.fill_round_rect(x + pad, y + pad, icon_s, icon_s, 10 * scale, plate)
+  renderer.stroke_round_rect(x + pad, y + pad, icon_s, icon_s, 10 * scale, 1, slot('border_strong'))
+  const icon_name = app.manifest.icon as ui_icon_name | undefined
+  if (icon_set && icon_name && icon_set.has(icon_name)) {
+    const glyph = icon_s * 0.56
+    icon_set.draw(icon_name, x + pad + (icon_s - glyph) / 2, y + pad + (icon_s - glyph) / 2, glyph, slot('text'))
+  } else {
+    const initial = (app.manifest.name[0] ?? '?').toUpperCase()
+    const ifont = icon_s * 0.46
+    const iw = renderer.text_width(initial, ifont)
+    renderer.draw_text(x + pad + (icon_s - iw) / 2, renderer.text_v_center_y(y + pad, icon_s, ifont), initial, ifont, slot('text'))
+  }
+  const head_x = x + pad + icon_s + 12 * scale
+  renderer.draw_text(head_x, y + pad + 2 * scale, app.manifest.name, 15 * scale, slot('text'))
+  renderer.draw_text(head_x, y + pad + 24 * scale, `v${app.manifest.version}`, 10.5 * scale, slot('text_dim'), FONT_MONO)
+
+  let cy = y + pad + icon_s + 14 * scale
+  const body_w = Math.max(40 * scale, w - pad * 2)
+  if (app.manifest.description) {
+    cy += renderer.draw_text_wrapped(x + pad, cy, body_w, app.manifest.description, 11 * scale, slot('text')) + 10 * scale
+  }
+  renderer.push_clip(x + pad, cy, body_w, 14 * scale)
+  renderer.draw_text(x + pad, cy, `shipping path: ${app.shipping_path ?? '—'}`, 9.5 * scale, slot('text_dim'), FONT_MONO)
+  renderer.pop_clip()
+  cy += 18 * scale
+
+  const status = app.checking
+    ? 'checking for updates…'
+    : app.update_available
+      ? `update available: v${app.update_available.version}`
+      : app.last_error
+        ? `update check failed — ${app.last_error}`
+        : app.last_checked
+          ? `up to date (checked ${new Date(app.last_checked).toLocaleTimeString()})`
+          : `installed ${new Date(app.installed_at).toLocaleString()}`
+  renderer.draw_text(x + pad, cy, status, 10 * scale, app.update_available ? slot('accent') : app.last_error ? pack_color('#d9534f') : slot('text_dim'))
+  cy += 24 * scale
+
+  // Update controls, driven by the registry's shipping path.
+  if (app.shipping_path) {
+    const btn_h = 28 * scale
+    if (widgets.button(`app_check:${id}`, x + pad, cy, 150 * scale, btn_h, app.checking ? 'Checking…' : 'Check for Updates')) {
+      report_update_check(id)
+    }
+    if (app.update_available) {
+      if (widgets.button(`app_update:${id}`, x + pad + 162 * scale, cy, 150 * scale, btn_h, `Update to v${app.update_available.version}`, { active: true })) {
+        void registry.apply_update(id).then((updated) => {
+          if (updated) append_console(`updated ${app.manifest.name} to v${registry.get(id)?.manifest.version}`, '#5fb878')
+        })
+      }
+    }
   }
 }
 

@@ -1,0 +1,9 @@
+{
+  "id": "notes",
+  "name": "Notes",
+  "version": "2.1.0",
+  "description": "A tiny scratchpad app installed from a description JSON. This manifest is its own shipping path, so update checks find it current.",
+  "icon": "file_text",
+  "accent": "#3d6b4f",
+  "shipping_path": "apps/notes.json"
+}

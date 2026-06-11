@@ -10,7 +10,8 @@ It bundles the pieces needed to build a browser-native editor UI on top of WebGP
 - **`dock`** — a docking layout engine: split/leaf trees, tab drag-and-drop, drop targets, and (de)serialization.
 - **`dock_system` / `window_system`** — ready-to-use workspace systems built on `dock`/`window`: a docked split workspace and a floating desktop-style window manager, both part of core so third-party projects can build directly on them. See [Workspace systems](#workspace-systems).
 - **`theme`** — palette/CSS-variable theming with `load_theme`, `apply_theme`, `theme_color`, `theme_rgba`, `pack_color`, and `hex_to_normalized_rgba`.
-- **`plugins`** — opt-in, higher-level drop-in components (`file_browser`, `graph`, `node_graph`, `im_dialog`, `code_editor`) packaged so other projects can reuse them piecemeal. See [Plugins](#plugins).
+- **`app_registry`** — installable apps described by a JSON manifest: install/uninstall, persistence, and update checks against each app's `shipping_path`. See [`dashboard`](#dashboard--full-screen-app-launcher).
+- **`plugins`** — opt-in, higher-level drop-in components (`file_browser`, `graph`, `node_graph`, `im_dialog`, `code_editor`, `dashboard`) packaged so other projects can reuse them piecemeal. See [Plugins](#plugins).
 
 ## Live preview
 
@@ -111,7 +112,7 @@ drawing and input handling and takes your `ui_renderer` (+ `ui_widgets` where
 needed), a `theme_definition`, and the per-frame `ui_input_snapshot`.
 
 ```ts
-import { code_editor, file_browser, graph_canvas, node_graph, im_dialog } from '@liamlangli/ui/plugins'
+import { code_editor, dashboard, file_browser, graph_canvas, node_graph, im_dialog } from '@liamlangli/ui/plugins'
 ```
 
 ### `file_browser` — tree + project browser
@@ -249,6 +250,59 @@ Pan and the create menu need the middle / right mouse buttons forwarded on the
 `ui_input_snapshot` (`mouse_middle_down`, `mouse_right_pressed`); selection,
 node-drag, marquee, wire-drag and zoom work with the base left-button + wheel
 fields alone.
+
+### `dashboard` — full-screen app launcher
+
+A whole-screen launcher over the core **`app_registry`**: every installed app
+appears as a grid tile (icon plate with the app name under it). Clicking a tile
+launches the app, right-clicking opens a manage menu (Open / Check for Updates /
+Update / Uninstall), and dragging an app *description JSON* onto the page
+installs it. An app ships as a small manifest:
+
+```json
+{
+  "id": "notes",
+  "name": "Notes",
+  "version": "2.1.0",
+  "description": "A tiny scratchpad app.",
+  "icon": "file_text",
+  "accent": "#3d6b4f",
+  "shipping_path": "apps/notes.json"
+}
+```
+
+`shipping_path` is the URL the manifest is served from — the registry re-fetches
+it to check for updates (per-segment numeric version compare), so publishing a
+newer manifest at the same path is all a vendor needs to do to ship an update.
+Tiles show a badge while an update is pending.
+
+```ts
+import { app_registry, serialize_app_registry } from '@liamlangli/ui'
+import { dashboard, create_dashboard_state, dashboard_drop_target } from '@liamlangli/ui/plugins'
+
+const registry = new app_registry(localStorage.getItem(KEY))
+registry.on_change = () => localStorage.setItem(KEY, serialize_app_registry(registry))
+registry.install({ id: 'editor', name: 'Editor', version: '1.0.0', icon: 'code' }, { builtin: true })
+
+const dash = create_dashboard_state()
+// drag-to-install: dropped .json files (or dragged manifest URLs) install into the registry
+dashboard_drop_target(canvas, registry, dash, { on_installed: (app) => show_dashboard() })
+
+// each frame, drawn last so it covers the whole screen:
+const ev = dashboard(renderer, theme, input, 0, 0, screen_w, screen_h, registry.apps, dash, { icons })
+if (ev.launched) open_app(ev.launched)
+if (ev.uninstall_requested) registry.uninstall(ev.uninstall_requested.manifest.id)
+if (ev.check_updates_requested) registry.check_update(ev.check_updates_requested.manifest.id)
+if (ev.update_requested) registry.apply_update(ev.update_requested.manifest.id)
+if (ev.dismissed) hide_dashboard()
+```
+
+Built-in apps (installed with `{ builtin: true }`) have no shipping path and
+can't be uninstalled from the menu by default. The preview wires the whole flow
+up under **View ▸ Apps ▸ Dashboard**; drag
+[`public/apps/notes_v1.json`](public/apps/notes_v1.json) onto it to install an
+app whose shipping path already serves a newer version, then right-click its
+tile to update.
 
 ### `im_dialog` — IM chat panel
 

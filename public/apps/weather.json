@@ -1,0 +1,9 @@
+{
+  "id": "weather",
+  "name": "Weather",
+  "version": "1.2.0",
+  "description": "A sample installable app. Drag this file onto the preview to install it; right-click its dashboard tile to check for updates or uninstall.",
+  "icon": "star",
+  "accent": "#4a5d8f",
+  "shipping_path": "apps/weather.json"
+}
