@@ -14,6 +14,7 @@ import { FONT_MONO, type ui_renderer } from '../ui_renderer'
 import type { ui_input_snapshot, ui_scroll_state, ui_widgets } from '../ui_widgets'
 import {
   compute_asset_stats,
+  decode_asset_textures,
   encode_asset_glb,
   format_asset_bytes,
   recompute_mesh_normals,
@@ -29,6 +30,7 @@ import {
   asset_audit_view,
   create_orbit_camera,
   frame_orbit_camera,
+  type asset_audit_view_mode,
   type orbit_camera,
 } from './ui_asset_audit_view'
 
@@ -42,6 +44,8 @@ export interface asset_audit_state {
   active: number
   camera: orbit_camera
   wireframe: boolean
+  /** Viewport shading: lit base color, base-color texture, or normals-as-RGB. */
+  view_mode: asset_audit_view_mode
   /** Number of in-flight file loads (drives the spinner text). */
   loading: number
   /** True while a drag with files hovers the host element. */
@@ -87,6 +91,7 @@ export function create_asset_audit_state(): asset_audit_state {
     active: -1,
     camera: create_orbit_camera(),
     wireframe: false,
+    view_mode: 'shaded',
     loading: 0,
     drop_hover: false,
     log: [],
@@ -191,6 +196,9 @@ export async function asset_audit_load_files(state: asset_audit_state, files: as
       const asset = file_extension(file.name) === '.fbx'
         ? await parse_fbx_asset(file.data, short)
         : parse_gltf_asset(file.data, short, { external_files: externals })
+      // Decode base-color textures before publishing the asset so the viewer's
+      // Texture preview mode has its bitmaps ready on the first upload.
+      const decoded_textures = await decode_asset_textures(asset)
       state.assets.push(asset)
       state.active = state.assets.length - 1
       refresh_stats(state)
@@ -202,6 +210,9 @@ export async function asset_audit_load_files(state: asset_audit_state, files: as
         `loaded ${short} — ${stats?.mesh_count ?? 0} mesh(es), ${stats?.vertex_count ?? 0} verts, ${stats?.triangle_count ?? 0} tris`,
         '#5fb878',
       )
+      if (decoded_textures > 0) {
+        asset_audit_log(state, `decoded ${decoded_textures} base color texture(s) — try the Texture view mode`, '#5fb878')
+      }
       if (asset.warnings.length > 0) asset_audit_log(state, `${asset.warnings.length} import warning(s) — see Warnings`, '#d8a24a')
     } catch (err) {
       asset_audit_log(state, `failed to load ${file.name}: ${err instanceof Error ? err.message : err}`, '#d9534f')
@@ -532,9 +543,21 @@ export function asset_audit(
     state.view_dirty = true
   }
   bx += 110 * scale
-  if (asset && button('aa_reset_view', 'Reset View', 88 * scale)) {
-    frame_orbit_camera(state.camera, state.stats?.bounds ?? null)
-    state.view_dirty = true
+  if (asset) {
+    // Shading mode: lit base color / base-color texture / normals-as-RGB.
+    const mode_button = (id: string, label: string, width: number, mode: asset_audit_view_mode): void => {
+      if (button(id, label, width, { active: state.view_mode === mode }) && state.view_mode !== mode) {
+        state.view_mode = mode
+        state.view_dirty = true
+      }
+    }
+    mode_button('aa_mode_shaded', 'Shaded', 62 * scale, 'shaded')
+    mode_button('aa_mode_texture', 'Texture', 62 * scale, 'texture')
+    mode_button('aa_mode_normal', 'Normal', 60 * scale, 'normal')
+    if (button('aa_reset_view', 'Reset View', 88 * scale)) {
+      frame_orbit_camera(state.camera, state.stats?.bounds ?? null)
+      state.view_dirty = true
+    }
   }
   const dl_w = 120 * scale
   if (asset) {
@@ -649,7 +672,7 @@ function draw_viewport(
           ? Math.max(1e-4, Math.hypot(bounds.max[0] - bounds.min[0], bounds.max[1] - bounds.min[1], bounds.max[2] - bounds.min[2]) / 2)
           : state.camera.distance
         const clear = hex_to_normalized_rgba(theme.palette.panel_alt)
-        const texture = state.view.render(px_w, px_h, state.camera, { wireframe: state.wireframe, clear, bounds_radius })
+        const texture = state.view.render(px_w, px_h, state.camera, { wireframe: state.wireframe, mode: state.view_mode, clear, bounds_radius })
         if (texture) {
           if (state.texture_id === null) state.texture_id = ui.register_external_texture(texture)
           else if (texture !== state.texture) ui.update_external_texture(state.texture_id, texture)

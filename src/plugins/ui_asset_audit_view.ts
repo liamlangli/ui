@@ -97,30 +97,47 @@ const view_shader = /* wgsl */ `
 struct view_uniforms {
   mvp: mat4x4f,
   color: vec4f,
+  // xyz = light direction, w = shading mode (0 shaded, 1 texture, 2 normal).
   light_dir: vec4f,
 }
 @group(0) @binding(0) var<uniform> u: view_uniforms;
+@group(0) @binding(1) var albedo_sampler: sampler;
+@group(0) @binding(2) var albedo_texture: texture_2d<f32>;
 
 struct v_out {
   @builtin(position) position: vec4f,
   @location(0) normal: vec3f,
+  @location(1) uv: vec2f,
 }
 
 @vertex
-fn vs_main(@location(0) pos: vec3f, @location(1) normal: vec3f) -> v_out {
+fn vs_main(@location(0) pos: vec3f, @location(1) normal: vec3f, @location(2) uv: vec2f) -> v_out {
   var out: v_out;
   out.position = u.mvp * vec4f(pos, 1.0);
   out.normal = normal;
+  out.uv = uv;
   return out;
 }
 
 @fragment
 fn fs_main(in: v_out) -> @location(0) vec4f {
+  // Sampled unconditionally to keep textureSample in uniform control flow.
+  let texel = textureSample(albedo_texture, albedo_sampler, in.uv);
   let n = normalize(in.normal);
+  let mode = u.light_dir.w;
+  if (mode > 1.5) {
+    // Normal preview: world-space normals mapped to RGB.
+    return vec4f(n * 0.5 + vec3f(0.5), 1.0);
+  }
   let l = normalize(u.light_dir.xyz);
   let diffuse = max(dot(n, l), 0.0);
   let fill = max(dot(n, -l), 0.0) * 0.22;
-  let lit = u.color.rgb * (0.24 + diffuse * 0.8 + fill);
+  var base = u.color.rgb;
+  if (mode > 0.5) {
+    // Texture preview: lit base-color texture (white fallback when untextured).
+    base = texel.rgb * u.color.rgb;
+  }
+  let lit = base * (0.24 + diffuse * 0.8 + fill);
   return vec4f(lit, 1.0);
 }
 
@@ -129,6 +146,10 @@ fn fs_line(in: v_out) -> @location(0) vec4f {
   return u.color;
 }
 `
+
+export type asset_audit_view_mode = 'shaded' | 'texture' | 'normal'
+
+const VIEW_MODE_INDEX: Record<asset_audit_view_mode, number> = { shaded: 0, texture: 1, normal: 2 }
 
 const UNIFORM_BYTES = 96 // mat4 + 2×vec4
 
@@ -150,7 +171,11 @@ export class asset_audit_view {
   private fill_pipeline: GPURenderPipeline | null = null
   private line_pipeline: GPURenderPipeline | null = null
   private bind_layout: GPUBindGroupLayout | null = null
+  private sampler: GPUSampler | null = null
+  /** 1×1 white — untextured meshes sample this so one pipeline covers all modes. */
+  private white_texture: GPUTexture | null = null
   private meshes: view_gpu_mesh[] = []
+  private albedo_textures = new Map<ImageBitmap, GPUTexture>()
   private color_target: GPUTexture | null = null
   private depth_target: GPUTexture | null = null
 
@@ -160,17 +185,36 @@ export class asset_audit_view {
     const module = device.createShaderModule({ label: 'asset_audit.view_shader', code: view_shader })
     this.bind_layout = device.createBindGroupLayout({
       label: 'asset_audit.bind_layout',
-      entries: [{ binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } }],
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+        { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: {} },
+      ],
     })
+    this.sampler = device.createSampler({
+      label: 'asset_audit.albedo_sampler',
+      magFilter: 'linear',
+      minFilter: 'linear',
+      addressModeU: 'repeat',
+      addressModeV: 'repeat',
+    })
+    this.white_texture = device.createTexture({
+      label: 'asset_audit.white_texture',
+      size: [1, 1, 1],
+      format: 'rgba8unorm',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    })
+    device.queue.writeTexture({ texture: this.white_texture }, new Uint8Array([255, 255, 255, 255]), { bytesPerRow: 4 }, [1, 1, 1])
     const layout = device.createPipelineLayout({ label: 'asset_audit.pipeline_layout', bindGroupLayouts: [this.bind_layout] })
     const vertex: GPUVertexState = {
       module,
       entryPoint: 'vs_main',
       buffers: [{
-        arrayStride: 24,
+        arrayStride: 32,
         attributes: [
           { shaderLocation: 0, offset: 0, format: 'float32x3' },
           { shaderLocation: 1, offset: 12, format: 'float32x3' },
+          { shaderLocation: 2, offset: 24, format: 'float32x2' },
         ],
       }],
     }
@@ -192,6 +236,24 @@ export class asset_audit_view {
     })
   }
 
+  /** Upload an albedo bitmap once and share the GPU texture between meshes. */
+  private albedo_texture_for(mesh: audit_mesh): GPUTexture {
+    const device = this.device!
+    if (!mesh.albedo) return this.white_texture!
+    let texture = this.albedo_textures.get(mesh.albedo)
+    if (!texture) {
+      texture = device.createTexture({
+        label: 'asset_audit.albedo',
+        size: [mesh.albedo.width, mesh.albedo.height, 1],
+        format: 'rgba8unorm',
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
+      })
+      device.queue.copyExternalImageToTexture({ source: mesh.albedo }, { texture }, { width: mesh.albedo.width, height: mesh.albedo.height })
+      this.albedo_textures.set(mesh.albedo, texture)
+    }
+    return texture
+  }
+
   /** Upload meshes into GPU buffers, replacing any previous set. */
   set_meshes(meshes: audit_mesh[]): void {
     const device = this.device
@@ -200,14 +262,18 @@ export class asset_audit_view {
     for (const mesh of meshes) {
       const count = mesh.positions.length / 3
       if (count === 0 || mesh.indices.length === 0) continue
-      const interleaved = new Float32Array(count * 6)
+      const interleaved = new Float32Array(count * 8)
       for (let i = 0; i < count; i += 1) {
-        interleaved[i * 6] = mesh.positions[i * 3]!
-        interleaved[i * 6 + 1] = mesh.positions[i * 3 + 1]!
-        interleaved[i * 6 + 2] = mesh.positions[i * 3 + 2]!
-        interleaved[i * 6 + 3] = mesh.normals[i * 3]!
-        interleaved[i * 6 + 4] = mesh.normals[i * 3 + 1]!
-        interleaved[i * 6 + 5] = mesh.normals[i * 3 + 2]!
+        interleaved[i * 8] = mesh.positions[i * 3]!
+        interleaved[i * 8 + 1] = mesh.positions[i * 3 + 1]!
+        interleaved[i * 8 + 2] = mesh.positions[i * 3 + 2]!
+        interleaved[i * 8 + 3] = mesh.normals[i * 3]!
+        interleaved[i * 8 + 4] = mesh.normals[i * 3 + 1]!
+        interleaved[i * 8 + 5] = mesh.normals[i * 3 + 2]!
+        if (mesh.uvs) {
+          interleaved[i * 8 + 6] = mesh.uvs[i * 2]!
+          interleaved[i * 8 + 7] = mesh.uvs[i * 2 + 1]!
+        }
       }
       const vertex_buffer = device.createBuffer({
         label: 'asset_audit.vertices',
@@ -242,6 +308,7 @@ export class asset_audit_view {
         edge_count = edges.length
       }
 
+      const albedo_view = this.albedo_texture_for(mesh).createView()
       const make_uniform = () => {
         const buffer = device.createBuffer({
           label: 'asset_audit.uniform',
@@ -251,7 +318,11 @@ export class asset_audit_view {
         const bind = device.createBindGroup({
           label: 'asset_audit.bind_group',
           layout: this.bind_layout!,
-          entries: [{ binding: 0, resource: { buffer } }],
+          entries: [
+            { binding: 0, resource: { buffer } },
+            { binding: 1, resource: this.sampler! },
+            { binding: 2, resource: albedo_view },
+          ],
         })
         return { buffer, bind }
       }
@@ -280,7 +351,7 @@ export class asset_audit_view {
     width: number,
     height: number,
     camera: orbit_camera,
-    options: { wireframe?: boolean; clear: { r: number; g: number; b: number; a: number }; bounds_radius?: number },
+    options: { wireframe?: boolean; mode?: asset_audit_view_mode; clear: { r: number; g: number; b: number; a: number }; bounds_radius?: number },
   ): GPUTexture | null {
     const device = this.device
     if (!device || !this.fill_pipeline || !this.line_pipeline) return null
@@ -313,7 +384,7 @@ export class asset_audit_view {
     // Headlight slightly off the eye axis so curvature reads.
     const lx = eye[0] - camera.target[0], ly = eye[1] - camera.target[1], lz = eye[2] - camera.target[2]
     const llen = Math.hypot(lx, ly, lz) || 1
-    const light = [lx / llen + 0.35, ly / llen + 0.55, lz / llen + 0.15, 0]
+    const light = [lx / llen + 0.35, ly / llen + 0.55, lz / llen + 0.15, VIEW_MODE_INDEX[options.mode ?? 'shaded']]
 
     const uniform_data = new Float32Array(UNIFORM_BYTES / 4)
     uniform_data.set(mvp, 0)
@@ -372,13 +443,17 @@ export class asset_audit_view {
       mesh.line_uniform.destroy()
     }
     this.meshes = []
+    for (const texture of this.albedo_textures.values()) texture.destroy()
+    this.albedo_textures.clear()
   }
 
   dispose(): void {
     this.release_meshes()
     this.color_target?.destroy()
     this.depth_target?.destroy()
+    this.white_texture?.destroy()
     this.color_target = null
     this.depth_target = null
+    this.white_texture = null
   }
 }

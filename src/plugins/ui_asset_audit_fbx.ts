@@ -350,6 +350,9 @@ export async function parse_fbx_asset(buffer: ArrayBuffer, file_name: string): P
       base_color: single_color ?? [0.72, 0.72, 0.75, 1],
       material_name: single_material_name,
       normals_generated: !have_normals,
+      albedo_bytes: null,
+      albedo_mime: null,
+      albedo: null,
     }
     if (!have_normals) {
       recompute_mesh_normals(mesh)

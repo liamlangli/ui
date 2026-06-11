@@ -20,6 +20,11 @@ export interface audit_mesh {
   material_name: string | null
   /** True when normals were synthesized by the importer/optimizer. */
   normals_generated: boolean
+  /** Encoded base-color texture bytes (PNG/JPEG/…) captured at parse time, or null. */
+  albedo_bytes: Uint8Array | null
+  albedo_mime: string | null
+  /** Decoded base-color image — filled by {@link decode_asset_textures}. */
+  albedo: ImageBitmap | null
 }
 
 /** Source-file structure counts, captured at parse time for the info panel. */
@@ -81,6 +86,34 @@ export function compute_asset_stats(asset: audit_asset): audit_stats {
     }
   }
   return { mesh_count: asset.meshes.length, vertex_count: vertices, triangle_count: triangles, geometry_bytes: bytes, bounds }
+}
+
+/**
+ * Decode every mesh's captured base-color texture bytes into an ImageBitmap
+ * (shared byte blobs decode once). Returns the number of textures decoded;
+ * failures degrade to an asset warning. Run after parse, before first render,
+ * so the viewer's Texture mode has its images ready.
+ */
+export async function decode_asset_textures(asset: audit_asset): Promise<number> {
+  const decoded = new Map<Uint8Array, ImageBitmap | null>()
+  let count = 0
+  for (const mesh of asset.meshes) {
+    if (!mesh.albedo_bytes || mesh.albedo) continue
+    let bitmap = decoded.get(mesh.albedo_bytes)
+    if (bitmap === undefined) {
+      try {
+        const blob = new Blob([mesh.albedo_bytes as BlobPart], { type: mesh.albedo_mime ?? 'image/png' })
+        bitmap = await createImageBitmap(blob, { premultiplyAlpha: 'none', colorSpaceConversion: 'none' })
+        count += 1
+      } catch {
+        bitmap = null
+        asset.warnings.push(`${mesh.name}: base color texture failed to decode`)
+      }
+      decoded.set(mesh.albedo_bytes, bitmap)
+    }
+    mesh.albedo = bitmap
+  }
+  return count
 }
 
 /** Accumulate area-weighted face normals and normalize — smooth shading. */

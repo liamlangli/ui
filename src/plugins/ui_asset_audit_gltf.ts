@@ -19,8 +19,8 @@ interface gltf_json {
   accessors?: gltf_accessor[]
   bufferViews?: gltf_buffer_view[]
   buffers?: { uri?: string; byteLength: number }[]
-  textures?: unknown[]
-  images?: unknown[]
+  textures?: { source?: number }[]
+  images?: gltf_image[]
   animations?: unknown[]
   skins?: unknown[]
 }
@@ -44,7 +44,13 @@ interface gltf_primitive {
 
 interface gltf_material {
   name?: string
-  pbrMetallicRoughness?: { baseColorFactor?: number[]; baseColorTexture?: unknown }
+  pbrMetallicRoughness?: { baseColorFactor?: number[]; baseColorTexture?: { index?: number } }
+}
+
+interface gltf_image {
+  uri?: string
+  mimeType?: string
+  bufferView?: number
 }
 
 interface gltf_accessor {
@@ -79,6 +85,18 @@ function decode_data_uri(uri: string): ArrayBuffer | null {
     return out.buffer
   }
   return new TextEncoder().encode(decodeURIComponent(payload)).buffer as ArrayBuffer
+}
+
+function mime_from_uri(uri: string): string {
+  const lower = uri.toLowerCase()
+  if (lower.startsWith('data:')) {
+    const match = /^data:([^;,]+)/.exec(lower)
+    if (match) return match[1]!
+  }
+  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg'
+  if (lower.endsWith('.webp')) return 'image/webp'
+  if (lower.endsWith('.ktx2')) return 'image/ktx2'
+  return 'image/png'
 }
 
 // --- minimal column-major mat4 helpers (only what baking needs) -------------
@@ -279,6 +297,37 @@ export function parse_gltf_asset(buffer: ArrayBuffer, file_name: string, options
   const reader = new gltf_reader(json, buffers, warnings)
   const meshes: audit_mesh[] = []
 
+  // Base-color image bytes, resolved lazily and cached per image index so
+  // every primitive sharing a texture also shares one byte blob (and later one
+  // decoded bitmap / GPU texture).
+  const image_cache = new Map<number, { bytes: Uint8Array; mime: string } | null>()
+  const read_image = (index: number): { bytes: Uint8Array; mime: string } | null => {
+    const cached = image_cache.get(index)
+    if (cached !== undefined) return cached
+    const image = json.images?.[index]
+    let result: { bytes: Uint8Array; mime: string } | null = null
+    if (!image) {
+      warnings.push(`texture references missing image ${index}`)
+    } else if (image.bufferView !== undefined) {
+      const view = json.bufferViews?.[image.bufferView]
+      const buffer = view ? buffers[view.buffer] : null
+      if (view && buffer) result = { bytes: new Uint8Array(buffer, view.byteOffset ?? 0, view.byteLength), mime: image.mimeType ?? 'image/png' }
+      else warnings.push(`image ${index} references a missing buffer`)
+    } else if (image.uri !== undefined) {
+      if (image.uri.startsWith('data:')) {
+        const data = decode_data_uri(image.uri)
+        if (data) result = { bytes: new Uint8Array(data), mime: image.mimeType ?? mime_from_uri(image.uri) }
+      } else {
+        const base = decodeURIComponent(image.uri.split('/').pop() ?? image.uri).toLowerCase()
+        const external = options?.external_files?.get(base)
+        if (external) result = { bytes: new Uint8Array(external), mime: image.mimeType ?? mime_from_uri(base) }
+        else warnings.push(`external image "${image.uri}" not found — upload the folder containing it`)
+      }
+    }
+    image_cache.set(index, result)
+    return result
+  }
+
   const emit_primitive = (prim: gltf_primitive, mesh_name: string, world: mat4): void => {
     const mode = prim.mode ?? 4
     if (mode !== 4) {
@@ -343,6 +392,14 @@ export function parse_gltf_asset(buffer: ArrayBuffer, file_name: string, options
       factor?.[0] ?? 0.8, factor?.[1] ?? 0.8, factor?.[2] ?? 0.8, factor?.[3] ?? 1,
     ]
 
+    // Base-color texture (for the viewer's Texture preview mode).
+    let albedo: { bytes: Uint8Array; mime: string } | null = null
+    const tex_index = material?.pbrMetallicRoughness?.baseColorTexture?.index
+    if (tex_index !== undefined) {
+      const source = json.textures?.[tex_index]?.source
+      if (source !== undefined) albedo = read_image(source)
+    }
+
     const mesh: audit_mesh = {
       name: mesh_name,
       positions,
@@ -352,6 +409,9 @@ export function parse_gltf_asset(buffer: ArrayBuffer, file_name: string, options
       base_color,
       material_name: material?.name ?? null,
       normals_generated: !normals,
+      albedo_bytes: albedo?.bytes ?? null,
+      albedo_mime: albedo?.mime ?? null,
+      albedo: null,
     }
     if (!normals) {
       recompute_mesh_normals(mesh)
