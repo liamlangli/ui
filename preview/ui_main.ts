@@ -43,6 +43,9 @@ import {
   serialize_app_registry,
   type installed_app,
   // plugins
+  asset_audit,
+  create_asset_audit_state,
+  asset_audit_dom_target,
   dashboard,
   create_dashboard_state,
   dashboard_drop_target,
@@ -159,6 +162,9 @@ const about_lines: ui_text_view_line[] = [
   { text: '  • code_editor   — the Editor tab (type, select, syntax-highlight)', color: '#9aa3b0' },
   { text: '  • im_dialog     — the Chat window', color: '#9aa3b0' },
   { text: '  • gamepad_test  — Controller Test (plug in a game controller)', color: '#9aa3b0' },
+  { text: '  • asset_audit   — View ▸ Apps ▸ Asset Audit: drop a .glb/.gltf/.fbx', color: '#9aa3b0' },
+  { text: '                    (or a folder) to preview it in a WebGPU viewport,', color: '#9aa3b0' },
+  { text: '                    audit its stats, optimize and download a fixed GLB.', color: '#9aa3b0' },
   { text: '  • dashboard     — View ▸ Apps ▸ Dashboard: a full-screen launcher over', color: '#9aa3b0' },
   { text: '                    the app_registry. Drop an app description .json to', color: '#9aa3b0' },
   { text: '                    install (try apps/notes_v1.json — its shipping path', color: '#9aa3b0' },
@@ -323,6 +329,7 @@ const BUILTIN_APPS: { id: string; name: string; icon: string; accent?: string; d
   { id: 'chat', name: 'Chat', icon: 'file_text', accent: '#3d6b4f', description: 'IM dialog plugin.' },
   { id: 'profiler', name: 'Profiler', icon: 'search', description: 'Frame profiler and memory registry.' },
   { id: 'gamepad', name: 'Controller Test', icon: 'circle', description: 'Game controller visualiser.' },
+  { id: 'asset_audit', name: 'Asset Audit', icon: 'file', accent: '#6b3d5a', description: 'Drop or upload .glb/.fbx assets: 3D preview, stats, optimize, re-export.' },
   { id: 'about', name: 'About', icon: 'home', description: 'About this demo.' },
 ]
 for (const def of BUILTIN_APPS) {
@@ -401,6 +408,7 @@ const VIEW_TABS: { id: string; title: string; win?: window_new_options }[] = [
   { id: 'chat', title: 'Chat', win: { w: 300, h: 400 } },
   { id: 'profiler', title: 'Profiler', win: { w: 760, h: 460 } },
   { id: 'gamepad', title: 'Controller Test', win: { w: 620, h: 540 } },
+  { id: 'asset_audit', title: 'Asset Audit', win: { w: 900, h: 560 } },
 ]
 
 // Spawn or focus the Demo Editor app window.
@@ -525,6 +533,7 @@ const main_menu = new ui_main_menu([
           { id: 'chat', label: 'Chat' },
           { id: 'profiler', label: 'Profiler' },
           { id: 'gamepad', label: 'Controller Test' },
+          { id: 'asset_audit', label: 'Asset Audit' },
           { id: 'about', label: 'About' },
         ],
       },
@@ -610,6 +619,7 @@ function handle_menu(node: ui_menu_node): void {
 }
 
 const file_state = create_file_browser_state()
+const audit_state = create_asset_audit_state()
 const chat_state = create_im_dialog_state()
 let chat_is_typing = false
 const console_state = create_text_view_state()
@@ -776,6 +786,27 @@ async function main(): Promise<void> {
   const resize = () => renderer.resize()
   window.addEventListener('resize', resize)
 
+  // Drag-to-audit: dropping a .glb/.gltf/.fbx file (or a folder of them) on the
+  // canvas loads it into the Asset Audit window; the bridge also installs the
+  // hidden file/folder pickers behind the panel's Upload buttons.
+  let audit_asset_count = 0
+  asset_audit_dom_target(canvas, audit_state, {
+    on_change: () => {
+      windows.invalidate('asset_audit')
+      renderer.request_render()
+      // Surface the window when files arrive (drag hover / load), but defer the
+      // spawn: on_change can fire mid-frame from inside windows.frame().
+      const should_open = audit_state.drop_hover || audit_state.loading > 0 || audit_state.assets.length !== audit_asset_count
+      audit_asset_count = audit_state.assets.length
+      if (should_open) {
+        window.setTimeout(() => {
+          open_view_tab('asset_audit', 'Asset Audit')
+          renderer.request_render()
+        }, 0)
+      }
+    },
+  })
+
   // Drag-to-install: dropping an app description .json (or a manifest URL)
   // anywhere on the canvas installs it; the dashboard opens as the drop zone.
   dashboard_drop_target(canvas, registry, dashboard_state, {
@@ -933,6 +964,9 @@ async function main(): Promise<void> {
           break
         case 'gamepad':
           gamepad_test_panel(renderer, theme, snapshot, px, py, pw, ph, gamepad, gamepad_test_state)
+          break
+        case 'asset_audit':
+          asset_audit(renderer, widgets, theme, snapshot, px, py, pw, ph, audit_state, { scale })
           break
       }
       profiler.end()

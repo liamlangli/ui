@@ -4,6 +4,11 @@
 // Note: `dock_system` and `window_system` now live in core (import them from
 // '@liamlangli/ui'); they are re-exported here for backwards compatibility.
 
+export * from './ui_asset_audit'
+export * from './ui_asset_audit_data'
+export * from './ui_asset_audit_fbx'
+export * from './ui_asset_audit_gltf'
+export * from './ui_asset_audit_view'
 export * from './ui_code_editor'
 export * from './ui_dashboard'
 export * from './ui_file_browser'
