@@ -6,6 +6,7 @@
 
 export * from './ui_code_editor'
 export * from './ui_file_browser'
+export * from './ui_gamepad_test'
 export * from './ui_graph'
 export * from './ui_hori_split_view'
 export * from './ui_im_dialog'

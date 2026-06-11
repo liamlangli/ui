@@ -69,6 +69,12 @@ import {
   type node_graph_connection,
   type node_graph_template,
   input_collector,
+  gamepad_input,
+  gamepad_cursor_update,
+  gamepad_cursor_draw,
+  create_gamepad_cursor_state,
+  gamepad_test_panel,
+  create_gamepad_test_state,
 } from '../src/index'
 import theme_url from './theme.json?url'
 
@@ -144,6 +150,7 @@ const about_lines: ui_text_view_line[] = [
   { text: '  • file_browser  — the Explorer panel inside Demo Editor', color: '#9aa3b0' },
   { text: '  • code_editor   — the Editor tab (type, select, syntax-highlight)', color: '#9aa3b0' },
   { text: '  • im_dialog     — the Chat window', color: '#9aa3b0' },
+  { text: '  • gamepad_test  — Controller Test (plug in a game controller)', color: '#9aa3b0' },
   { text: '' },
   { text: 'Try: drag windows around, then drag a tab inside Demo Editor to split.', color: '#5fb878' },
   { text: '试试中文：渲染器内置 PingFang SC 字形图集。', color: '#d8a24a' },
@@ -292,6 +299,7 @@ const VIEW_TABS: { id: string; title: string; win?: window_new_options }[] = [
   { id: 'about', title: 'About', win: { w: 540, h: 340 } },
   { id: 'chat', title: 'Chat', win: { w: 300, h: 400 } },
   { id: 'profiler', title: 'Profiler', win: { w: 760, h: 460 } },
+  { id: 'gamepad', title: 'Controller Test', win: { w: 620, h: 540 } },
 ]
 
 // Spawn or focus the Demo Editor app window.
@@ -414,6 +422,7 @@ const main_menu = new ui_main_menu([
           { id: 'icons', label: 'Icons' },
           { id: 'chat', label: 'Chat' },
           { id: 'profiler', label: 'Profiler' },
+          { id: 'gamepad', label: 'Controller Test' },
           { id: 'about', label: 'About' },
         ],
       },
@@ -500,6 +509,14 @@ let chat_is_typing = false
 const console_state = create_text_view_state()
 const about_state = create_text_view_state()
 const profiler_state = create_profiler_panel_state()
+
+// --- game controller demo ---------------------------------------------------
+// Polls connected game controllers every frame. While one is connected a
+// translucent circle cursor appears: the left stick moves it, A clicks and the
+// right stick scrolls — and the Controller Test window shows the live keymap.
+const gamepad = new gamepad_input(() => active_renderer?.request_render())
+const gamepad_cursor = create_gamepad_cursor_state()
+const gamepad_test_state = create_gamepad_test_state()
 
 // --- code_editor demo -------------------------------------------------------
 const editor_buffer = new text_buffer(
@@ -665,6 +682,18 @@ async function main(): Promise<void> {
     const scale = window.devicePixelRatio || 1
     const m = 8 * scale
 
+    // Poll game controllers and drive the transparent circle cursor. Gamepads
+    // never fire DOM events, so keep the adaptive renderer awake (and the
+    // Controller Test window live) while one is connected.
+    profiler.begin('gamepad')
+    gamepad.poll()
+    gamepad_cursor_update(gamepad.active, snapshot, safe.x, safe.y, safe.w, safe.h, gamepad_cursor)
+    if (gamepad.connected) {
+      renderer.request_render()
+      if (windows.layout.windows.some((win) => win.id === 'gamepad')) windows.invalidate('gamepad')
+    }
+    profiler.end()
+
     profiler.begin('theme')
     const theme = tick_theme(frame_start_ms)
     profiler.end()
@@ -754,6 +783,9 @@ async function main(): Promise<void> {
         case 'profiler':
           profiler_panel(renderer, theme, snapshot, px, py, pw, ph, profiler, profiler_state)
           break
+        case 'gamepad':
+          gamepad_test_panel(renderer, theme, snapshot, px, py, pw, ph, gamepad, gamepad_test_state)
+          break
       }
       profiler.end()
     }
@@ -780,6 +812,8 @@ async function main(): Promise<void> {
     if (menu_event.activated) handle_menu(menu_event.activated)
 
     widgets.end_frame()
+    // Controller cursor rides above every window, menu and popup.
+    gamepad_cursor_draw(renderer, theme, gamepad.active, gamepad_cursor)
     profiler.begin('flush')
     renderer.flush(clear)
     profiler.end()
