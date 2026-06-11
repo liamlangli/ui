@@ -69,6 +69,15 @@ export interface asset_audit_state {
   // wired by asset_audit_dom_target
   open_file_picker: (() => void) | null
   open_folder_picker: (() => void) | null
+  /**
+   * Preferred picker trigger: queues the request so the bridge can call the
+   * hidden input's `.click()` inside the next trusted pointerup — mobile
+   * browsers only show the file dialog from a user-gesture call stack, and the
+   * IM button fires on the press edge from inside requestAnimationFrame.
+   */
+  request_picker: ((kind: 'file' | 'folder') => void) | null
+  /** False on platforms without directory pickers (iOS/Android) — hides the folder buttons. */
+  folder_picker_supported: boolean
   on_change: (() => void) | null
 }
 
@@ -99,6 +108,8 @@ export function create_asset_audit_state(): asset_audit_state {
     sidebar_content_h: 0,
     open_file_picker: null,
     open_folder_picker: null,
+    request_picker: null,
+    folder_picker_supported: true,
     on_change: null,
   }
 }
@@ -313,11 +324,32 @@ export function asset_audit_dom_target(target: HTMLElement, state: asset_audit_s
     void files_to_payloads(files).then((payloads) => asset_audit_load_files(state, payloads))
   }
 
+  const ua = navigator.userAgent
+  const is_ios = /iPad|iPhone|iPod/.test(ua) || (/Mac/.test(ua) && navigator.maxTouchPoints > 1)
+  const is_android = /Android/.test(ua)
+  // Mobile platforms have no directory picker — the panel hides the folder buttons.
+  state.folder_picker_supported = !(is_ios || is_android)
+
+  // `display:none` inputs ignore programmatic .click() on iOS Safari — park
+  // them rendered-but-invisible offscreen instead.
+  const style_offscreen = (input: HTMLInputElement): void => {
+    input.style.position = 'fixed'
+    input.style.left = '0'
+    input.style.top = '0'
+    input.style.width = '1px'
+    input.style.height = '1px'
+    input.style.opacity = '0'
+    input.style.pointerEvents = 'none'
+    input.tabIndex = -1
+    input.setAttribute('aria-hidden', 'true')
+  }
+
   const file_input = document.createElement('input')
   file_input.type = 'file'
   file_input.multiple = true
-  file_input.accept = '.glb,.gltf,.fbx,.bin'
-  file_input.style.display = 'none'
+  // iOS treats unknown extensions in `accept` as "nothing selectable" — skip it there.
+  if (!is_ios) file_input.accept = '.glb,.gltf,.fbx,.bin'
+  style_offscreen(file_input)
   file_input.addEventListener('change', () => {
     ingest([...(file_input.files ?? [])])
     file_input.value = ''
@@ -325,7 +357,7 @@ export function asset_audit_dom_target(target: HTMLElement, state: asset_audit_s
 
   const folder_input = document.createElement('input')
   folder_input.type = 'file'
-  folder_input.style.display = 'none'
+  style_offscreen(folder_input)
   folder_input.setAttribute('webkitdirectory', '')
   folder_input.addEventListener('change', () => {
     ingest([...(folder_input.files ?? [])])
@@ -336,6 +368,41 @@ export function asset_audit_dom_target(target: HTMLElement, state: asset_audit_s
   document.body.appendChild(folder_input)
   state.open_file_picker = () => file_input.click()
   state.open_folder_picker = () => folder_input.click()
+
+  // Gesture relay: the IM Upload buttons fire on the press edge from inside
+  // requestAnimationFrame, where mobile browsers refuse to show a file dialog
+  // (no transient user activation until the finger lifts). So the panel queues
+  // a request and the `.click()` happens synchronously inside the trusted
+  // pointerup. If the release already happened (very fast tap processed in one
+  // frame), the activation from that pointerup is still fresh — click directly.
+  let pending_picker: { kind: 'file' | 'folder'; at: number } | null = null
+  let pointer_held = false
+  const PICKER_REQUEST_TTL_MS = 3000
+  const fulfill_picker = (): void => {
+    const request = pending_picker
+    pending_picker = null
+    if (!request || performance.now() - request.at > PICKER_REQUEST_TTL_MS) return
+    const input = request.kind === 'folder' && state.folder_picker_supported ? folder_input : file_input
+    input.click()
+  }
+  state.request_picker = (kind) => {
+    pending_picker = { kind, at: performance.now() }
+    if (!pointer_held) fulfill_picker()
+  }
+  const pointer_down = (): void => {
+    pointer_held = true
+  }
+  const pointer_up = (): void => {
+    pointer_held = false
+    fulfill_picker()
+  }
+  const pointer_cancel = (): void => {
+    pointer_held = false
+    pending_picker = null // a cancelled gesture (e.g. scroll) shouldn't pop the dialog
+  }
+  target.addEventListener('pointerdown', pointer_down)
+  window.addEventListener('pointerup', pointer_up)
+  window.addEventListener('pointercancel', pointer_cancel)
 
   const set_hover = (hover: boolean): void => {
     if (state.drop_hover === hover) return
@@ -391,10 +458,14 @@ export function asset_audit_dom_target(target: HTMLElement, state: asset_audit_s
     target.removeEventListener('dragover', drag_over)
     target.removeEventListener('dragleave', drag_leave)
     target.removeEventListener('drop', drop)
+    target.removeEventListener('pointerdown', pointer_down)
+    window.removeEventListener('pointerup', pointer_up)
+    window.removeEventListener('pointercancel', pointer_cancel)
     file_input.remove()
     folder_input.remove()
     state.open_file_picker = null
     state.open_folder_picker = null
+    state.request_picker = null
     state.on_change = null
   }
 }
@@ -413,6 +484,13 @@ export interface asset_audit_event {
 
 function point_in(x: number, y: number, rx: number, ry: number, rw: number, rh: number): boolean {
   return x >= rx && x < rx + rw && y >= ry && y < ry + rh
+}
+
+/** Open a picker via the bridge's gesture relay (mobile-safe), or directly. */
+function trigger_picker(state: asset_audit_state, kind: 'file' | 'folder'): void {
+  if (state.request_picker) state.request_picker(kind)
+  else if (kind === 'folder') state.open_folder_picker?.()
+  else state.open_file_picker?.()
 }
 
 export function asset_audit(
@@ -446,8 +524,8 @@ export function asset_audit(
     bx += width + 6 * scale
     return hit
   }
-  if (button('aa_upload_file', 'Upload File', 92 * scale)) state.open_file_picker?.()
-  if (button('aa_upload_folder', 'Upload Folder', 104 * scale)) state.open_folder_picker?.()
+  if (button('aa_upload_file', 'Upload File', 92 * scale)) trigger_picker(state, 'file')
+  if (state.folder_picker_supported && button('aa_upload_folder', 'Upload Folder', 104 * scale)) trigger_picker(state, 'folder')
   const next_wire = widgets.toggle('aa_wire', bx, bar_y + (bar_h - 18 * scale) / 2, state.wireframe, 'Wireframe')
   if (next_wire !== state.wireframe) {
     state.wireframe = next_wire
@@ -593,7 +671,11 @@ function draw_viewport(
     // Empty state: drop hint + inline upload buttons.
     const cx = vx + vw / 2
     const cy = vy + vh / 2
-    const title = state.loading > 0 ? 'Loading asset…' : 'Drop a .glb / .gltf / .fbx file or folder here'
+    const title = state.loading > 0
+      ? 'Loading asset…'
+      : state.folder_picker_supported
+        ? 'Drop a .glb / .gltf / .fbx file or folder here'
+        : 'Upload a .glb / .gltf / .fbx file'
     const tf = 13 * scale
     ui.draw_text(cx - ui.text_width(title, tf) / 2, cy - 34 * scale, title, tf, slot('text'))
     if (state.loading === 0) {
@@ -602,8 +684,12 @@ function draw_viewport(
       ui.draw_text(cx - ui.text_width(sub, sf) / 2, cy - 12 * scale, sub, sf, slot('text_dim'))
       const bw = 110 * scale
       const bh = 28 * scale
-      if (widgets.button('aa_empty_file', cx - bw - 5 * scale, cy + 12 * scale, bw, bh, 'Upload File', { active: true })) state.open_file_picker?.()
-      if (widgets.button('aa_empty_folder', cx + 5 * scale, cy + 12 * scale, bw, bh, 'Upload Folder')) state.open_folder_picker?.()
+      if (state.folder_picker_supported) {
+        if (widgets.button('aa_empty_file', cx - bw - 5 * scale, cy + 12 * scale, bw, bh, 'Upload File', { active: true })) trigger_picker(state, 'file')
+        if (widgets.button('aa_empty_folder', cx + 5 * scale, cy + 12 * scale, bw, bh, 'Upload Folder')) trigger_picker(state, 'folder')
+      } else if (widgets.button('aa_empty_file', cx - bw / 2, cy + 12 * scale, bw, bh, 'Upload File', { active: true })) {
+        trigger_picker(state, 'file')
+      }
     }
   }
 
