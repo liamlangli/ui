@@ -111,6 +111,8 @@ export class gamepad_input {
   active: ui_gamepad_snapshot = create_empty_gamepad_snapshot()
   private active_index = -1
   private prev_pressed = new Map<number, boolean[]>()
+  /** Set when getGamepads() throws (Permissions-Policy denial in iframes). */
+  private blocked = false
 
   constructor(private readonly on_event: () => void = () => {}, private readonly dead_zone = 0.18) {
     if (typeof window === 'undefined') return
@@ -121,7 +123,7 @@ export class gamepad_input {
   }
 
   get supported(): boolean {
-    return typeof navigator !== 'undefined' && typeof navigator.getGamepads === 'function'
+    return !this.blocked && typeof navigator !== 'undefined' && typeof navigator.getGamepads === 'function'
   }
 
   get connected(): boolean {
@@ -132,8 +134,17 @@ export class gamepad_input {
   poll(): ui_gamepad_snapshot {
     this.pads = []
     if (this.supported) {
+      let raw: (Gamepad | null)[] = []
+      try {
+        raw = navigator.getGamepads()
+      } catch {
+        // Permissions-Policy can deny the Gamepad API (e.g. in cross-origin
+        // iframes), making getGamepads() throw. Flag it and report "no pads"
+        // instead of letting the exception kill the host's frame loop.
+        this.blocked = true
+      }
       const seen = new Set<number>()
-      for (const pad of navigator.getGamepads()) {
+      for (const pad of raw) {
         if (!pad || !pad.connected) continue
         seen.add(pad.index)
         this.pads.push(this.snapshot_pad(pad))
@@ -201,10 +212,33 @@ export interface gamepad_cursor_state {
   /** 1 → 0 decay of the expanding ring shown after a button press. */
   pulse: number
   last_ms: number
+  /** Internal pointer-ownership arbitration between pad and physical mouse. */
+  owner: 'mouse' | 'pad'
+  prev_lx: number
+  prev_ly: number
+  prev_rx: number
+  prev_ry: number
+  injected_x: number
+  injected_y: number
+  has_injected: boolean
 }
 
 export function create_gamepad_cursor_state(): gamepad_cursor_state {
-  return { x: 0, y: 0, placed: false, pulse: 0, last_ms: 0 }
+  return {
+    x: 0,
+    y: 0,
+    placed: false,
+    pulse: 0,
+    last_ms: 0,
+    owner: 'mouse',
+    prev_lx: 0,
+    prev_ly: 0,
+    prev_rx: 0,
+    prev_ry: 0,
+    injected_x: 0,
+    injected_y: 0,
+    has_injected: false,
+  }
 }
 
 export interface gamepad_cursor_options {
@@ -258,20 +292,45 @@ export function gamepad_cursor_update(
 
   if (options.drive_pointer === false) return
   const a_down = pad.buttons[0]?.pressed === true
-  if (moving || a_down || pad.released[0]) {
+
+  // Pointer ownership: the physical mouse reclaims the pointer the moment it
+  // moves (the snapshot position differs from what we injected last frame);
+  // the pad claims it on *fresh* input — a stick deflection change or an A
+  // press. A constant deflection (stick held, or a drifting stick) does not
+  // re-claim, so a connected controller can never lock the mouse out.
+  if (state.has_injected && (input.mouse_x !== state.injected_x || input.mouse_y !== state.injected_y)) {
+    state.owner = 'mouse'
+  }
+  const stick_changed =
+    Math.abs(pad.left_x - state.prev_lx) > 0.02 ||
+    Math.abs(pad.left_y - state.prev_ly) > 0.02 ||
+    Math.abs(pad.right_x - state.prev_rx) > 0.02 ||
+    Math.abs(pad.right_y - state.prev_ry) > 0.02
+  state.prev_lx = pad.left_x
+  state.prev_ly = pad.left_y
+  state.prev_rx = pad.right_x
+  state.prev_ry = pad.right_y
+  if (stick_changed || pad.pressed[0]) state.owner = 'pad'
+
+  // An A release is honoured regardless of ownership, so a click started by
+  // the pad always restores the collector's persistent mouse_down level.
+  if (pad.released[0] && state.has_injected) {
+    input.mouse_released = true
+    input.mouse_down = false
+  }
+  if (state.owner !== 'pad') return
+
+  if (moving || a_down || pad.pressed[0] || pad.released[0] || stick_changed) {
     input.mouse_x = state.x
     input.mouse_y = state.y
     input.pointer_is_touch = false
   }
-  // Only edges + the held level are injected; release restores mouse_down so
-  // the host collector's persistent state is left consistent.
   if (pad.pressed[0]) input.mouse_pressed = true
   if (a_down) input.mouse_down = true
-  if (pad.released[0]) {
-    input.mouse_released = true
-    input.mouse_down = false
-  }
   if (pad.right_y !== 0) input.wheel_y += -pad.right_y * (options.scroll_speed ?? 24) * dt
+  state.injected_x = input.mouse_x
+  state.injected_y = input.mouse_y
+  state.has_injected = true
 }
 
 /**
