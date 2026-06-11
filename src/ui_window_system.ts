@@ -24,7 +24,9 @@ import { ui_renderer } from './ui_renderer'
 import type { ui_layer } from './ui_renderer'
 import type { ui_input_snapshot } from './ui_widgets'
 import {
+  clamp_window_to_area,
   create_default_window_layout,
+  find_window,
   focus_window,
   close_window,
   minimize_window,
@@ -93,14 +95,29 @@ export class window_system {
   // Last title-bar press, for double-click maximize / restore detection.
   private title_click_id: string | null = null
   private title_click_ms = 0
+  // Windows spawned before the first frame() (area unknown) get their rect
+  // clamped into the canvas safe area as soon as the area is measured.
+  private pending_clamp = new Set<string>()
 
   constructor(layout?: window_layout) {
     this.layout = layout ?? create_default_window_layout()
   }
 
-  /** Spawn or focus a view as a floating window. */
+  /** Spawn or focus a view as a floating window, kept inside the window area. */
   add_window(id: string, title: string, options?: window_new_options): window_view {
-    return spawn_window(this.layout, id, title, options)
+    const existed = find_window(this.layout, id) !== null
+    const win = spawn_window(this.layout, id, title, options)
+    if (!existed) {
+      // Keep the fresh window's rect inside the canvas safe area. Before the
+      // first frame the area is unknown — defer the clamp until it is measured.
+      if (this.area_w > 0 && this.area_h > 0) {
+        const scale = window.devicePixelRatio || 1
+        clamp_window_to_area(win, this.area_w / scale, this.area_h / scale)
+      } else {
+        this.pending_clamp.add(id)
+      }
+    }
+    return win
   }
 
   /**
@@ -136,6 +153,15 @@ export class window_system {
     this.area_y = y
     this.area_w = Math.max(0, w)
     this.area_h = Math.max(0, h - taskbar_h)
+
+    // Windows spawned before the area was known clamp into it now.
+    if (this.pending_clamp.size > 0 && this.area_w > 0 && this.area_h > 0) {
+      for (const id of this.pending_clamp) {
+        const win = find_window(this.layout, id)
+        if (win) clamp_window_to_area(win, this.area_w / scale, this.area_h / scale)
+      }
+      this.pending_clamp.clear()
+    }
 
     // Live clock keeps redrawing so the displayed time stays current.
     if (show_taskbar) ui.request_render()

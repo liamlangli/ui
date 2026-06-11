@@ -203,6 +203,25 @@ export function toggle_maximize_window(layout: window_layout, id: string): void 
   focus_window(layout, id)
 }
 
+/**
+ * Clamp a window fully inside the window area (logical px), shrinking it when
+ * it is larger than the area. Used on freshly spawned windows so a default /
+ * requested rect never lands outside the canvas safe area (small screens,
+ * cascade overflow). The restore rect is clamped too so un-maximizing later
+ * also lands inside.
+ */
+export function clamp_window_to_area(win: window_view, area_w: number, area_h: number): void {
+  if (area_w <= 0 || area_h <= 0) return
+  win.w = clamp(win.w, Math.min(window_min_w, area_w), area_w)
+  win.h = clamp(win.h, Math.min(window_min_h, area_h), area_h)
+  win.x = clamp(win.x, 0, area_w - win.w)
+  win.y = clamp(win.y, 0, area_h - win.h)
+  win.restore_w = clamp(win.restore_w, Math.min(window_min_w, area_w), area_w)
+  win.restore_h = clamp(win.restore_h, Math.min(window_min_h, area_h), area_h)
+  win.restore_x = clamp(win.restore_x, 0, area_w - win.restore_w)
+  win.restore_y = clamp(win.restore_y, 0, area_h - win.restore_h)
+}
+
 /** Move a window (logical px), keeping the title bar reachable inside the area. */
 export function move_window(win: window_view, x: number, y: number, area_w: number, area_h: number): void {
   if (win.maximized) return
