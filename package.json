@@ -16,6 +16,10 @@
       "types": "./src/index.ts",
       "default": "./src/index.ts"
     },
+    "./core": {
+      "types": "./src/core.ts",
+      "default": "./src/core.ts"
+    },
     "./plugins": {
       "types": "./src/plugins/index.ts",
       "default": "./src/plugins/index.ts"

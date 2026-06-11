@@ -7,6 +7,10 @@
 // (Widgets, Icons, Graph, Node Graph, About, Chat) open as standalone windows.
 // Everything is drawn on the GPU.
 
+// Only the core toolkit is imported statically — the plugins (file browser,
+// code editor, chat, graphs, asset audit, dashboard, menu, …) load behind a
+// dynamic import so the window-system desktop can put its first frame on
+// screen without waiting for (or parsing) any plugin code.
 import {
   apply_theme,
   load_theme,
@@ -42,52 +46,36 @@ import {
   app_registry,
   serialize_app_registry,
   type installed_app,
-  // plugins
-  asset_audit,
-  create_asset_audit_state,
-  asset_audit_dom_target,
-  dashboard,
-  create_dashboard_state,
-  dashboard_drop_target,
-  file_browser,
-  create_file_browser_state,
-  im_dialog,
-  create_im_dialog_state,
-  code_editor,
-  create_code_editor_state,
-  text_buffer,
-  ui_main_menu,
   visit_dock_leaves,
   activate_dock_tab,
-  graph_canvas,
-  create_graph_state,
-  node_graph,
-  create_node_graph_state,
-  add_node,
   profiler,
-  profiler_panel,
-  create_profiler_panel_state,
   memory,
-  type editor_token,
-  type editor_token_kind,
-  type file_node,
-  type im_message,
-  type ui_menu_node,
-  type graph_node_base,
-  type graph_node_view,
-  type graph_link,
-  type node_graph_node,
-  type node_graph_connection,
-  type node_graph_template,
   input_collector,
   gamepad_input,
   gamepad_cursor_update,
   gamepad_cursor_draw,
   create_gamepad_cursor_state,
-  gamepad_test_panel,
-  create_gamepad_test_state,
-} from '../src/index'
+} from '../src/core'
+// Plugin types only — `import type` is erased at build time, so this does not
+// pull the plugin modules into the startup chunk.
+import type {
+  ui_main_menu,
+  text_buffer,
+  editor_token,
+  editor_token_kind,
+  file_node,
+  im_message,
+  ui_menu_node,
+  graph_node_base,
+  graph_node_view,
+  graph_link,
+  node_graph_node,
+  node_graph_connection,
+  node_graph_template,
+} from '../src/plugins'
 import theme_url from './theme.json?url'
+
+type plugin_module = typeof import('../src/plugins')
 
 const canvas = document.getElementById('app') as HTMLCanvasElement
 
@@ -222,23 +210,17 @@ const graph_links: graph_link[] = [
   { src_node: 3, src_pin: 0, dst_node: 4, dst_pin: 1 },
   { src_node: 4, src_pin: 0, dst_node: 5, dst_pin: 0 },
 ]
-const graph_state_demo = create_graph_state()
 const graph_view = (node: demo_graph_node): graph_node_view => ({ title: node.title, inputs: node.inputs, outputs: node.outputs })
 
 // --- node_graph plugin demo (dotted backdrop + typed slots) ----------------
-const node_graph_nodes: node_graph_node[] = [
-  add_node('Input', 20, 40, { id: 'in', outputs: [{ label: 'Position', type: 'vec3' }, { label: 'UV', type: 'vec2' }] }),
-  add_node('Sample', 240, 60, { id: 'tex', inputs: [{ label: 'UV', type: 'vec2' }], outputs: [{ label: 'Color', type: 'color' }] }),
-  add_node('Tint', 240, 220, { id: 'tint', inputs: [{ label: 'A', type: 'color' }], outputs: [{ label: 'Out', type: 'color' }] }),
-  add_node('Output', 470, 120, { id: 'out', inputs: [{ label: 'Albedo', type: 'color' }, { label: 'Normal', type: 'vec3' }] }),
-]
+// The seeded nodes need the plugin's `add_node`, so they are built lazily in
+// `init_plugins` (see `demo_plugins`); the wiring data below is plain JSON.
 const node_graph_connections: node_graph_connection[] = [
   { from_node: 'in', from_slot: 1, to_node: 'tex', to_slot: 0 },
   { from_node: 'tex', from_slot: 0, to_node: 'tint', to_slot: 0 },
   { from_node: 'tint', from_slot: 0, to_node: 'out', to_slot: 0 },
   { from_node: 'in', from_slot: 0, to_node: 'out', to_slot: 1 },
 ]
-const node_graph_state = create_node_graph_state()
 const node_graph_templates: node_graph_template[] = [
   { type: 'Input', outputs: [{ label: 'Position', type: 'vec3' }, { label: 'UV', type: 'vec2' }] },
   { type: 'Sample', inputs: [{ label: 'UV', type: 'vec2' }], outputs: [{ label: 'Color', type: 'color' }] },
@@ -351,7 +333,28 @@ registry.on_change = () => {
   active_renderer?.request_render()
 }
 
-const dashboard_state = create_dashboard_state()
+// --- Lazily loaded plugins ----------------------------------------------------
+// All plugin code — and every piece of demo state owned by a plugin — sits
+// behind a dynamic `import('../src/plugins')`. The core desktop (window
+// system, taskbar, dock chrome) renders immediately; panel bodies show a
+// loading hint until the plugin chunk arrives, then everything springs live.
+interface demo_plugins {
+  mod: plugin_module
+  main_menu: ui_main_menu
+  dashboard_state: ReturnType<plugin_module['create_dashboard_state']>
+  file_state: ReturnType<plugin_module['create_file_browser_state']>
+  audit_state: ReturnType<plugin_module['create_asset_audit_state']>
+  chat_state: ReturnType<plugin_module['create_im_dialog_state']>
+  profiler_state: ReturnType<plugin_module['create_profiler_panel_state']>
+  gamepad_test_state: ReturnType<plugin_module['create_gamepad_test_state']>
+  editor_buffer: text_buffer
+  editor_state: ReturnType<plugin_module['create_code_editor_state']>
+  graph_state: ReturnType<plugin_module['create_graph_state']>
+  node_graph_state: ReturnType<plugin_module['create_node_graph_state']>
+  node_graph_nodes: node_graph_node[]
+}
+let plugins: demo_plugins | null = null
+
 let dashboard_open = false
 let last_update_check = 0
 
@@ -478,11 +481,12 @@ function schedule_compile(): void {
 // Run a (simulated) build now. The demo has no real compiler, so this just
 // reports progress to the Console and flips the status flag.
 function run_compile(): void {
+  if (!plugins) return
   cancel_compile()
   const seq = (compile_ctrl.sequence += 1)
-  compile_ctrl.last_source_version = editor_buffer.version
+  compile_ctrl.last_source_version = plugins.editor_buffer.version
   compile_ctrl.status = 'Compiling'
-  append_console(`$ build #${seq} — compiling ${editor_buffer.get_text().length} bytes`, '#4c8bf5')
+  append_console(`$ build #${seq} — compiling ${plugins.editor_buffer.get_text().length} bytes`, '#4c8bf5')
   window.setTimeout(() => {
     if (compile_ctrl.sequence !== seq) return // superseded by a newer build
     compile_ctrl.status = 'Built'
@@ -491,7 +495,8 @@ function run_compile(): void {
   }, 220)
 }
 
-const main_menu = new ui_main_menu([
+function build_main_menu(mod: plugin_module): ui_main_menu {
+  return new mod.ui_main_menu([
   {
     label: 'File',
     children: [
@@ -550,7 +555,8 @@ const main_menu = new ui_main_menu([
     ],
   },
   theme_menu,
-])
+  ])
+}
 
 function handle_menu(node: ui_menu_node): void {
   const id = node.id
@@ -581,17 +587,17 @@ function handle_menu(node: ui_menu_node): void {
   }
   if (id === 'focus-editor') {
     open_view_tab('editor', 'Editor')
-    editor_state.focused = true
+    if (plugins) plugins.editor_state.focused = true
     return
   }
   if (id === 'select-all') {
     open_view_tab('editor', 'Editor')
-    editor_buffer.select_all()
+    plugins?.editor_buffer.select_all()
     return
   }
   if (id === 'new-file') {
     open_view_tab('editor', 'Editor')
-    editor_buffer.set_text('')
+    plugins?.editor_buffer.set_text('')
     schedule_compile()
     return
   }
@@ -601,7 +607,7 @@ function handle_menu(node: ui_menu_node): void {
     return
   }
   if (id === 'save-file') {
-    append_console(`saved buffer (${editor_buffer.get_text().length} bytes)`, '#5fb878')
+    append_console(`saved buffer (${plugins?.editor_buffer.get_text().length ?? 0} bytes)`, '#5fb878')
     return
   }
   if (id === 'compile-now') {
@@ -618,13 +624,9 @@ function handle_menu(node: ui_menu_node): void {
   if (tab) open_view_tab(tab.id, tab.title)
 }
 
-const file_state = create_file_browser_state()
-const audit_state = create_asset_audit_state()
-const chat_state = create_im_dialog_state()
 let chat_is_typing = false
 const console_state = create_text_view_state()
 const about_state = create_text_view_state()
-const profiler_state = create_profiler_panel_state()
 
 // --- game controller demo ---------------------------------------------------
 // Polls connected game controllers every frame. While one is connected a
@@ -632,27 +634,94 @@ const profiler_state = create_profiler_panel_state()
 // right stick scrolls — and the Controller Test window shows the live keymap.
 const gamepad = new gamepad_input(() => active_renderer?.request_render())
 const gamepad_cursor = create_gamepad_cursor_state()
-const gamepad_test_state = create_gamepad_test_state()
 
-// --- code_editor demo -------------------------------------------------------
-const editor_buffer = new text_buffer(
-  [
-    '// code_editor — a GPU-rendered editable text surface.',
-    '// Click to place the caret, drag to select, type to edit.',
-    '',
-    'function fib(n: number): number {',
-    '  if (n < 2) return n',
-    '  return fib(n - 1) + fib(n - 2)',
-    '}',
-    '',
-    'const seq = []',
-    'for (let i = 0; i < 10; i++) {',
-    '  seq.push(fib(i))',
-    '}',
-    'console.log(seq) // [0, 1, 1, 2, 3, 5, 8, ...]',
-  ].join('\n'),
-)
-const editor_state = create_code_editor_state()
+// Build every plugin-owned piece of demo state once the plugin chunk lands,
+// then wire the DOM drop/picker targets and wake the renderer so the panels
+// switch from their loading hint to live content on the next frame.
+function init_plugins(mod: plugin_module): void {
+  if (plugins) return
+  const editor_buffer = new mod.text_buffer(
+    [
+      '// code_editor — a GPU-rendered editable text surface.',
+      '// Click to place the caret, drag to select, type to edit.',
+      '',
+      'function fib(n: number): number {',
+      '  if (n < 2) return n',
+      '  return fib(n - 1) + fib(n - 2)',
+      '}',
+      '',
+      'const seq = []',
+      'for (let i = 0; i < 10; i++) {',
+      '  seq.push(fib(i))',
+      '}',
+      'console.log(seq) // [0, 1, 1, 2, 3, 5, 8, ...]',
+    ].join('\n'),
+  )
+  plugins = {
+    mod,
+    main_menu: build_main_menu(mod),
+    dashboard_state: mod.create_dashboard_state(),
+    file_state: mod.create_file_browser_state(),
+    audit_state: mod.create_asset_audit_state(),
+    chat_state: mod.create_im_dialog_state(),
+    profiler_state: mod.create_profiler_panel_state(),
+    gamepad_test_state: mod.create_gamepad_test_state(),
+    editor_buffer,
+    editor_state: mod.create_code_editor_state(),
+    graph_state: mod.create_graph_state(),
+    node_graph_state: mod.create_node_graph_state(),
+    node_graph_nodes: [
+      mod.add_node('Input', 20, 40, { id: 'in', outputs: [{ label: 'Position', type: 'vec3' }, { label: 'UV', type: 'vec2' }] }),
+      mod.add_node('Sample', 240, 60, { id: 'tex', inputs: [{ label: 'UV', type: 'vec2' }], outputs: [{ label: 'Color', type: 'color' }] }),
+      mod.add_node('Tint', 240, 220, { id: 'tint', inputs: [{ label: 'A', type: 'color' }], outputs: [{ label: 'Out', type: 'color' }] }),
+      mod.add_node('Output', 470, 120, { id: 'out', inputs: [{ label: 'Albedo', type: 'color' }, { label: 'Normal', type: 'vec3' }] }),
+    ],
+  }
+  compile_ctrl.last_source_version = editor_buffer.version
+
+  // Drag-to-audit: dropping a .glb/.gltf/.fbx file (or a folder of them) on the
+  // canvas loads it into the Asset Audit window; the bridge also installs the
+  // hidden file/folder pickers behind the panel's Upload buttons.
+  const audit_state = plugins.audit_state
+  let audit_asset_count = 0
+  mod.asset_audit_dom_target(canvas, audit_state, {
+    on_change: () => {
+      windows.invalidate('asset_audit')
+      active_renderer?.request_render()
+      // Surface the window when files arrive (drag hover / load), but defer the
+      // spawn: on_change can fire mid-frame from inside windows.frame().
+      const should_open = audit_state.drop_hover || audit_state.loading > 0 || audit_state.assets.length !== audit_asset_count
+      audit_asset_count = audit_state.assets.length
+      if (should_open) {
+        window.setTimeout(() => {
+          open_view_tab('asset_audit', 'Asset Audit')
+          active_renderer?.request_render()
+        }, 0)
+      }
+    },
+  })
+
+  // Drag-to-install: dropping an app description .json (or a manifest URL)
+  // anywhere on the canvas installs it; the dashboard opens as the drop zone.
+  mod.dashboard_drop_target(canvas, registry, plugins.dashboard_state, {
+    on_installed: (app) => {
+      append_console(`installed ${app.manifest.name} v${app.manifest.version}`, '#5fb878')
+      open_dashboard()
+    },
+    on_error: (message) => {
+      append_console(message, '#d9534f')
+      active_renderer?.request_render()
+    },
+    on_drag_state: (active) => {
+      if (active) open_dashboard()
+      active_renderer?.request_render()
+    },
+  })
+
+  // Cached window bodies rendered the loading hint — re-render them live.
+  windows.invalidate()
+  active_renderer?.request_render()
+}
 
 // A tiny, dependency-free tokenizer just to exercise the pluggable highlighting
 // — real consumers pass their own (e.g. a language-server / WASM tokenizer).
@@ -776,7 +845,6 @@ async function main(): Promise<void> {
   const renderer = new ui_renderer(canvas)
   await renderer.init()
   active_renderer = renderer
-  compile_ctrl.last_source_version = editor_buffer.version
   const widgets = new ui_widgets(renderer)
   icon_set = new ui_icons(renderer)
   const loaded: theme_definition = await load_theme(theme_url)
@@ -785,44 +853,6 @@ async function main(): Promise<void> {
   const input = new input_collector(canvas, () => renderer.request_render())
   const resize = () => renderer.resize()
   window.addEventListener('resize', resize)
-
-  // Drag-to-audit: dropping a .glb/.gltf/.fbx file (or a folder of them) on the
-  // canvas loads it into the Asset Audit window; the bridge also installs the
-  // hidden file/folder pickers behind the panel's Upload buttons.
-  let audit_asset_count = 0
-  asset_audit_dom_target(canvas, audit_state, {
-    on_change: () => {
-      windows.invalidate('asset_audit')
-      renderer.request_render()
-      // Surface the window when files arrive (drag hover / load), but defer the
-      // spawn: on_change can fire mid-frame from inside windows.frame().
-      const should_open = audit_state.drop_hover || audit_state.loading > 0 || audit_state.assets.length !== audit_asset_count
-      audit_asset_count = audit_state.assets.length
-      if (should_open) {
-        window.setTimeout(() => {
-          open_view_tab('asset_audit', 'Asset Audit')
-          renderer.request_render()
-        }, 0)
-      }
-    },
-  })
-
-  // Drag-to-install: dropping an app description .json (or a manifest URL)
-  // anywhere on the canvas installs it; the dashboard opens as the drop zone.
-  dashboard_drop_target(canvas, registry, dashboard_state, {
-    on_installed: (app) => {
-      append_console(`installed ${app.manifest.name} v${app.manifest.version}`, '#5fb878')
-      open_dashboard()
-    },
-    on_error: (message) => {
-      append_console(message, '#d9534f')
-      renderer.request_render()
-    },
-    on_drag_state: (active) => {
-      if (active) open_dashboard()
-      renderer.request_render()
-    },
-  })
 
   function frame(): void {
     const frame_start_ms = performance.now()
@@ -888,7 +918,7 @@ async function main(): Promise<void> {
 
     // When a dropdown is open over the dock, swallow the click so the panel
     // underneath doesn't also react to it.
-    const block = main_menu.blocks_point(snapshot.mouse_x, snapshot.mouse_y)
+    const block = plugins ? plugins.main_menu.blocks_point(snapshot.mouse_x, snapshot.mouse_y) : false
     const dock_input = block && !dashboard_open ? { ...snapshot, mouse_pressed: false, mouse_down: false, mouse_released: false, wheel_y: 0 } : desktop_snapshot
 
     const render_panel = (panel: { x: number; y: number; w: number; h: number; tab: { id: string } }) => {
@@ -905,6 +935,14 @@ async function main(): Promise<void> {
         profiler.end()
         return
       }
+      const live = plugins
+      if (!live) {
+        // Plugin chunk still in flight — placeholder body. `init_plugins`
+        // invalidates every cached window once it lands, swapping these live.
+        render_loading_panel(renderer, theme, px, py, pw, ph, scale)
+        profiler.end()
+        return
+      }
       switch (panel.tab.id) {
         case 'demo-editor':
           // The Demo Editor app: its window body is a whole docked workspace.
@@ -914,7 +952,7 @@ async function main(): Promise<void> {
           render_files(renderer, widgets, theme, snapshot, px, py, pw, ph)
           break
         case 'editor':
-          code_editor(renderer, theme, snapshot, px, py, pw, ph, editor_buffer, editor_state, {
+          live.mod.code_editor(renderer, theme, snapshot, px, py, pw, ph, live.editor_buffer, live.editor_state, {
             tokenize: demo_tokenize,
             file_tree,
           })
@@ -935,24 +973,24 @@ async function main(): Promise<void> {
           render_metrics(renderer, theme, px, py, pw, ph, scale)
           break
         case 'graph':
-          graph_canvas(renderer, theme, snapshot, px, py, pw, ph, graph_nodes, graph_links, graph_state_demo, graph_view, {
+          live.mod.graph_canvas(renderer, theme, snapshot, px, py, pw, ph, graph_nodes, graph_links, live.graph_state, graph_view, {
             compatible: (a, b) => a === b || a === 'color' || b === 'color',
           })
           break
         case 'node_graph': {
-          const ng = node_graph(renderer, theme, snapshot, px, py, pw, ph, node_graph_nodes, node_graph_connections, node_graph_state, {
+          const ng = live.mod.node_graph(renderer, theme, snapshot, px, py, pw, ph, live.node_graph_nodes, node_graph_connections, live.node_graph_state, {
             compatible: (a, b) => a === b,
             node_types: node_graph_templates,
           })
           if (ng.delete_requested) {
             for (let i = node_graph_connections.length - 1; i >= 0; i -= 1) {
               const c = node_graph_connections[i]
-              if (node_graph_state.selected.has(c.from_node) || node_graph_state.selected.has(c.to_node)) node_graph_connections.splice(i, 1)
+              if (live.node_graph_state.selected.has(c.from_node) || live.node_graph_state.selected.has(c.to_node)) node_graph_connections.splice(i, 1)
             }
-            for (let i = node_graph_nodes.length - 1; i >= 0; i -= 1) {
-              if (node_graph_state.selected.has(node_graph_nodes[i].id)) node_graph_nodes.splice(i, 1)
+            for (let i = live.node_graph_nodes.length - 1; i >= 0; i -= 1) {
+              if (live.node_graph_state.selected.has(live.node_graph_nodes[i].id)) live.node_graph_nodes.splice(i, 1)
             }
-            node_graph_state.selected.clear()
+            live.node_graph_state.selected.clear()
           }
           break
         }
@@ -960,13 +998,13 @@ async function main(): Promise<void> {
           render_chat(renderer, widgets, theme, snapshot, px, py, pw, ph)
           break
         case 'profiler':
-          profiler_panel(renderer, theme, snapshot, px, py, pw, ph, profiler, profiler_state)
+          live.mod.profiler_panel(renderer, theme, snapshot, px, py, pw, ph, profiler, live.profiler_state)
           break
         case 'gamepad':
-          gamepad_test_panel(renderer, theme, snapshot, px, py, pw, ph, gamepad, gamepad_test_state)
+          live.mod.gamepad_test_panel(renderer, theme, snapshot, px, py, pw, ph, gamepad, live.gamepad_test_state)
           break
         case 'asset_audit':
-          asset_audit(renderer, widgets, theme, snapshot, px, py, pw, ph, audit_state, { scale })
+          live.mod.asset_audit(renderer, widgets, theme, snapshot, px, py, pw, ph, live.audit_state, { scale })
           break
       }
       profiler.end()
@@ -980,24 +1018,31 @@ async function main(): Promise<void> {
     profiler.end()
 
     // Auto-compile: when the editor buffer changes, (re)arm the debounced build.
-    if (compile_ctrl.auto_compile && editor_buffer.version !== compile_ctrl.last_source_version) {
-      compile_ctrl.last_source_version = editor_buffer.version
+    if (plugins && compile_ctrl.auto_compile && plugins.editor_buffer.version !== compile_ctrl.last_source_version) {
+      compile_ctrl.last_source_version = plugins.editor_buffer.version
       schedule_compile()
     }
 
     // Refresh the Theme sub-menu against the live selection, then draw the menu
-    // bar on top of the dock so its dropdowns overlay the panels below.
+    // bar on top of the dock so its dropdowns overlay the panels below. Until
+    // the plugin chunk lands, an empty bar holds the menu's place.
     profiler.begin('menu')
-    theme_menu.children = theme_ctrl.presets.map((preset, i) => ({ id: `theme:${i}`, label: preset.name, checked: i === theme_ctrl.index }))
-    const menu_event = main_menu.frame(renderer, theme, desktop_snapshot, bar_x, bar_y, bar_w, menu_h)
-    profiler.end()
-    if (menu_event.activated) handle_menu(menu_event.activated)
+    if (plugins) {
+      theme_menu.children = theme_ctrl.presets.map((preset, i) => ({ id: `theme:${i}`, label: preset.name, checked: i === theme_ctrl.index }))
+      const menu_event = plugins.main_menu.frame(renderer, theme, desktop_snapshot, bar_x, bar_y, bar_w, menu_h)
+      profiler.end()
+      if (menu_event.activated) handle_menu(menu_event.activated)
+    } else {
+      renderer.fill_round_rect(bar_x, bar_y, bar_w, menu_h, 6 * scale, pack_color(theme.palette.panel_alt))
+      renderer.stroke_round_rect(bar_x, bar_y, bar_w, menu_h, 6 * scale, 1, pack_color(theme.palette.border))
+      profiler.end()
+    }
 
     // The Dashboard app: a full-screen launcher over the installed-app
     // registry, drawn above the desktop and the menu bar.
-    if (dashboard_open) {
+    if (dashboard_open && plugins) {
       profiler.begin('dashboard')
-      const ev = dashboard(renderer, theme, dashboard_open_at_frame_start ? snapshot : blank_input, safe.x, safe.y, safe.w, safe.h, registry.apps, dashboard_state, { icons: icon_set ?? undefined })
+      const ev = plugins.mod.dashboard(renderer, theme, dashboard_open_at_frame_start ? snapshot : blank_input, safe.x, safe.y, safe.w, safe.h, registry.apps, plugins.dashboard_state, { icons: icon_set ?? undefined })
       profiler.end()
       if (ev.launched) launch_app(ev.launched)
       if (ev.dismissed) dashboard_open = false
@@ -1028,6 +1073,33 @@ async function main(): Promise<void> {
     requestAnimationFrame(frame)
   }
   requestAnimationFrame(frame)
+
+  // Pull the plugin chunk in only after the first core frame is scheduled, so
+  // its fetch/parse never delays the desktop's first paint.
+  void import('../src/plugins')
+    .then((mod) => init_plugins(mod))
+    .catch((err) => {
+      console.error('failed to load plugins', err)
+      append_console(`failed to load plugins: ${err}`, '#d9534f')
+    })
+}
+
+// Placeholder body drawn while the plugin chunk is still loading: the core
+// window system (frames, taskbar, dock chrome) is already fully interactive.
+function render_loading_panel(
+  renderer: ui_renderer,
+  theme: theme_definition,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  scale: number,
+): void {
+  const slot = (name: keyof theme_definition['palette']) => pack_color(theme.palette[name])
+  renderer.fill_rect(x, y, w, h, slot('panel'))
+  const label = 'Loading…'
+  const font = 11.5 * scale
+  renderer.draw_text(x + (w - renderer.text_width(label, font)) / 2, renderer.text_v_center_y(y, h, font), label, font, slot('text_dim'))
 }
 
 function render_files(
@@ -1040,7 +1112,8 @@ function render_files(
   w: number,
   h: number,
 ): void {
-  const ev = file_browser(renderer, theme, snapshot, x, y, w, h, file_tree, file_state, {
+  if (!plugins) return
+  const ev = plugins.mod.file_browser(renderer, theme, snapshot, x, y, w, h, file_tree, plugins.file_state, {
     default_expanded: true,
     view_mode: 'grid',
     view_toggle: false,
@@ -1141,7 +1214,8 @@ function render_chat(
   w: number,
   h: number,
 ): void {
-  const ev = im_dialog(renderer, widgets, theme, snapshot, x, y, w, h, chat_messages, chat_state, {
+  if (!plugins) return
+  const ev = plugins.mod.im_dialog(renderer, widgets, theme, snapshot, x, y, w, h, chat_messages, plugins.chat_state, {
     title: 'Ada · online',
     placeholder: 'Message Ada…',
     is_typing: chat_is_typing,
@@ -1524,8 +1598,10 @@ function format_count(value: number): string {
   registry,
   windows,
   dock,
-  main_menu,
-  dashboard_state,
+  // Plugin-owned pieces resolve to null until the lazy plugin chunk lands.
+  get main_menu() { return plugins?.main_menu ?? null },
+  get dashboard_state() { return plugins?.dashboard_state ?? null },
+  plugins_loaded: () => plugins !== null,
   is_dashboard_open: () => dashboard_open,
 }
 

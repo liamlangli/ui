@@ -115,6 +115,13 @@ needed), a `theme_definition`, and the per-frame `ui_input_snapshot`.
 import { code_editor, dashboard, file_browser, graph_canvas, node_graph, im_dialog } from '@liamlangli/ui/plugins'
 ```
 
+For the fastest first paint, import the core toolkit from `@liamlangli/ui/core`
+(everything except the plugins) and pull the plugins in behind a dynamic
+`import('@liamlangli/ui/plugins')` once the first frame is on screen. The
+preview's `ui_main.ts` does exactly this: the window-system desktop renders
+immediately with "Loading…" panel bodies, then swaps them live when the plugin
+chunk arrives.
+
 ### `file_browser` — tree + project browser
 
 A scrollable, expandable file/folder tree. You own the `file_node[]` forest and
