@@ -72,6 +72,7 @@ import type {
   node_graph_node,
   node_graph_connection,
   node_graph_template,
+  terrain_graph,
 } from '../src/plugins'
 import theme_url from './theme.json?url'
 
@@ -311,6 +312,7 @@ const BUILTIN_APPS: { id: string; name: string; icon: string; accent?: string; d
   { id: 'icons', name: 'Icons', icon: 'image', description: 'Built-in vector icon atlas.' },
   { id: 'graph', name: 'Graph', icon: 'star', description: 'Generic node-graph canvas.' },
   { id: 'node_graph', name: 'Node Graph', icon: 'dot', description: 'Dotted node editor with typed slots.' },
+  { id: 'terrain_graph', name: 'Terrain Graph', icon: 'circle', accent: '#4f6b3d', description: 'Node-based base terrain generator.' },
   { id: 'chat', name: 'Chat', icon: 'file_text', accent: '#3d6b4f', description: 'IM dialog plugin.' },
   { id: 'profiler', name: 'Profiler', icon: 'search', description: 'Frame profiler and memory registry.' },
   { id: 'gamepad', name: 'Controller Test', icon: 'circle', description: 'Game controller visualiser.' },
@@ -357,6 +359,8 @@ interface demo_plugins {
   graph_state: ReturnType<plugin_module['create_graph_state']>
   node_graph_state: ReturnType<plugin_module['create_node_graph_state']>
   node_graph_nodes: node_graph_node[]
+  terrain_graph_state: ReturnType<plugin_module['create_terrain_graph_state']>
+  terrain_graph: terrain_graph
 }
 let plugins: demo_plugins | null = null
 
@@ -412,6 +416,7 @@ const VIEW_TABS: { id: string; title: string; win?: window_new_options }[] = [
   { id: 'icons', title: 'Icons', win: { w: 560, h: 420 } },
   { id: 'graph', title: 'Graph', win: { w: 640, h: 420 } },
   { id: 'node_graph', title: 'Node Graph', win: { w: 640, h: 420 } },
+  { id: 'terrain_graph', title: 'Terrain Graph', win: { w: 920, h: 600 } },
   { id: 'about', title: 'About', win: { w: 540, h: 340 } },
   { id: 'chat', title: 'Chat', win: { w: 300, h: 400 } },
   { id: 'profiler', title: 'Profiler', win: { w: 760, h: 460 } },
@@ -539,6 +544,7 @@ function build_main_menu(mod: plugin_module): ui_main_menu {
           { id: 'dashboard', label: 'Dashboard' },
           { id: 'graph', label: 'Graph' },
           { id: 'node_graph', label: 'Node Graph' },
+          { id: 'terrain_graph', label: 'Terrain Graph' },
           { id: 'gallery', label: 'Widgets' },
           { id: 'icons', label: 'Icons' },
           { id: 'chat', label: 'Chat' },
@@ -678,6 +684,8 @@ function init_plugins(mod: plugin_module): void {
     editor_state: mod.create_code_editor_state(),
     graph_state: mod.create_graph_state(),
     node_graph_state: mod.create_node_graph_state(),
+    terrain_graph_state: mod.create_terrain_graph_state(),
+    terrain_graph: mod.create_default_terrain_graph(),
     node_graph_nodes: [
       mod.add_node('Input', 20, 40, { id: 'in', outputs: [{ label: 'Position', type: 'vec3' }, { label: 'UV', type: 'vec2' }] }),
       mod.add_node('Sample', 240, 60, { id: 'tex', inputs: [{ label: 'UV', type: 'vec2' }], outputs: [{ label: 'Color', type: 'color' }] }),
@@ -1000,6 +1008,11 @@ async function main(): Promise<void> {
             }
             live.node_graph_state.selected.clear()
           }
+          break
+        }
+        case 'terrain_graph': {
+          const ev = live.mod.terrain_graph_generator(renderer, widgets, theme, snapshot, px, py, pw, ph, live.terrain_graph, live.terrain_graph_state, { scale })
+          if (ev.changed) windows.invalidate('terrain_graph')
           break
         }
         case 'chat':
