@@ -1,6 +1,6 @@
 // pan_zoom — shared pan / pinch-zoom camera handling for 2D canvases.
 //
-// Several plugins (graph, node_graph, texture_check, …) present a pannable /
+// Several plugins (graph, node_graph, material_audit, …) present a pannable /
 // zoomable surface; this core module owns the input math once instead of each
 // plugin re-implementing it:
 //
