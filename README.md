@@ -11,7 +11,7 @@ It bundles the pieces needed to build a browser-native editor UI on top of WebGP
 - **`dock_system` / `window_system`** — ready-to-use workspace systems built on `dock`/`window`: a docked split workspace and a floating desktop-style window manager, both part of core so third-party projects can build directly on them. See [Workspace systems](#workspace-systems).
 - **`theme`** — palette/CSS-variable theming with `load_theme`, `apply_theme`, `theme_color`, `theme_rgba`, `pack_color`, and `hex_to_normalized_rgba`.
 - **`app_registry`** — installable apps described by a JSON manifest: install/uninstall, persistence, and update checks against each app's `shipping_path`. See [`dashboard`](#dashboard--full-screen-app-launcher).
-- **`plugins`** — opt-in, higher-level drop-in components (`file_browser`, `graph`, `node_graph`, `im_dialog`, `code_editor`, `dashboard`, `avatar_generator`) packaged so other projects can reuse them piecemeal. See [Plugins](#plugins).
+- **`plugins`** — opt-in, higher-level drop-in components (`file_browser`, `graph`, `node_graph`, `im_dialog`, `code_editor`, `dashboard`, `avatar_generator`, `texture_check`) packaged so other projects can reuse them piecemeal. See [Plugins](#plugins).
 
 ## Live preview
 
@@ -419,6 +419,34 @@ if (ev.exported_bytes) console.log(`wrote avatar.glb (${ev.exported_bytes} bytes
 // or run the pipeline headless — skeleton → frame → muscle → fat → mesh:
 const { mesh, skeleton } = generate_avatar({ ...create_avatar_params(), muscle: 0.8 })
 ```
+
+### `texture_check` — texture repeating / tiling inspector
+
+Drop or upload any image and the plugin renders it endlessly tiled in a WebGPU
+viewport (repeat-addressed sampler), so seams, borders and obvious periodic
+patterns stand out immediately. The view pans and zooms through the shared core
+`pan_zoom` module: drag with the mouse or one finger to pan, wheel or
+two-finger pinch to zoom. A full mip chain is generated for every upload, and
+in the default `auto` mode mip sampling switches on exactly while the texture
+is minified on screen (zoom < 100%) — force it `on` / `off` from the toolbar to
+compare the shimmer. A *tile guides* toggle draws 1px lines on the tile
+boundaries, and the status line reports size, POT-ness, zoom and the live mip
+decision.
+
+```ts
+import { texture_check, texture_check_dom_target, create_texture_check_state } from '@liamlangli/ui/plugins'
+
+const tc = create_texture_check_state()
+texture_check_dom_target(canvas, tc, { on_change: () => renderer.request_render() })
+
+// each frame, between renderer.begin_frame() and renderer.flush():
+const ev = texture_check(renderer, widgets, theme, input, x, y, w, h, tc)
+if (ev.loaded) console.log(`checking ${ev.loaded.name} (${ev.loaded.width}×${ev.loaded.height})`)
+```
+
+The wheel-zoom / two-finger pan + pinch handling lives in core as
+`pan_zoom_apply` / `pan_zoom_drag` (`@liamlangli/ui` → `ui_pan_zoom`); the
+`graph` and `node_graph` canvases run on the same module.
 
 ## Usage
 

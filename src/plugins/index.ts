@@ -22,6 +22,7 @@ export * from './ui_main_menu'
 export * from './ui_node_graph'
 export * from './ui_profiler_view'
 export * from './ui_terrain_graph'
+export * from './ui_texture_check'
 
 export * from '../ui_dock_system'
 export * from '../ui_window_system'

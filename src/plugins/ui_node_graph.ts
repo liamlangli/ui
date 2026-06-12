@@ -33,6 +33,7 @@
 import { theme_color } from '../ui_theme'
 import type { theme_definition, theme_slot } from '../ui_types'
 import { ui_renderer } from '../ui_renderer'
+import { pan_zoom_apply } from '../ui_pan_zoom'
 import type { ui_input_snapshot } from '../ui_widgets'
 
 /** Node identity. Stable across frames; used for selection + wire endpoints. */
@@ -284,31 +285,16 @@ export function node_graph(
     }
   }
 
-  // --- Wheel zoom (anchored at cursor) -----------------------------------
-  if (inside && !state._menu && input.wheel_y) {
-    const gx = (input.mouse_x - origin_x) / pos_scale
-    const gy = (input.mouse_y - origin_y) / pos_scale
-    const next_zoom = clamp(zoom * (input.wheel_y > 0 ? 1.06 : 0.94), MIN_ZOOM, MAX_ZOOM)
-    const next_pos = UNIT * next_zoom
-    state.pan_x = (input.mouse_x - gx * next_pos - x - 24 * scale) / scale
-    state.pan_y = (input.mouse_y - gy * next_pos - y - 18 * scale) / scale
-    state.zoom = next_zoom
-  }
-
-  // --- Two-finger touch: pan + pinch zoom (anchored at the centroid) ------
-  const pan_dx = input.pan_dx ?? 0
-  const pan_dy = input.pan_dy ?? 0
-  const pinch = input.zoom_factor ?? 1
-  if (inside && !state._menu && (pan_dx || pan_dy || pinch !== 1)) {
-    // Graph point under the centroid's previous position; keep it under the new one.
-    const gx = (input.mouse_x - pan_dx - origin_x) / pos_scale
-    const gy = (input.mouse_y - pan_dy - origin_y) / pos_scale
-    const next_zoom = clamp(zoom * pinch, MIN_ZOOM, MAX_ZOOM)
-    const next_pos = UNIT * next_zoom
-    state.pan_x = (input.mouse_x - gx * next_pos - x - 24 * scale) / scale
-    state.pan_y = (input.mouse_y - gy * next_pos - y - 18 * scale) / scale
-    state.zoom = next_zoom
-  }
+  // --- Wheel zoom (cursor-anchored) + two-finger pan / pinch (centroid-
+  // anchored), shared with the other canvas plugins via the core pan_zoom module.
+  pan_zoom_apply(state, input, inside && !state._menu, {
+    base_x: x + 24 * scale,
+    base_y: y + 18 * scale,
+    pan_scale: scale,
+    px_per_unit: (z) => UNIT * z,
+    min_zoom: MIN_ZOOM,
+    max_zoom: MAX_ZOOM,
+  })
 
   // --- Press: start an interaction ---------------------------------------
   // Right-drag pans; a right-click without a drag opens the create menu (below).

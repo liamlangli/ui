@@ -8,6 +8,7 @@
 export * from './ui_types'
 export * from './ui_theme'
 export * from './ui_math'
+export * from './ui_pan_zoom'
 export * from './ui_dock'
 export * from './ui_dock_system'
 export * from './ui_window'
