@@ -395,6 +395,14 @@ dragging, refined on release), presets cover common body types, an armature
 overlay draws the generating skeleton, and Export writes a self-contained GLB
 via the asset-audit encoder.
 
+The skeleton is also directly editable in the viewport: a **Bones** overlay
+draws a circle at every joint with lines along the bones, and dragging a circle
+moves that joint (plus its whole subtree, forward-kinematics style) in the
+camera plane — the mirrored side follows automatically and the body mesh
+regenerates around the edited skeleton. Edits persist as per-joint offsets on
+top of the parametric skeleton (`avatar_joint_offsets`), survive slider
+changes, and reset from the sidebar.
+
 ```ts
 import { avatar_generator, create_avatar_generator_state, generate_avatar } from '@liamlangli/ui/plugins'
 

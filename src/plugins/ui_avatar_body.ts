@@ -620,14 +620,29 @@ export function build_avatar_skeleton_mesh(skeleton: avatar_skeleton, height: nu
 
 // --- one-call generation -------------------------------------------------------
 
+/** Per-joint world-space position deltas (by joint name), applied on top of the
+ * parametric skeleton — this is how interactive bone editing persists across
+ * regenerations. */
+export type avatar_joint_offsets = Record<string, [number, number, number]>
+
 export interface avatar_build_result extends avatar_mesh_result {
   skeleton: avatar_skeleton
   skeleton_mesh: audit_mesh
 }
 
 /** Run the whole pipeline: skeleton → volumes → field → mesh (+ armature mesh). */
-export function generate_avatar(params: avatar_params, resolution_override?: number): avatar_build_result {
+export function generate_avatar(params: avatar_params, resolution_override?: number, joint_offsets?: avatar_joint_offsets): avatar_build_result {
   const skeleton = build_avatar_skeleton(params)
+  if (joint_offsets) {
+    for (const joint of skeleton.joints) {
+      const offset = joint_offsets[joint.name]
+      if (offset) {
+        joint.x += offset[0]
+        joint.y += offset[1]
+        joint.z += offset[2]
+      }
+    }
+  }
   const parts = build_avatar_volumes(params, skeleton)
   const result = polygonize_avatar(parts, params, resolution_override)
   return { ...result, skeleton, skeleton_mesh: build_avatar_skeleton_mesh(skeleton, params.height) }

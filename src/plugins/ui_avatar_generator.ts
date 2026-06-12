@@ -16,6 +16,7 @@ import {
   asset_audit_view,
   create_orbit_camera,
   frame_orbit_camera,
+  orbit_camera_eye,
   type asset_audit_view_mode,
   type orbit_camera,
 } from './ui_asset_audit_view'
@@ -25,6 +26,7 @@ import {
   create_avatar_params,
   generate_avatar,
   type avatar_build_result,
+  type avatar_joint_offsets,
   type avatar_params,
 } from './ui_avatar_body'
 
@@ -45,6 +47,13 @@ export interface avatar_generator_state {
   wireframe: boolean
   view_mode: asset_audit_view_mode
   preset_index: number
+  /** Draw the joint/bone editing overlay on top of the viewport. */
+  show_bones: boolean
+  /** Interactive bone edits: world-space deltas per joint name, applied on top
+   * of the parametric skeleton every regeneration. */
+  joint_offsets: avatar_joint_offsets
+  /** Active joint drag (screen-plane move of a joint + its subtree). */
+  bone_drag: { joint: string; last_mx: number; last_my: number } | null
   camera: orbit_camera
   /** Camera gets framed once on the first generated mesh. */
   framed: boolean
@@ -74,6 +83,9 @@ export function create_avatar_generator_state(): avatar_generator_state {
     wireframe: false,
     view_mode: 'shaded',
     preset_index: 0,
+    show_bones: true,
+    joint_offsets: {},
+    bone_drag: null,
     camera: create_orbit_camera(),
     framed: false,
     view: new asset_audit_view(),
@@ -91,7 +103,7 @@ export function create_avatar_generator_state(): avatar_generator_state {
 }
 
 function regenerate(state: avatar_generator_state, draft: boolean): void {
-  state.result = generate_avatar(state.params, draft ? Math.min(DRAFT_RESOLUTION, state.params.resolution) : undefined)
+  state.result = generate_avatar(state.params, draft ? Math.min(DRAFT_RESOLUTION, state.params.resolution) : undefined, state.joint_offsets)
   state.draft = draft && state.params.resolution > DRAFT_RESOLUTION
   state.params_dirty = false
   state.mesh_revision += 1
@@ -188,6 +200,7 @@ export function avatar_generator(
   if (next_preset !== state.preset_index) {
     state.preset_index = next_preset
     apply_avatar_preset(state.params, AVATAR_PRESETS[next_preset]!.name)
+    state.joint_offsets = {} // a preset describes a whole body — drop manual bone edits
     state.params_dirty = true
   }
   bx += 96 * scale + 10 * scale
@@ -204,6 +217,8 @@ export function avatar_generator(
     state.view_dirty = true
   }
   bx += 96 * scale
+  state.show_bones = widgets.toggle('ag_bones', bx, bar_y + (bar_h - 18 * scale) / 2, state.show_bones, 'Bones')
+  bx += 76 * scale
 
   const mode_button = (id: string, label: string, width: number, mode: asset_audit_view_mode): void => {
     if (button(id, label, width, { active: state.view_mode === mode }) && state.view_mode !== mode) {
@@ -254,15 +269,114 @@ function draw_viewport(
 
   const inside = point_in(input.mouse_x, input.mouse_y, vx, vy, vw, vh)
   const cam = state.camera
+  const result = state.result
 
-  // Orbit / pan / zoom — identical feel to the asset-audit viewport.
-  if (input.mouse_pressed && inside) {
+  // --- camera basis + world → screen projection for the bone overlay ----------
+  const eye = orbit_camera_eye(cam)
+  let fwd_x = cam.target[0] - eye[0], fwd_y = cam.target[1] - eye[1], fwd_z = cam.target[2] - eye[2]
+  const fwd_len = Math.hypot(fwd_x, fwd_y, fwd_z) || 1
+  fwd_x /= fwd_len; fwd_y /= fwd_len; fwd_z /= fwd_len
+  // right = forward × world-up, up = right × forward (matches the render's look-at).
+  let right_x = -fwd_z, right_y = 0, right_z = fwd_x
+  const right_len = Math.hypot(right_x, right_y, right_z) || 1
+  right_x /= right_len; right_z /= right_len
+  const up_x = right_y * fwd_z - right_z * fwd_y
+  const up_y = right_z * fwd_x - right_x * fwd_z
+  const up_z = right_x * fwd_y - right_y * fwd_x
+  const tan_half = Math.tan(cam.fov / 2)
+  const aspect = Math.max(1e-6, vw / Math.max(1, vh))
+  /** Project a world point into viewport px (+ camera depth), or null behind the eye. */
+  const project = (px: number, py: number, pz: number): { sx: number; sy: number; depth: number } | null => {
+    const dx = px - eye[0], dy = py - eye[1], dz = pz - eye[2]
+    const depth = dx * fwd_x + dy * fwd_y + dz * fwd_z
+    if (depth < 1e-4) return null
+    const cx = dx * right_x + dy * right_y + dz * right_z
+    const cy = dx * up_x + dy * up_y + dz * up_z
+    return {
+      sx: vx + vw / 2 + (cx / (depth * tan_half * aspect)) * (vw / 2),
+      sy: vy + vh / 2 - (cy / (depth * tan_half)) * (vh / 2),
+      depth,
+    }
+  }
+
+  // --- bone overlay hit testing -------------------------------------------------
+  // Joints project to screen circles; the nearest one under the cursor wins a
+  // press over orbiting, so the body stays orbitable everywhere else.
+  const joints = state.show_bones && result ? result.skeleton.joints : []
+  const joint_screen: ({ sx: number; sy: number; depth: number } | null)[] = []
+  let hover_joint = -1
+  let hover_dist = Math.max(10, 9 * scale)
+  for (let i = 0; i < joints.length; i += 1) {
+    const p = project(joints[i]!.x, joints[i]!.y, joints[i]!.z)
+    joint_screen.push(p)
+    if (p && inside) {
+      const d = Math.hypot(input.mouse_x - p.sx, input.mouse_y - p.sy)
+      if (d < hover_dist) {
+        hover_dist = d
+        hover_joint = i
+      }
+    }
+  }
+
+  if (input.mouse_pressed && inside && hover_joint >= 0 && !state.bone_drag) {
+    state.bone_drag = { joint: joints[hover_joint]!.name, last_mx: input.mouse_x, last_my: input.mouse_y }
+  }
+  if (state.bone_drag && input.mouse_down && result) {
+    const drag = state.bone_drag
+    const dx = input.mouse_x - drag.last_mx
+    const dy = input.mouse_y - drag.last_my
+    if (dx !== 0 || dy !== 0) {
+      const skeleton = result.skeleton
+      const index = skeleton.joints.findIndex((j) => j.name === drag.joint)
+      if (index >= 0) {
+        // Mouse delta → world delta in the camera plane at the joint's depth.
+        const j = skeleton.joints[index]!
+        const depth = (j.x - eye[0]) * fwd_x + (j.y - eye[1]) * fwd_y + (j.z - eye[2]) * fwd_z
+        const per_px = (2 * Math.max(1e-4, depth) * tan_half) / Math.max(1, vh)
+        const wx = right_x * dx * per_px - up_x * dy * per_px
+        const wy = right_y * dx * per_px - up_y * dy * per_px
+        const wz = right_z * dx * per_px - up_z * dy * per_px
+        // The joint carries its whole subtree (forward kinematics feel), and the
+        // mirrored side follows with x negated so the body stays symmetric.
+        const moved = new Set<number>([index])
+        for (let i = 0; i < skeleton.joints.length; i += 1) {
+          if (moved.has(skeleton.joints[i]!.parent)) moved.add(i)
+        }
+        const add_offset = (name: string, ox: number, oy: number, oz: number): void => {
+          const offset = state.joint_offsets[name] ?? [0, 0, 0]
+          state.joint_offsets[name] = [offset[0] + ox, offset[1] + oy, offset[2] + oz]
+        }
+        const mirror_name = (name: string): string =>
+          name.endsWith('_l') ? `${name.slice(0, -2)}_r` : name.endsWith('_r') ? `${name.slice(0, -2)}_l` : name
+        const moved_names = new Set<string>()
+        for (const i of moved) moved_names.add(skeleton.joints[i]!.name)
+        for (const name of moved_names) {
+          add_offset(name, wx, wy, wz)
+          const twin = mirror_name(name)
+          // Dragging a center joint already carries both sides in its subtree —
+          // only echo to the twin when it isn't being moved directly.
+          if (twin !== name && !moved_names.has(twin)) add_offset(twin, -wx, wy, wz)
+        }
+        state.params_dirty = true
+      }
+      drag.last_mx = input.mouse_x
+      drag.last_my = input.mouse_y
+    }
+  } else if (state.bone_drag && !input.mouse_down) {
+    state.bone_drag = null
+  }
+  if (state.bone_drag) ui.set_cursor('grabbing')
+  else if (hover_joint >= 0) ui.set_cursor('grab')
+
+  // Orbit / pan / zoom — identical feel to the asset-audit viewport. A press
+  // that grabbed a joint never starts an orbit.
+  if (input.mouse_pressed && inside && !state.bone_drag) {
     state.orbiting = !input.shift
     state.panning = input.shift
     state.last_mx = input.mouse_x
     state.last_my = input.mouse_y
   }
-  if ((input.mouse_right_down || input.mouse_middle_down) && inside && !state.panning && !state.orbiting) {
+  if ((input.mouse_right_down || input.mouse_middle_down) && inside && !state.panning && !state.orbiting && !state.bone_drag) {
     state.panning = true
     state.last_mx = input.mouse_x
     state.last_my = input.mouse_y
@@ -302,7 +416,6 @@ function draw_viewport(
   }
 
   // --- offscreen 3D pass --------------------------------------------------------
-  const result = state.result
   const { device } = ui.gpu()
   if (result && device) {
     state.view.init(device)
@@ -338,7 +451,32 @@ function draw_viewport(
   } else {
     ui.draw_text(vx + 12 * scale, vy + 12 * scale, 'WebGPU device not ready…', 11 * scale, slot('text_dim'))
   }
-  const hint = 'drag orbit · shift-drag / right-drag pan · wheel zoom'
+
+  // --- bone editing overlay (drawn x-ray style over the 3D image) ---------------
+  if (state.show_bones && result) {
+    ui.push_clip(vx, vy, vw, vh)
+    const bone_color = slot('text_dim')
+    for (const [pi, ci] of result.skeleton.bones) {
+      const a = joint_screen[pi]
+      const b = joint_screen[ci]
+      if (a && b) ui.stroke_line(a.sx, a.sy, b.sx, b.sy, Math.max(1, 1.4 * scale), bone_color)
+    }
+    const dragged = state.bone_drag?.joint ?? null
+    for (let i = 0; i < joints.length; i += 1) {
+      const p = joint_screen[i]
+      if (!p) continue
+      const active = joints[i]!.name === dragged
+      const hot = active || i === hover_joint
+      const r = (hot ? 4.5 : 3.2) * scale
+      ui.fill_circle(p.sx, p.sy, r, hot ? slot('accent') : slot('panel'))
+      ui.stroke_circle(p.sx, p.sy, r, Math.max(1, 1.2 * scale), hot ? slot('text') : slot('accent'))
+    }
+    ui.pop_clip()
+  }
+
+  const hint = state.show_bones
+    ? 'drag a circle to move that bone · drag orbit · shift-drag pan · wheel zoom'
+    : 'drag orbit · shift-drag / right-drag pan · wheel zoom'
   ui.draw_text(vx + 10 * scale, vy + vh - 18 * scale, hint, 9 * scale, slot('text_dim'), FONT_MONO)
   ui.stroke_round_rect(vx, vy, vw, vh, radius, 1, slot('border'))
 }
@@ -439,6 +577,16 @@ function draw_sidebar(
     row('Bones', `${result.skeleton.bones.length}`)
     const b = result.bounds
     row('Span', `${(b.max[0] - b.min[0]).toFixed(2)} × ${(b.max[1] - b.min[1]).toFixed(2)} × ${(b.max[2] - b.min[2]).toFixed(2)} m`)
+    const edited = Object.keys(state.joint_offsets).length
+    if (edited > 0) {
+      row('Edited joints', `${edited}`)
+      const rb_h = 24 * scale
+      if (widgets.button('ag_reset_bones', sx + pad, cy, inner_w, rb_h, 'Reset bone edits')) {
+        state.joint_offsets = {}
+        state.params_dirty = true
+      }
+      cy += rb_h + 5 * scale
+    }
     cy += 6 * scale
   }
 
