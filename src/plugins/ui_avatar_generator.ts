@@ -560,7 +560,7 @@ function draw_sidebar(
 
   section('SURFACE')
   param_slider('blend', 'Blend softness', 0, 1, pct)
-  param_slider('resolution', 'Grid resolution', 24, 128, (v) => `${Math.round(v)}`)
+  param_slider('resolution', 'Grid resolution', 24, 160, (v) => `${Math.round(v)}`)
   cy += 6 * scale
 
   const result = state.result
@@ -595,7 +595,7 @@ function draw_sidebar(
     sx + pad,
     cy,
     inner_w,
-    'skeleton → SDF volumes per bone → smooth union → surface nets → mesh. No template geometry: every vertex derives from the parameters above.',
+    'skeleton (finger/toe chains, breast anchors) → bone frame volumes → muscle layer → fat layer → smooth union → surface nets → mesh. No template geometry: every vertex derives from the parameters above.',
     9.5 * scale,
     slot('text_dim'),
   ) + 8 * scale
