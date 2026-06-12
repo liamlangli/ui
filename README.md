@@ -11,7 +11,7 @@ It bundles the pieces needed to build a browser-native editor UI on top of WebGP
 - **`dock_system` / `window_system`** — ready-to-use workspace systems built on `dock`/`window`: a docked split workspace and a floating desktop-style window manager, both part of core so third-party projects can build directly on them. See [Workspace systems](#workspace-systems).
 - **`theme`** — palette/CSS-variable theming with `load_theme`, `apply_theme`, `theme_color`, `theme_rgba`, `pack_color`, and `hex_to_normalized_rgba`.
 - **`app_registry`** — installable apps described by a JSON manifest: install/uninstall, persistence, and update checks against each app's `shipping_path`. See [`dashboard`](#dashboard--full-screen-app-launcher).
-- **`plugins`** — opt-in, higher-level drop-in components (`file_browser`, `graph`, `node_graph`, `im_dialog`, `code_editor`, `dashboard`, `avatar_generator`) packaged so other projects can reuse them piecemeal. See [Plugins](#plugins).
+- **`plugins`** — opt-in, higher-level drop-in components (`file_browser`, `graph`, `node_graph`, `im_dialog`, `code_editor`, `dashboard`, `avatar_generator`, `material_audit`) packaged so other projects can reuse them piecemeal. See [Plugins](#plugins).
 
 ## Live preview
 
@@ -419,6 +419,46 @@ if (ev.exported_bytes) console.log(`wrote avatar.glb (${ev.exported_bytes} bytes
 // or run the pipeline headless — skeleton → frame → muscle → fat → mesh:
 const { mesh, skeleton } = generate_avatar({ ...create_avatar_params(), muscle: 0.8 })
 ```
+
+### `material_audit` — material / tiling inspector
+
+Drop or upload a material's maps — a base color map and/or a tangent-space
+normal map (dropped filenames route automatically: `*_normal*`, `*_nrm*`,
+`*_n.*`, … land in the normal slot) — then validate them on three preview
+shapes:
+
+- **grid** — the maps tiled endlessly on a flat plane (repeat-addressed
+  sampler), so seams, borders and periodic patterns stand out immediately; a
+  loaded normal map lights the plane so bump seams show too. A *tile guides*
+  toggle draws 1px lines on the tile boundaries.
+- **sphere** — a UV sphere: pole pinching, UV stretch and normal-map shading.
+- **cube** — a rounded cube: flat faces with beveled edges, the classic
+  trim/material check. A *repeat* control tiles the UVs ×1/×2/×4/×8 on the 3D
+  shapes.
+
+The grid pans and zooms through the shared core `pan_zoom` module (drag with
+the mouse or one finger, wheel or two-finger pinch); the 3D shapes orbit on
+drag and dolly on wheel / pinch. A full mip chain is generated for every
+upload, and in the default `auto` mode mip sampling is enabled while the
+texture is minified (grid zoom < 100%, and always on the 3D shapes, which
+perspective-minify) — force it `on` / `off` from the toolbar to compare the
+shimmer. The status line reports both map slots, POT-ness, the current view
+and the live mip decision.
+
+```ts
+import { material_audit, material_audit_dom_target, create_material_audit_state } from '@liamlangli/ui/plugins'
+
+const ma = create_material_audit_state()
+material_audit_dom_target(canvas, ma, { on_change: () => renderer.request_render() })
+
+// each frame, between renderer.begin_frame() and renderer.flush():
+const ev = material_audit(renderer, widgets, theme, input, x, y, w, h, ma)
+if (ev.loaded) console.log(`${ev.loaded.slot} map: ${ev.loaded.name} (${ev.loaded.width}×${ev.loaded.height})`)
+```
+
+The wheel-zoom / two-finger pan + pinch handling lives in core as
+`pan_zoom_apply` / `pan_zoom_drag` (`@liamlangli/ui` → `ui_pan_zoom`); the
+`graph` and `node_graph` canvases run on the same module.
 
 ## Usage
 

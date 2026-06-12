@@ -157,6 +157,9 @@ const about_lines: ui_text_view_line[] = [
   { text: '  • avatar        — View ▸ Apps ▸ Avatar Generator: a procedural human', color: '#9aa3b0' },
   { text: '                    mesh built from a parametric skeleton (SDF volumes →', color: '#9aa3b0' },
   { text: '                    surface nets), tuned live and exportable as GLB.', color: '#9aa3b0' },
+  { text: '  • material_audit — View ▸ Apps ▸ Material Audit: drop base color /', color: '#9aa3b0' },
+  { text: '                    normal maps and validate them on a repeat grid, a UV', color: '#9aa3b0' },
+  { text: '                    sphere or a rounded cube — auto mipmaps, pan & pinch.', color: '#9aa3b0' },
   { text: '  • dashboard     — View ▸ Apps ▸ Dashboard: a full-screen launcher over', color: '#9aa3b0' },
   { text: '                    the app_registry. Drop an app description .json to', color: '#9aa3b0' },
   { text: '                    install (try apps/notes_v1.json — its shipping path', color: '#9aa3b0' },
@@ -318,6 +321,7 @@ const BUILTIN_APPS: { id: string; name: string; icon: string; accent?: string; d
   { id: 'gamepad', name: 'Controller Test', icon: 'circle', description: 'Game controller visualiser.' },
   { id: 'asset_audit', name: 'Asset Audit', icon: 'file', accent: '#6b3d5a', description: 'Drop or upload .glb/.fbx assets: 3D preview, stats, optimize, re-export.' },
   { id: 'avatar', name: 'Avatar Generator', icon: 'circle', accent: '#3d5a6b', description: 'Procedural human mesh from a parametric skeleton: SDF volumes → surface nets → GLB.' },
+  { id: 'material_audit', name: 'Material Audit', icon: 'image', accent: '#5a6b3d', description: 'Upload base color / normal maps and validate them on a repeat grid, UV sphere or rounded cube.' },
   { id: 'about', name: 'About', icon: 'home', description: 'About this demo.' },
 ]
 for (const def of BUILTIN_APPS) {
@@ -351,6 +355,7 @@ interface demo_plugins {
   file_state: ReturnType<plugin_module['create_file_browser_state']>
   audit_state: ReturnType<plugin_module['create_asset_audit_state']>
   avatar_state: ReturnType<plugin_module['create_avatar_generator_state']>
+  material_audit_state: ReturnType<plugin_module['create_material_audit_state']>
   chat_state: ReturnType<plugin_module['create_im_dialog_state']>
   profiler_state: ReturnType<plugin_module['create_profiler_panel_state']>
   gamepad_test_state: ReturnType<plugin_module['create_gamepad_test_state']>
@@ -423,6 +428,7 @@ const VIEW_TABS: { id: string; title: string; win?: window_new_options }[] = [
   { id: 'gamepad', title: 'Controller Test', win: { w: 620, h: 540 } },
   { id: 'asset_audit', title: 'Asset Audit', win: { w: 900, h: 560 } },
   { id: 'avatar', title: 'Avatar Generator', win: { w: 920, h: 600 } },
+  { id: 'material_audit', title: 'Material Audit', win: { w: 760, h: 560 } },
 ]
 
 // Spawn or focus the Demo Editor app window.
@@ -552,6 +558,7 @@ function build_main_menu(mod: plugin_module): ui_main_menu {
           { id: 'gamepad', label: 'Controller Test' },
           { id: 'asset_audit', label: 'Asset Audit' },
           { id: 'avatar', label: 'Avatar Generator' },
+          { id: 'material_audit', label: 'Material Audit' },
           { id: 'about', label: 'About' },
         ],
       },
@@ -677,6 +684,7 @@ function init_plugins(mod: plugin_module): void {
     file_state: mod.create_file_browser_state(),
     audit_state: mod.create_asset_audit_state(),
     avatar_state: mod.create_avatar_generator_state(),
+    material_audit_state: mod.create_material_audit_state(),
     chat_state: mod.create_im_dialog_state(),
     profiler_state: mod.create_profiler_panel_state(),
     gamepad_test_state: mod.create_gamepad_test_state(),
@@ -715,6 +723,29 @@ function init_plugins(mod: plugin_module): void {
         }, 0)
       }
     },
+  })
+
+  // Drag-to-audit: dropping an image on the canvas loads it into the Material
+  // Audit window (filenames that look like a normal map land in the normal
+  // slot); the bridge also installs the hidden picker behind its Upload buttons.
+  const material_audit_state = plugins.material_audit_state
+  let material_audit_version = 0
+  mod.material_audit_dom_target(canvas, material_audit_state, {
+    on_change: () => {
+      windows.invalidate('material_audit')
+      active_renderer?.request_render()
+      // Surface the window when an image arrives, deferred for the same
+      // mid-frame reason as asset_audit above.
+      const should_open = material_audit_state.drop_hover || material_audit_state.loading > 0 || material_audit_state.source_version !== material_audit_version
+      material_audit_version = material_audit_state.source_version
+      if (should_open) {
+        window.setTimeout(() => {
+          open_view_tab('material_audit', 'Material Audit')
+          active_renderer?.request_render()
+        }, 0)
+      }
+    },
+    on_error: (message) => append_console(message, '#d9534f'),
   })
 
   // Drag-to-install: dropping an app description .json (or a manifest URL)
@@ -1030,6 +1061,11 @@ async function main(): Promise<void> {
         case 'avatar': {
           const ev = live.mod.avatar_generator(renderer, widgets, theme, snapshot, px, py, pw, ph, live.avatar_state, { scale })
           if (ev.exported_bytes) append_console(`avatar.glb exported (${live.mod.format_asset_bytes(ev.exported_bytes)})`, '#5fb878')
+          break
+        }
+        case 'material_audit': {
+          const ev = live.mod.material_audit(renderer, widgets, theme, snapshot, px, py, pw, ph, live.material_audit_state, { scale })
+          if (ev.loaded) append_console(`material audit: ${ev.loaded.slot} map ${ev.loaded.name} (${ev.loaded.width}×${ev.loaded.height})`, '#5fb878')
           break
         }
       }
