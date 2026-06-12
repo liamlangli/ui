@@ -11,7 +11,7 @@ It bundles the pieces needed to build a browser-native editor UI on top of WebGP
 - **`dock_system` / `window_system`** — ready-to-use workspace systems built on `dock`/`window`: a docked split workspace and a floating desktop-style window manager, both part of core so third-party projects can build directly on them. See [Workspace systems](#workspace-systems).
 - **`theme`** — palette/CSS-variable theming with `load_theme`, `apply_theme`, `theme_color`, `theme_rgba`, `pack_color`, and `hex_to_normalized_rgba`.
 - **`app_registry`** — installable apps described by a JSON manifest: install/uninstall, persistence, and update checks against each app's `shipping_path`. See [`dashboard`](#dashboard--full-screen-app-launcher).
-- **`plugins`** — opt-in, higher-level drop-in components (`file_browser`, `graph`, `node_graph`, `im_dialog`, `code_editor`, `dashboard`) packaged so other projects can reuse them piecemeal. See [Plugins](#plugins).
+- **`plugins`** — opt-in, higher-level drop-in components (`file_browser`, `graph`, `node_graph`, `im_dialog`, `code_editor`, `dashboard`, `avatar_generator`) packaged so other projects can reuse them piecemeal. See [Plugins](#plugins).
 
 ## Live preview
 
@@ -376,6 +376,37 @@ characters arrive on `typed_text` and editing/navigation keys on the
 for the full list). Token `kind`s are `keyword`, `type`, `number`, `string`,
 `comment`, `operator`, `identifier`, `punctuation`, `function`, `whitespace`,
 `plain`.
+
+### `avatar_generator` — procedural human mesh from a skeleton
+
+A bones-first body generator with **no template mesh anywhere**: body
+parameters place a parametric humanoid skeleton (joint positions + hierarchy),
+anatomical SDF volumes attach to the bones (rounded cones sweep the limbs,
+ellipsoids model the head/torso/muscle masses), the volumes fuse through a
+smooth union, and surface nets polygonize the combined field into a triangle
+mesh with SDF-gradient normals. Because a skeleton alone doesn't determine a
+body, extra parameters — muscle, fat, build (feminine ↔ masculine),
+shoulder/hip span, limb girth — drive the volume layer independently of the
+bone lengths.
+
+The panel shows the result in a WebGPU orbit viewport (it reuses the asset-audit
+viewer): sliders regenerate the mesh live (drafted at a coarse grid while
+dragging, refined on release), presets cover common body types, an armature
+overlay draws the generating skeleton, and Export writes a self-contained GLB
+via the asset-audit encoder.
+
+```ts
+import { avatar_generator, create_avatar_generator_state, generate_avatar } from '@liamlangli/ui/plugins'
+
+const av = create_avatar_generator_state()
+
+// each frame, between renderer.begin_frame() and renderer.flush():
+const ev = avatar_generator(renderer, widgets, theme, input, x, y, w, h, av)
+if (ev.exported_bytes) console.log(`wrote avatar.glb (${ev.exported_bytes} bytes)`)
+
+// or run the pipeline headless — skeleton → volumes → field → mesh:
+const { mesh, skeleton } = generate_avatar({ ...create_avatar_params(), muscle: 0.8 })
+```
 
 ## Usage
 

@@ -153,6 +153,9 @@ const about_lines: ui_text_view_line[] = [
   { text: '  • asset_audit   — View ▸ Apps ▸ Asset Audit: drop a .glb/.gltf/.fbx', color: '#9aa3b0' },
   { text: '                    (or a folder) to preview it in a WebGPU viewport,', color: '#9aa3b0' },
   { text: '                    audit its stats, optimize and download a fixed GLB.', color: '#9aa3b0' },
+  { text: '  • avatar        — View ▸ Apps ▸ Avatar Generator: a procedural human', color: '#9aa3b0' },
+  { text: '                    mesh built from a parametric skeleton (SDF volumes →', color: '#9aa3b0' },
+  { text: '                    surface nets), tuned live and exportable as GLB.', color: '#9aa3b0' },
   { text: '  • dashboard     — View ▸ Apps ▸ Dashboard: a full-screen launcher over', color: '#9aa3b0' },
   { text: '                    the app_registry. Drop an app description .json to', color: '#9aa3b0' },
   { text: '                    install (try apps/notes_v1.json — its shipping path', color: '#9aa3b0' },
@@ -312,6 +315,7 @@ const BUILTIN_APPS: { id: string; name: string; icon: string; accent?: string; d
   { id: 'profiler', name: 'Profiler', icon: 'search', description: 'Frame profiler and memory registry.' },
   { id: 'gamepad', name: 'Controller Test', icon: 'circle', description: 'Game controller visualiser.' },
   { id: 'asset_audit', name: 'Asset Audit', icon: 'file', accent: '#6b3d5a', description: 'Drop or upload .glb/.fbx assets: 3D preview, stats, optimize, re-export.' },
+  { id: 'avatar', name: 'Avatar Generator', icon: 'circle', accent: '#3d5a6b', description: 'Procedural human mesh from a parametric skeleton: SDF volumes → surface nets → GLB.' },
   { id: 'about', name: 'About', icon: 'home', description: 'About this demo.' },
 ]
 for (const def of BUILTIN_APPS) {
@@ -344,6 +348,7 @@ interface demo_plugins {
   dashboard_state: ReturnType<plugin_module['create_dashboard_state']>
   file_state: ReturnType<plugin_module['create_file_browser_state']>
   audit_state: ReturnType<plugin_module['create_asset_audit_state']>
+  avatar_state: ReturnType<plugin_module['create_avatar_generator_state']>
   chat_state: ReturnType<plugin_module['create_im_dialog_state']>
   profiler_state: ReturnType<plugin_module['create_profiler_panel_state']>
   gamepad_test_state: ReturnType<plugin_module['create_gamepad_test_state']>
@@ -412,6 +417,7 @@ const VIEW_TABS: { id: string; title: string; win?: window_new_options }[] = [
   { id: 'profiler', title: 'Profiler', win: { w: 760, h: 460 } },
   { id: 'gamepad', title: 'Controller Test', win: { w: 620, h: 540 } },
   { id: 'asset_audit', title: 'Asset Audit', win: { w: 900, h: 560 } },
+  { id: 'avatar', title: 'Avatar Generator', win: { w: 920, h: 600 } },
 ]
 
 // Spawn or focus the Demo Editor app window.
@@ -539,6 +545,7 @@ function build_main_menu(mod: plugin_module): ui_main_menu {
           { id: 'profiler', label: 'Profiler' },
           { id: 'gamepad', label: 'Controller Test' },
           { id: 'asset_audit', label: 'Asset Audit' },
+          { id: 'avatar', label: 'Avatar Generator' },
           { id: 'about', label: 'About' },
         ],
       },
@@ -663,6 +670,7 @@ function init_plugins(mod: plugin_module): void {
     dashboard_state: mod.create_dashboard_state(),
     file_state: mod.create_file_browser_state(),
     audit_state: mod.create_asset_audit_state(),
+    avatar_state: mod.create_avatar_generator_state(),
     chat_state: mod.create_im_dialog_state(),
     profiler_state: mod.create_profiler_panel_state(),
     gamepad_test_state: mod.create_gamepad_test_state(),
@@ -1006,6 +1014,11 @@ async function main(): Promise<void> {
         case 'asset_audit':
           live.mod.asset_audit(renderer, widgets, theme, snapshot, px, py, pw, ph, live.audit_state, { scale })
           break
+        case 'avatar': {
+          const ev = live.mod.avatar_generator(renderer, widgets, theme, snapshot, px, py, pw, ph, live.avatar_state, { scale })
+          if (ev.exported_bytes) append_console(`avatar.glb exported (${live.mod.format_asset_bytes(ev.exported_bytes)})`, '#5fb878')
+          break
+        }
       }
       profiler.end()
     }
