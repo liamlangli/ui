@@ -5,19 +5,27 @@
 //
 //   body parameters
 //        ↓
-//   parametric skeleton (joint positions + hierarchy from height/proportions)
+//   parametric skeleton (joint positions + hierarchy from height/proportions,
+//   down to per-finger and per-toe chains and breast anchor bones)
 //        ↓
-//   anatomical SDF volumes attached to the bones (rounded cones for limbs,
-//   ellipsoids for head/torso/muscle masses, smooth-union blended)
+//   bone frame volumes (lean anatomical SDF volumes swept along every bone:
+//   rounded cones for limbs and digits, ellipsoids for head/torso)
+//        ↓
+//   muscle layer (deltoids, traps, pecs, biceps, quads, glutes, calves…
+//   grown over the frame by the muscle parameter)
+//        ↓
+//   fat layer (belly, love handles, glute pads, bust, chin + a subcutaneous
+//   swell of every soft part by the fat parameter)
 //        ↓
 //   surface-nets polygonization of the combined field
 //        ↓
 //   triangle mesh with SDF-gradient normals
 //
 // A skeleton alone does not uniquely define a body (a sprinter and a
-// powerlifter can share bone lengths), so the volume layer is driven by extra
-// parameters — muscle, fat, build (feminine ↔ masculine), shoulder/hip span,
-// limb girth — that scale each part's radii independently of the bones.
+// powerlifter can share bone lengths), so muscle and fat are explicit passes
+// over the volume list: the frame annotates how strongly each part responds
+// (`muscle_gain` / `fat_gain`) and the two layers grow the radii and add the
+// soft masses the skeleton can't describe.
 //
 // The output is an `audit_mesh`, so the asset-audit 3D viewer renders it and
 // `encode_asset_glb` exports it without any conversion.
@@ -69,8 +77,9 @@ export function create_avatar_params(): avatar_params {
     leg_length: 0.5,
     limb_thickness: 0.5,
     head_size: 0.5,
+    // High enough that finger/toe cross-sections stay above one grid cell.
     blend: 0.45,
-    resolution: 72,
+    resolution: 112,
   }
 }
 
@@ -112,6 +121,25 @@ export interface avatar_skeleton {
 function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t
 }
+
+/** Finger chains hung off each palm: knuckle forward-offset and total length
+ * as fractions of body height. The thumb roots separately near the wrist. */
+const FINGERS = [
+  { name: 'index', z: 0.031, length: 0.044 },
+  { name: 'middle', z: 0.018, length: 0.048 },
+  { name: 'ring', z: 0.005, length: 0.044 },
+  { name: 'pinky', z: -0.008, length: 0.034 },
+] as const
+
+/** Toe chains hung off each foot ball, big toe (toe1, innermost) → pinky toe
+ * (toe5): sideways offset from the foot center and length, fractions of height. */
+const TOES = [
+  { name: 'toe1', dx: -0.014, length: 0.03 },
+  { name: 'toe2', dx: -0.005, length: 0.024 },
+  { name: 'toe3', dx: 0.003, length: 0.02 },
+  { name: 'toe4', dx: 0.01, length: 0.017 },
+  { name: 'toe5', dx: 0.016, length: 0.014 },
+] as const
 
 /**
  * Place the humanoid joints from the proportion parameters. Classic ~7.5-head
@@ -156,16 +184,40 @@ export function build_avatar_skeleton(p: avatar_params): avatar_skeleton {
 
   for (const side of [-1, 1] as const) {
     const tag = side < 0 ? 'l' : 'r'
+    // Breast anchor on the chest front: bone editing can place the bust and the
+    // fat layer grows the volume attached to it.
+    j(`breast_${tag}`, chest, side * shoulder_x * 0.42, chest_y + 0.004 * H, 0.052 * H)
+
     const clavicle = j(`clavicle_${tag}`, chest, side * shoulder_x * 0.35, shoulder_y, 0)
     const shoulder = j(`shoulder_${tag}`, clavicle, side * shoulder_x, shoulder_y, 0)
     const elbow = j(`elbow_${tag}`, shoulder, side * (shoulder_x + arm_out), elbow_y, 0)
     const wrist = j(`wrist_${tag}`, elbow, side * (shoulder_x + arm_out * 1.6), wrist_y, 0.01 * H)
-    j(`hand_${tag}`, wrist, side * (shoulder_x + arm_out * 1.8), wrist_y - 0.075 * H, 0.015 * H)
+
+    // Palm center, then a knuckle → mid → tip chain per finger. The arms hang,
+    // so fingers continue downward with a slight forward drift.
+    const hand_x = shoulder_x + arm_out * 1.8
+    const hand = j(`hand_${tag}`, wrist, side * hand_x, wrist_y - 0.03 * H, 0.012 * H)
+    const knuckle_y = wrist_y - 0.055 * H
+    for (const f of FINGERS) {
+      const base = j(`${f.name}_1_${tag}`, hand, side * hand_x, knuckle_y, f.z * H)
+      const mid = j(`${f.name}_2_${tag}`, base, side * hand_x, knuckle_y - f.length * 0.55 * H, (f.z + 0.004) * H)
+      j(`${f.name}_3_${tag}`, mid, side * hand_x, knuckle_y - f.length * H, (f.z + 0.007) * H)
+    }
+    // Thumb: rooted on the palmar side near the wrist, angled down-forward.
+    const thumb_base = j(`thumb_1_${tag}`, hand, side * (hand_x - 0.008 * H), wrist_y - 0.02 * H, 0.03 * H)
+    const thumb_mid = j(`thumb_2_${tag}`, thumb_base, side * (hand_x - 0.004 * H), wrist_y - 0.038 * H, 0.046 * H)
+    j(`thumb_3_${tag}`, thumb_mid, side * hand_x, wrist_y - 0.05 * H, 0.058 * H)
 
     const thigh = j(`thigh_${tag}`, hips, side * hip_x, hips_y - 0.02 * H, 0)
     const knee = j(`knee_${tag}`, thigh, side * hip_x * 0.92, knee_y, 0.004 * H)
     const ankle = j(`ankle_${tag}`, knee, side * hip_x * 0.88, ankle_y, -0.01 * H)
-    j(`foot_${tag}`, ankle, side * hip_x * 0.9, 0.02 * H, 0.085 * H)
+    // Ball of the foot, then a base → tip chain per toe fanning inner → outer.
+    const foot = j(`foot_${tag}`, ankle, side * hip_x * 0.9, 0.02 * H, 0.085 * H)
+    for (const t of TOES) {
+      const tx = side * (hip_x * 0.9 + t.dx * H)
+      const base = j(`${t.name}_1_${tag}`, foot, tx, 0.016 * H, 0.095 * H)
+      j(`${t.name}_2_${tag}`, base, tx, 0.011 * H, (0.095 + t.length) * H)
+    }
   }
 
   const bones: [number, number][] = []
@@ -196,6 +248,59 @@ interface body_part {
   rb: number
   /** Per-part smooth-union radius — joints fuse softly, the skull stays crisp. */
   blend: number
+  /** Fractional radius growth at 100% muscle, consumed by the muscle pass. */
+  muscle_gain: number
+  /** Fractional radius growth at 100% fat, consumed by the fat pass. */
+  fat_gain: number
+  /** Conservative bounding sphere (refreshed once the layers settle) — lets the
+   * field eval skip parts that cannot influence a sample point. */
+  cx: number
+  cy: number
+  cz: number
+  bound: number
+}
+
+interface vec3_like {
+  x: number
+  y: number
+  z: number
+}
+
+function add_cone(parts: body_part[], a: vec3_like, b: vec3_like, ra: number, rb: number, blend: number, muscle_gain = 0, fat_gain = 0): void {
+  parts.push({ kind: KIND_CONE, ax: a.x, ay: a.y, az: a.z, bx: b.x, by: b.y, bz: b.z, ra, rb, blend, muscle_gain, fat_gain, cx: 0, cy: 0, cz: 0, bound: 0 })
+}
+
+function add_ellipsoid(parts: body_part[], cx: number, cy: number, cz: number, rx: number, ry: number, rz: number, blend: number, muscle_gain = 0, fat_gain = 0): void {
+  parts.push({ kind: KIND_ELLIPSOID, ax: cx, ay: cy, az: cz, bx: ry, by: rz, bz: 0, ra: rx, rb: 0, blend, muscle_gain, fat_gain, cx: 0, cy: 0, cz: 0, bound: 0 })
+}
+
+/** Swell a part's radii by fraction `f` — endpoints/centers stay on the bones. */
+function grow_part(part: body_part, f: number): void {
+  if (f <= 0) return
+  const s = 1 + f
+  part.ra *= s
+  if (part.kind === KIND_CONE) part.rb *= s
+  else {
+    part.bx *= s
+    part.by *= s
+  }
+}
+
+/** Refresh every part's conservative bounding sphere for field-eval culling. */
+function update_part_bounds(parts: body_part[]): void {
+  for (const part of parts) {
+    if (part.kind === KIND_CONE) {
+      part.cx = (part.ax + part.bx) * 0.5
+      part.cy = (part.ay + part.by) * 0.5
+      part.cz = (part.az + part.bz) * 0.5
+      part.bound = Math.hypot(part.bx - part.ax, part.by - part.ay, part.bz - part.az) * 0.5 + Math.max(part.ra, part.rb)
+    } else {
+      part.cx = part.ax
+      part.cy = part.ay
+      part.cz = part.az
+      part.bound = Math.max(part.ra, part.bx, part.by)
+    }
+  }
 }
 
 /** IQ's exact rounded cone: a capsule whose radius tapers from ra at a to rb at b. */
@@ -245,9 +350,11 @@ function smin(a: number, b: number, k: number): number {
 }
 
 /**
- * Attach the anatomical volumes to the skeleton. Radii are fractions of body
- * height scaled by girth/muscle/fat/build, so the same skeleton can carry a
- * sprinter or a powerlifter.
+ * Layer 1 — the bone frame: lean anatomical volumes attached to the skeleton,
+ * one sweep per bone down to fingers and toes. Radii are fractions of body
+ * height at zero muscle/fat; every part annotates how strongly the muscle and
+ * fat passes may grow it, so the same frame can carry a sprinter or a
+ * powerlifter once the layers run.
  */
 export function build_avatar_volumes(p: avatar_params, skeleton: avatar_skeleton): body_part[] {
   const H = p.height
@@ -256,62 +363,50 @@ export function build_avatar_volumes(p: avatar_params, skeleton: avatar_skeleton
   const at = (name: string): avatar_joint => joint.get(name)!
 
   const girth = lerp(0.78, 1.28, p.limb_thickness)
-  const bulk = 1 + p.muscle * 0.22 + p.fat * 0.3
-  const soft = 1 + p.fat * 0.45
   const base_blend = lerp(0.012, 0.045, p.blend) * H
 
   const parts: body_part[] = []
-  const cone = (a: { x: number; y: number; z: number }, b: { x: number; y: number; z: number }, ra: number, rb: number, blend = base_blend): void => {
-    parts.push({ kind: KIND_CONE, ax: a.x, ay: a.y, az: a.z, bx: b.x, by: b.y, bz: b.z, ra, rb, blend })
-  }
-  const ellipsoid = (cx: number, cy: number, cz: number, rx: number, ry: number, rz: number, blend = base_blend): void => {
-    parts.push({ kind: KIND_ELLIPSOID, ax: cx, ay: cy, az: cz, bx: ry, by: rz, bz: 0, ra: rx, rb: 0, blend })
-  }
+  const cone = (a: vec3_like, b: vec3_like, ra: number, rb: number, blend = base_blend, muscle = 0, fat = 0): void =>
+    add_cone(parts, a, b, ra, rb, blend, muscle, fat)
+  const ellipsoid = (cx: number, cy: number, cz: number, rx: number, ry: number, rz: number, blend = base_blend, muscle = 0, fat = 0): void =>
+    add_ellipsoid(parts, cx, cy, cz, rx, ry, rz, blend, muscle, fat)
 
   const hips = at('hips')
   const chest = at('chest')
   const neck = at('neck')
   const head = at('head')
 
-  // -- axial body ------------------------------------------------------------
+  // -- axial body: lean trunk — waist pinches on the feminine side; the belly,
+  // handles and softness arrive with the fat pass.
   const hip_half = Math.abs(at('thigh_r').x)
   const shoulder_half = Math.abs(at('shoulder_r').x)
-  const waist_y = lerp(hips.y, chest.y, 0.45)
-  // Waist pinches on the feminine side and balloons with fat.
-  const waist_r = (0.062 + p.fat * 0.05 - (1 - p.build) * 0.014 + p.muscle * 0.008) * H
-  const chest_w = shoulder_half * 0.86 + p.fat * 0.012 * H
-  const chest_d = (0.052 + p.muscle * 0.016 + p.fat * 0.02) * H
+  const waist_r = (0.058 - (1 - p.build) * 0.013) * H
+  const chest_w = shoulder_half * 0.85
+  const chest_d = 0.05 * H
 
   // Pelvis block + spine column + ribcage, fused into one trunk.
-  ellipsoid(hips.x, hips.y - 0.01 * H, hips.z, hip_half + 0.045 * H * soft, 0.062 * H, (0.05 + p.fat * 0.02) * H)
-  cone({ x: 0, y: hips.y, z: 0 }, { x: 0, y: chest.y, z: 0 }, waist_r, waist_r * 0.96)
-  ellipsoid(0, chest.y + 0.01 * H, -0.004 * H, chest_w, 0.085 * H, chest_d)
-  // Belly: sits low and forward, almost entirely fat-driven.
-  ellipsoid(0, waist_y - 0.012 * H, (0.012 + p.fat * 0.035) * H, waist_r * 0.9, 0.06 * H * soft, (0.03 + p.fat * 0.045) * H)
-  // Glutes.
-  for (const side of [-1, 1]) {
-    ellipsoid(side * hip_half * 0.55, hips.y - 0.025 * H, -(0.035 + p.fat * 0.02 + (1 - p.build) * 0.012) * H, hip_half * 0.62, 0.055 * H * soft, 0.045 * H * soft)
-  }
-  // Bust on the feminine side of the build axis.
+  ellipsoid(hips.x, hips.y - 0.01 * H, hips.z, hip_half + 0.042 * H, 0.062 * H, 0.048 * H, base_blend, 0.06, 0.3)
+  cone({ x: 0, y: hips.y, z: 0 }, { x: 0, y: chest.y, z: 0 }, waist_r, waist_r * 0.96, base_blend, 0.12, 0.6)
+  ellipsoid(0, chest.y + 0.01 * H, -0.004 * H, chest_w, 0.085 * H, chest_d, base_blend, 0.16, 0.2)
+  // Bust: anchored to the breast bones. Build sets the lean size (vanishing on
+  // the masculine side), the fat pass grows it further.
   const bust = Math.max(0, 0.5 - p.build) * 2
-  if (bust > 0.01) {
-    const bust_r = (0.016 + 0.022 * bust + p.fat * 0.012) * H
-    for (const side of [-1, 1]) {
-      ellipsoid(side * chest_w * 0.42, chest.y + 0.005 * H, chest_d * 0.78, bust_r, bust_r * 0.92, bust_r, base_blend * 1.4)
-    }
+  const bust_r = (0.012 + 0.028 * bust) * H
+  for (const side of ['l', 'r'] as const) {
+    const anchor = at(`breast_${side}`)
+    ellipsoid(anchor.x, anchor.y, anchor.z, bust_r, bust_r * 0.92, bust_r * 0.9, base_blend * 1.4, 0, 0.5)
   }
 
   // -- neck + head -------------------------------------------------------------
-  const neck_r = (0.024 + p.muscle * 0.012 + p.fat * 0.006) * H
-  cone(neck, { x: head.x, y: head.y - 0.045 * H, z: head.z }, neck_r, neck_r * 0.9)
+  const neck_r = 0.023 * H
+  cone(neck, { x: head.x, y: head.y - 0.045 * H, z: head.z }, neck_r, neck_r * 0.9, base_blend, 0.45, 0.25)
   const hs = lerp(0.86, 1.14, p.head_size)
   // Cranium + jaw, blended tighter than the body so the skull keeps its shape.
+  // The skull takes no muscle/fat; a chin pad arrives with the fat pass.
   ellipsoid(head.x, head.y + 0.01 * H, head.z, 0.062 * H * hs, 0.075 * H * hs, 0.068 * H * hs, base_blend * 0.5)
-  ellipsoid(head.x, head.y - 0.035 * H * hs, head.z + 0.012 * H * hs, 0.045 * H * hs, 0.045 * H * hs, 0.05 * H * hs, base_blend * 0.5)
+  ellipsoid(head.x, head.y - 0.035 * H * hs, head.z + 0.012 * H * hs, 0.045 * H * hs, 0.045 * H * hs, 0.05 * H * hs, base_blend * 0.5, 0, 0.08)
 
-  // -- limbs (mirrored) ---------------------------------------------------------
-  const muscle_arm = 1 + p.muscle * 0.45
-  const muscle_leg = 1 + p.muscle * 0.32
+  // -- limbs (mirrored): lean sweeps along every bone, digits included ------------
   for (const side of ['l', 'r'] as const) {
     const shoulder = at(`shoulder_${side}`)
     const elbow = at(`elbow_${side}`)
@@ -322,30 +417,142 @@ export function build_avatar_volumes(p: avatar_params, skeleton: avatar_skeleton
     const ankle = at(`ankle_${side}`)
     const foot = at(`foot_${side}`)
 
-    // Deltoid cap, then tapered sweeps down the arm bones.
-    ellipsoid(shoulder.x, shoulder.y + 0.005 * H, shoulder.z, 0.03 * H * girth * muscle_arm, 0.032 * H * girth * muscle_arm, 0.03 * H * girth * muscle_arm)
-    cone(shoulder, elbow, 0.03 * H * girth * muscle_arm * soft, 0.022 * H * girth)
-    cone(elbow, wrist, 0.024 * H * girth * (1 + p.muscle * 0.3), 0.015 * H * girth)
-    // Hand: a flattened ellipsoid past the wrist.
-    ellipsoid(hand.x, hand.y, hand.z, 0.018 * H, 0.042 * H, 0.012 * H, base_blend * 0.7)
+    cone(shoulder, elbow, 0.028 * H * girth, 0.021 * H * girth, base_blend, 0.42, 0.32)
+    cone(elbow, wrist, 0.021 * H * girth, 0.014 * H * girth, base_blend, 0.32, 0.22)
 
-    // Thigh / calf sweeps with a posterior calf belly.
-    cone(thigh, knee, (0.048 + p.fat * 0.018 + (1 - p.build) * 0.006) * H * girth * muscle_leg, 0.028 * H * girth)
-    cone(knee, ankle, 0.03 * H * girth, 0.017 * H * girth)
-    const calf = lerp(knee.y, ankle.y, 0.3)
-    ellipsoid(knee.x, calf, knee.z - 0.012 * H, 0.026 * H * girth * muscle_leg, 0.05 * H, 0.026 * H * girth * muscle_leg)
-    // Foot: heel-to-toe wedge.
-    cone({ x: ankle.x, y: 0.032 * H, z: ankle.z - 0.02 * H }, { x: foot.x, y: foot.y, z: foot.z }, 0.027 * H, 0.018 * H, base_blend * 0.7)
+    // Palm slab, then a tapered cone pair down every finger chain. Digit radii
+    // stay under half the knuckle spacing and blend tight (capped in absolute
+    // terms, not just relative to the body blend) so fingers read as separate
+    // digits instead of webbing into a mitten.
+    ellipsoid(hand.x, hand.y, hand.z, 0.016 * H, 0.032 * H, 0.011 * H, base_blend * 0.5, 0, 0.12)
+    const digit_blend = Math.min(base_blend * 0.28, 0.0035 * H)
+    for (const f of FINGERS) {
+      const base = at(`${f.name}_1_${side}`)
+      const mid = at(`${f.name}_2_${side}`)
+      const tip = at(`${f.name}_3_${side}`)
+      cone(base, mid, 0.0062 * H, 0.0055 * H, digit_blend, 0, 0.1)
+      cone(mid, tip, 0.0055 * H, 0.0048 * H, digit_blend, 0, 0.1)
+    }
+    // Thumb: thicker, and its root blends softer so it fuses into the palm.
+    cone(at(`thumb_1_${side}`), at(`thumb_2_${side}`), 0.008 * H, 0.0065 * H, base_blend * 0.45, 0, 0.1)
+    cone(at(`thumb_2_${side}`), at(`thumb_3_${side}`), 0.0065 * H, 0.005 * H, digit_blend, 0, 0.1)
+
+    cone(thigh, knee, (0.044 + (1 - p.build) * 0.006) * H * girth, 0.027 * H * girth, base_blend, 0.3, 0.42)
+    cone(knee, ankle, 0.028 * H * girth, 0.016 * H * girth, base_blend, 0.18, 0.2)
+    // Foot: heel-to-ball wedge, then a short cone per toe chain.
+    cone({ x: ankle.x, y: 0.032 * H, z: ankle.z - 0.02 * H }, foot, 0.026 * H, 0.017 * H, base_blend * 0.7, 0, 0.12)
+    for (const t of TOES) {
+      const r = t.name === 'toe1' ? 0.0075 * H : 0.0055 * H
+      cone(at(`${t.name}_1_${side}`), at(`${t.name}_2_${side}`), r, r * 0.8, digit_blend, 0, 0.1)
+    }
   }
 
   return parts
 }
 
-/** Signed distance of the whole body at a point: smooth union over every part. */
+// --- muscle & fat layers ---------------------------------------------------------
+
+/**
+ * Layer 2 — musculature. Runs after the bone frame and before the fat layer:
+ * first every frame part swells by its annotated `muscle_gain`, then the named
+ * muscle bellies are laid over the frame. Belly sizes lerp with the muscle
+ * parameter, so on a lean body they hide inside the frame and emerge with
+ * training. The bellies carry their own `fat_gain` — fat covers muscle.
+ */
+export function apply_avatar_muscle_layer(parts: body_part[], p: avatar_params, skeleton: avatar_skeleton): void {
+  const m = p.muscle
+  for (const part of parts) grow_part(part, m * part.muscle_gain)
+
+  const H = p.height
+  const joint = new Map<string, avatar_joint>()
+  for (const item of skeleton.joints) joint.set(item.name, item)
+  const at = (name: string): avatar_joint => joint.get(name)!
+
+  const girth = lerp(0.78, 1.28, p.limb_thickness)
+  const base_blend = lerp(0.012, 0.045, p.blend) * H
+  const neck = at('neck')
+  const chest = at('chest')
+  const hips = at('hips')
+  const shoulder_half = Math.abs(at('shoulder_r').x)
+  const hip_half = Math.abs(at('thigh_r').x)
+  // Pecs read mostly on the masculine side; the feminine chest keeps the bust.
+  const pec = m * (0.35 + 0.65 * p.build)
+
+  for (const side of ['l', 'r'] as const) {
+    const s = side === 'l' ? -1 : 1
+    const shoulder = at(`shoulder_${side}`)
+    const elbow = at(`elbow_${side}`)
+    const wrist = at(`wrist_${side}`)
+    const thigh = at(`thigh_${side}`)
+    const knee = at(`knee_${side}`)
+    const ankle = at(`ankle_${side}`)
+
+    // Deltoid cap over the shoulder.
+    const delt = (0.021 + 0.016 * m) * H * girth
+    add_ellipsoid(parts, shoulder.x, shoulder.y + 0.005 * H, shoulder.z, delt, delt * 1.06, delt, base_blend, 0, 0.2)
+    // Trapezius slab rising between neck and shoulder.
+    add_ellipsoid(parts, (neck.x + shoulder.x) * 0.5, lerp(shoulder.y, neck.y, 0.6), -0.008 * H, shoulder_half * 0.42, (0.012 + 0.022 * m) * H, (0.016 + 0.012 * m) * H, base_blend, 0, 0.15)
+    // Pectoral plate on the chest front.
+    add_ellipsoid(parts, s * shoulder_half * 0.36, chest.y + 0.008 * H, 0.042 * H, (0.024 + 0.022 * pec) * H, (0.02 + 0.012 * pec) * H, (0.01 + 0.016 * pec) * H, base_blend, 0, 0.2)
+    // Biceps + forearm bellies, slightly anterior.
+    add_ellipsoid(parts, lerp(shoulder.x, elbow.x, 0.45), lerp(shoulder.y, elbow.y, 0.45), lerp(shoulder.z, elbow.z, 0.45) + 0.006 * H, (0.012 + 0.02 * m) * H * girth, Math.abs(shoulder.y - elbow.y) * 0.3, (0.012 + 0.018 * m) * H * girth, base_blend, 0, 0.15)
+    add_ellipsoid(parts, lerp(elbow.x, wrist.x, 0.3), lerp(elbow.y, wrist.y, 0.3), lerp(elbow.z, wrist.z, 0.3), (0.011 + 0.014 * m) * H * girth, Math.abs(elbow.y - wrist.y) * 0.28, (0.011 + 0.012 * m) * H * girth, base_blend, 0, 0.12)
+    // Quads on the front of the thigh, glutes behind the pelvis.
+    add_ellipsoid(parts, lerp(thigh.x, knee.x, 0.42), lerp(thigh.y, knee.y, 0.42), lerp(thigh.z, knee.z, 0.42) + 0.014 * H, (0.02 + 0.015 * m) * H * girth, Math.abs(thigh.y - knee.y) * 0.34, (0.014 + 0.016 * m) * H, base_blend, 0, 0.2)
+    add_ellipsoid(parts, s * hip_half * 0.55, hips.y - 0.025 * H, -(0.032 + 0.014 * m + (1 - p.build) * 0.012) * H, hip_half * 0.6, (0.045 + 0.012 * m) * H, (0.034 + 0.014 * m) * H, base_blend, 0, 0.35)
+    // Calf belly, posterior.
+    const calf_y = lerp(knee.y, ankle.y, 0.3)
+    add_ellipsoid(parts, knee.x, calf_y, knee.z - 0.012 * H, (0.02 + 0.015 * m) * H * girth, 0.05 * H, (0.02 + 0.015 * m) * H * girth, base_blend, 0, 0.15)
+  }
+}
+
+/**
+ * Layer 3 — adipose. The last shaping pass before polygonization: every part
+ * laid down so far swells by its `fat_gain` (subcutaneous fat over frame and
+ * muscle alike), then the dedicated fat depots are added on top.
+ */
+export function apply_avatar_fat_layer(parts: body_part[], p: avatar_params, skeleton: avatar_skeleton): void {
+  const f = p.fat
+  for (const part of parts) grow_part(part, f * part.fat_gain)
+
+  const H = p.height
+  const joint = new Map<string, avatar_joint>()
+  for (const item of skeleton.joints) joint.set(item.name, item)
+  const at = (name: string): avatar_joint => joint.get(name)!
+
+  const base_blend = lerp(0.012, 0.045, p.blend) * H
+  const hips = at('hips')
+  const chest = at('chest')
+  const head = at('head')
+  const hip_half = Math.abs(at('thigh_r').x)
+  const waist_y = lerp(hips.y, chest.y, 0.45)
+
+  // Belly: sits low and forward, almost entirely fat-driven.
+  add_ellipsoid(parts, 0, waist_y - 0.012 * H, (0.008 + 0.04 * f) * H, (0.046 + 0.042 * f) * H, (0.05 + 0.028 * f) * H, (0.022 + 0.05 * f) * H, base_blend * 1.2)
+  for (const s of [-1, 1]) {
+    // Love handles at the waist sides.
+    add_ellipsoid(parts, s * (0.05 + 0.028 * f) * H, waist_y + 0.005 * H, -0.006 * H, (0.012 + 0.03 * f) * H, (0.035 + 0.012 * f) * H, (0.018 + 0.028 * f) * H, base_blend * 1.3)
+    // Glute pad: lower and wider than the muscle glute.
+    add_ellipsoid(parts, s * hip_half * 0.5, hips.y - 0.035 * H, -(0.028 + 0.03 * f) * H, hip_half * 0.58, (0.04 + 0.022 * f) * H, (0.026 + 0.034 * f) * H, base_blend * 1.2)
+  }
+  // Chin pad under the jaw.
+  add_ellipsoid(parts, head.x, head.y - 0.062 * H, head.z + 0.02 * H, (0.01 + 0.02 * f) * H, (0.008 + 0.014 * f) * H, (0.012 + 0.022 * f) * H, base_blend * 0.8)
+}
+
+/** Signed distance of the whole body at a point: smooth union over every part.
+ * A part whose bounding sphere stays farther than `d + blend` cannot change
+ * the running minimum (the smooth-min is exactly `d` there), so it is skipped
+ * with one squared-distance test — with the finger/toe/muscle/fat parts the
+ * list is ~90 long and mostly tiny, which makes this cull matter. */
 export function eval_avatar_field(parts: body_part[], x: number, y: number, z: number): number {
   let d = 1e9
   for (let i = 0; i < parts.length; i += 1) {
     const part = parts[i]!
+    const dx = x - part.cx
+    const dy = y - part.cy
+    const dz = z - part.cz
+    const reach = d + part.blend + part.bound
+    if (reach < 0 || dx * dx + dy * dy + dz * dz > reach * reach) continue
     const pd = part.kind === KIND_CONE ? sd_round_cone(x, y, z, part) : sd_ellipsoid(x, y, z, part)
     d = smin(d, pd, part.blend)
   }
@@ -383,6 +590,8 @@ export interface avatar_mesh_result {
  */
 export function polygonize_avatar(parts: body_part[], p: avatar_params, resolution_override?: number): avatar_mesh_result {
   const started = performance.now()
+  // The muscle/fat layers may have grown radii since the parts were created.
+  update_part_bounds(parts)
 
   // Field bounds: union of part AABBs padded by the blend radius + one cell.
   let min_x = 1e9, min_y = 1e9, min_z = 1e9
@@ -584,9 +793,15 @@ export function build_avatar_skeleton_mesh(skeleton: avatar_skeleton, height: nu
     }
   }
 
-  // Joint markers: tiny axis-aligned octahedra.
-  const jr = height * 0.008
+  // Joint markers: tiny axis-aligned octahedra, shrunk where the incoming bone
+  // is short (finger/toe chains) so markers don't swallow the bone.
   for (const j of skeleton.joints) {
+    let jr = height * 0.008
+    if (j.parent >= 0) {
+      const parent = skeleton.joints[j.parent]!
+      const bone_len = Math.hypot(j.x - parent.x, j.y - parent.y, j.z - parent.z)
+      if (bone_len > 1e-6) jr = Math.min(jr, bone_len * 0.4)
+    }
     const px = j.x, py = j.y, pz = j.z
     const top: [number, number, number] = [px, py + jr, pz]
     const bot: [number, number, number] = [px, py - jr, pz]
@@ -630,7 +845,8 @@ export interface avatar_build_result extends avatar_mesh_result {
   skeleton_mesh: audit_mesh
 }
 
-/** Run the whole pipeline: skeleton → volumes → field → mesh (+ armature mesh). */
+/** Run the whole pipeline: skeleton → bone frame → muscle layer → fat layer →
+ * field → mesh (+ armature mesh). */
 export function generate_avatar(params: avatar_params, resolution_override?: number, joint_offsets?: avatar_joint_offsets): avatar_build_result {
   const skeleton = build_avatar_skeleton(params)
   if (joint_offsets) {
@@ -644,6 +860,8 @@ export function generate_avatar(params: avatar_params, resolution_override?: num
     }
   }
   const parts = build_avatar_volumes(params, skeleton)
+  apply_avatar_muscle_layer(parts, params, skeleton)
+  apply_avatar_fat_layer(parts, params, skeleton)
   const result = polygonize_avatar(parts, params, resolution_override)
   return { ...result, skeleton, skeleton_mesh: build_avatar_skeleton_mesh(skeleton, params.height) }
 }

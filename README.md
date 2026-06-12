@@ -380,14 +380,18 @@ for the full list). Token `kind`s are `keyword`, `type`, `number`, `string`,
 ### `avatar_generator` — procedural human mesh from a skeleton
 
 A bones-first body generator with **no template mesh anywhere**: body
-parameters place a parametric humanoid skeleton (joint positions + hierarchy),
-anatomical SDF volumes attach to the bones (rounded cones sweep the limbs,
-ellipsoids model the head/torso/muscle masses), the volumes fuse through a
-smooth union, and surface nets polygonize the combined field into a triangle
-mesh with SDF-gradient normals. Because a skeleton alone doesn't determine a
-body, extra parameters — muscle, fat, build (feminine ↔ masculine),
-shoulder/hip span, limb girth — drive the volume layer independently of the
-bone lengths.
+parameters place a parametric humanoid skeleton (joint positions + hierarchy,
+down to per-finger and per-toe chains and breast anchor bones), lean anatomical
+SDF volumes sweep every bone (rounded cones for limbs and digits, ellipsoids
+for head/torso), a **muscle layer** grows the frame and lays named bellies over
+it (deltoids, traps, pecs, biceps, quads, glutes, calves), a **fat layer** adds
+the adipose masses (belly, love handles, glute pads, bust, chin) and swells
+every soft part subcutaneously, the volumes fuse through a smooth union, and
+surface nets polygonize the combined field into a triangle mesh with
+SDF-gradient normals. Because a skeleton alone doesn't determine a body, the
+muscle and fat passes run as explicit pipeline steps between the bone frame and
+polygonization — each frame part annotates how strongly it responds to either
+layer, so the same bones can carry a sprinter or a powerlifter.
 
 The panel shows the result in a WebGPU orbit viewport (it reuses the asset-audit
 viewer): sliders regenerate the mesh live (drafted at a coarse grid while
@@ -412,7 +416,7 @@ const av = create_avatar_generator_state()
 const ev = avatar_generator(renderer, widgets, theme, input, x, y, w, h, av)
 if (ev.exported_bytes) console.log(`wrote avatar.glb (${ev.exported_bytes} bytes)`)
 
-// or run the pipeline headless — skeleton → volumes → field → mesh:
+// or run the pipeline headless — skeleton → frame → muscle → fat → mesh:
 const { mesh, skeleton } = generate_avatar({ ...create_avatar_params(), muscle: 0.8 })
 ```
 
