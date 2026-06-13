@@ -12,12 +12,13 @@ export interface orbit_camera {
   yaw: number
   pitch: number
   distance: number
+  target_distance: number
   target: [number, number, number]
   fov: number
 }
 
 export function create_orbit_camera(): orbit_camera {
-  return { yaw: 0.7, pitch: 0.45, distance: 6, target: [0, 0, 0], fov: Math.PI / 4 }
+  return { yaw: 0.7, pitch: 0.45, distance: 6, target_distance: 6, target: [0, 0, 0], fov: Math.PI / 4 }
 }
 
 /** Point the orbit camera at the asset's bounds, fully in frame. */
@@ -32,8 +33,30 @@ export function frame_orbit_camera(camera: orbit_camera, bounds: audit_bounds | 
   const radius = Math.max(1e-5, Math.hypot(dx, dy, dz) / 2)
   camera.target = [cx, cy, cz]
   camera.distance = (radius / Math.tan(camera.fov / 2)) * 1.35
+  camera.target_distance = camera.distance
   camera.yaw = 0.7
   camera.pitch = 0.45
+}
+
+export function orbit_camera_zoom(camera: orbit_camera, factor: number, bounds_radius = camera.distance): void {
+  const min_distance = Math.max(1e-4, bounds_radius * 0.035)
+  const max_distance = Math.max(min_distance * 1.01, bounds_radius * 18)
+  const current_target = Number.isFinite(camera.target_distance) ? camera.target_distance : camera.distance
+  camera.target_distance = Math.min(max_distance, Math.max(min_distance, current_target * factor))
+}
+
+export function orbit_camera_step_damping(camera: orbit_camera): boolean {
+  const target = Number.isFinite(camera.target_distance) ? camera.target_distance : camera.distance
+  const delta = target - camera.distance
+  if (Math.abs(delta) <= Math.max(1e-5, target * 0.00035)) {
+    if (camera.distance !== target) {
+      camera.distance = target
+      return true
+    }
+    return false
+  }
+  camera.distance += delta * 0.24
+  return true
 }
 
 // --- column-major mat4 (WGSL layout) ----------------------------------------

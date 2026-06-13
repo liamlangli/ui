@@ -1,8 +1,7 @@
-// Avatar generator — an immediate-mode panel around the procedural human-body
-// pipeline in ui_avatar_body: tune skeleton + volume parameters with sliders,
-// watch the mesh regenerate live in a WebGPU orbit viewport (drafted at a
-// coarse grid while a slider is held, refined on release), toggle the armature
-// overlay, and export the result as a self-contained GLB.
+// Avatar generator — an immediate-mode panel around a template character
+// backend plus the older procedural SDF draft backend. The default path loads
+// Universal Base Characters from public/avatar_base, then applies the existing
+// body sliders as coarse proportions over stable character meshes.
 //
 // The 3D pass reuses the asset-audit viewer (`asset_audit_view`) and the GLB
 // writer (`encode_asset_glb`) — the generator only produces `audit_mesh` data.
@@ -16,6 +15,8 @@ import {
   asset_audit_view,
   create_orbit_camera,
   frame_orbit_camera,
+  orbit_camera_step_damping,
+  orbit_camera_zoom,
   orbit_camera_eye,
   type asset_audit_view_mode,
   type orbit_camera,
@@ -29,6 +30,13 @@ import {
   type avatar_joint_offsets,
   type avatar_params,
 } from './ui_avatar_body'
+import {
+  choose_avatar_template,
+  generate_template_avatar,
+  load_avatar_template_library,
+  type avatar_template_key,
+  type avatar_template_library,
+} from './ui_avatar_template'
 
 /** Coarse grid used while a slider is held, so dragging stays interactive. */
 const DRAFT_RESOLUTION = 32
@@ -70,6 +78,12 @@ export interface avatar_generator_state {
   last_my: number
   sidebar_scroll: ui_scroll_state
   sidebar_content_h: number
+  backend: 'template' | 'sdf'
+  template_choice: 'auto' | avatar_template_key
+  template_status: 'idle' | 'loading' | 'ready' | 'error'
+  template_library: avatar_template_library | null
+  template_promise: Promise<void> | null
+  template_error: string | null
 }
 
 export function create_avatar_generator_state(): avatar_generator_state {
@@ -99,12 +113,53 @@ export function create_avatar_generator_state(): avatar_generator_state {
     last_my: 0,
     sidebar_scroll: { offset_y: 0 },
     sidebar_content_h: 0,
+    backend: 'template',
+    template_choice: 'auto',
+    template_status: 'idle',
+    template_library: null,
+    template_promise: null,
+    template_error: null,
   }
 }
 
-function regenerate(state: avatar_generator_state, draft: boolean): void {
+function result_meshes(result: avatar_build_result, show_skeleton: boolean): audit_asset['meshes'] {
+  const meshes = result.meshes ?? [result.mesh]
+  return show_skeleton ? [...meshes, result.skeleton_mesh] : meshes
+}
+
+function ensure_template_loading(state: avatar_generator_state): void {
+  if (state.template_status !== 'idle') return
+  state.template_status = 'loading'
+  state.template_promise = load_avatar_template_library()
+    .then((library) => {
+      state.template_library = library
+      state.template_status = 'ready'
+      state.template_error = null
+      state.params_dirty = true
+    })
+    .catch((err) => {
+      state.template_status = 'error'
+      state.template_error = err instanceof Error ? err.message : String(err)
+    })
+}
+
+function regenerate_sdf(state: avatar_generator_state, draft: boolean): void {
   state.result = generate_avatar(state.params, draft ? Math.min(DRAFT_RESOLUTION, state.params.resolution) : undefined, state.joint_offsets)
   state.draft = draft && state.params.resolution > DRAFT_RESOLUTION
+  state.params_dirty = false
+  state.mesh_revision += 1
+  state.view_dirty = true
+  if (!state.framed) {
+    frame_orbit_camera(state.camera, state.result.bounds)
+    state.framed = true
+  }
+}
+
+function regenerate_template(state: avatar_generator_state): void {
+  if (!state.template_library || state.template_status !== 'ready') return
+  const template = state.template_choice === 'auto' ? choose_avatar_template(state.params) : state.template_choice
+  state.result = generate_template_avatar(state.params, state.template_library, template, state.joint_offsets)
+  state.draft = false
   state.params_dirty = false
   state.mesh_revision += 1
   state.view_dirty = true
@@ -118,7 +173,7 @@ function regenerate(state: avatar_generator_state, draft: boolean): void {
 export function avatar_generator_export_glb(state: avatar_generator_state): number {
   const result = state.result
   if (!result || typeof document === 'undefined') return 0
-  const meshes = state.show_skeleton ? [result.mesh, result.skeleton_mesh] : [result.mesh]
+  const meshes = result_meshes(result, state.show_skeleton)
   const asset: audit_asset = {
     file_name: 'avatar.glb',
     format: 'glb',
@@ -181,8 +236,11 @@ export function avatar_generator(
   // --- regenerate when needed --------------------------------------------------
   // While the mouse is held (a slider drag) changed params rebuild at a coarse
   // draft grid every frame; the full-resolution pass runs once on release.
-  if (!state.result || state.params_dirty) regenerate(state, input.mouse_down)
-  else if (state.draft && !input.mouse_down) regenerate(state, false)
+  if (state.backend === 'template') {
+    ensure_template_loading(state)
+    if (state.template_status === 'ready' && (!state.result || state.params_dirty || state.result.source !== 'template')) regenerate_template(state)
+  } else if (!state.result || state.params_dirty || state.result.source !== 'sdf') regenerate_sdf(state, input.mouse_down)
+  else if (state.draft && !input.mouse_down) regenerate_sdf(state, false)
 
   // --- toolbar ------------------------------------------------------------------
   const bar_h = 30 * scale
@@ -205,6 +263,31 @@ export function avatar_generator(
   }
   bx += 96 * scale + 10 * scale
 
+  const backend_names = ['Template', 'SDF Draft']
+  const next_backend = widgets.dropdown('ag_backend', bx, bar_y + (bar_h - btn_h) / 2, 94 * scale, btn_h, backend_names, state.backend === 'template' ? 0 : 1)
+  const backend = next_backend === 0 ? 'template' : 'sdf'
+  if (backend !== state.backend) {
+    state.backend = backend
+    state.params_dirty = true
+    state.framed = false
+    state.synced_key = ''
+  }
+  bx += 104 * scale
+
+  if (state.backend === 'template') {
+    const choices = ['Auto', 'Male', 'Female']
+    const current = state.template_choice === 'auto' ? 0 : state.template_choice === 'male' ? 1 : 2
+    const next = widgets.dropdown('ag_template_choice', bx, bar_y + (bar_h - btn_h) / 2, 76 * scale, btn_h, choices, current)
+    const choice: avatar_generator_state['template_choice'] = next === 0 ? 'auto' : next === 1 ? 'male' : 'female'
+    if (choice !== state.template_choice) {
+      state.template_choice = choice
+      state.params_dirty = true
+      state.framed = false
+      state.synced_key = ''
+    }
+    bx += 86 * scale
+  }
+
   const next_wire = widgets.toggle('ag_wire', bx, bar_y + (bar_h - 18 * scale) / 2, state.wireframe, 'Wireframe')
   if (next_wire !== state.wireframe) {
     state.wireframe = next_wire
@@ -220,14 +303,16 @@ export function avatar_generator(
   state.show_bones = widgets.toggle('ag_bones', bx, bar_y + (bar_h - 18 * scale) / 2, state.show_bones, 'Bones')
   bx += 76 * scale
 
-  const mode_button = (id: string, label: string, width: number, mode: asset_audit_view_mode): void => {
-    if (button(id, label, width, { active: state.view_mode === mode }) && state.view_mode !== mode) {
-      state.view_mode = mode
-      state.view_dirty = true
-    }
+  const view_modes: asset_audit_view_mode[] = ['shaded', 'texture', 'normal']
+  const view_labels = ['Shaded', 'Base Color', 'Normal']
+  const view_index = Math.max(0, view_modes.indexOf(state.view_mode))
+  const next_view = widgets.dropdown('ag_view_mode', bx, bar_y + (bar_h - btn_h) / 2, 98 * scale, btn_h, view_labels, view_index)
+  if (next_view !== view_index) {
+    state.view_mode = view_modes[next_view]!
+    state.view_dirty = true
   }
-  mode_button('ag_mode_shaded', 'Shaded', 62 * scale, 'shaded')
-  mode_button('ag_mode_normal', 'Normal', 60 * scale, 'normal')
+  bx += 108 * scale
+
   if (button('ag_reset_view', 'Reset View', 88 * scale)) {
     if (state.result) frame_orbit_camera(state.camera, state.result.bounds)
     state.view_dirty = true
@@ -407,11 +492,18 @@ function draw_viewport(
     state.panning = false
   }
   if (inside && input.wheel_y !== 0) {
-    cam.distance = Math.max(1e-4, cam.distance * Math.exp(input.wheel_y * 0.0012))
+    const b = result?.bounds
+    const bounds_radius = b ? Math.max(1e-4, Math.hypot(b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2]) / 2) : cam.distance
+    orbit_camera_zoom(cam, Math.exp(-input.wheel_y * 0.16), bounds_radius)
     state.view_dirty = true
   }
   if (inside && input.zoom_factor && input.zoom_factor !== 1) {
-    cam.distance = Math.max(1e-4, cam.distance / input.zoom_factor)
+    const b = result?.bounds
+    const bounds_radius = b ? Math.max(1e-4, Math.hypot(b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2]) / 2) : cam.distance
+    orbit_camera_zoom(cam, 1 / input.zoom_factor, bounds_radius)
+    state.view_dirty = true
+  }
+  if (orbit_camera_step_damping(cam)) {
     state.view_dirty = true
   }
 
@@ -419,9 +511,9 @@ function draw_viewport(
   const { device } = ui.gpu()
   if (result && device) {
     state.view.init(device)
-    const key = `${state.mesh_revision}:${state.show_skeleton ? 1 : 0}`
+    const key = `${state.mesh_revision}:${state.show_skeleton ? 1 : 0}:${result.meshes?.length ?? 1}`
     if (state.synced_key !== key) {
-      state.view.set_meshes(state.show_skeleton ? [result.mesh, result.skeleton_mesh] : [result.mesh])
+      state.view.set_meshes(result_meshes(result, state.show_skeleton))
       state.synced_key = key
       state.view_dirty = true
     }
@@ -449,7 +541,12 @@ function draw_viewport(
       ui.draw_text(vx + 10 * scale, vy + 10 * scale, 'draft preview — release to refine', 9.5 * scale, slot('accent'), FONT_MONO)
     }
   } else {
-    ui.draw_text(vx + 12 * scale, vy + 12 * scale, 'WebGPU device not ready…', 11 * scale, slot('text_dim'))
+    const msg = state.backend === 'template' && state.template_status === 'loading'
+      ? 'Loading base characters...'
+      : state.backend === 'template' && state.template_status === 'error'
+        ? `Template load failed: ${state.template_error ?? 'unknown error'}`
+        : 'WebGPU device not ready...'
+    ui.draw_text(vx + 12 * scale, vy + 12 * scale, msg, 11 * scale, slot('text_dim'))
   }
 
   // --- bone editing overlay (drawn x-ray style over the 3D image) ---------------
@@ -537,6 +634,7 @@ function draw_sidebar(
     cy += 18 * scale
   }
   const pct = (v: number) => `${Math.round(v * 100)}%`
+  const result = state.result
 
   section('STATURE')
   param_slider('height', 'Height', 0.9, 2.2, (v) => `${v.toFixed(2)} m`)
@@ -559,18 +657,32 @@ function draw_sidebar(
   cy += 6 * scale
 
   section('SURFACE')
-  param_slider('blend', 'Blend softness', 0, 1, pct)
-  param_slider('resolution', 'Grid resolution', 24, 160, (v) => `${Math.round(v)}`)
+  if (state.backend === 'sdf') {
+    param_slider('blend', 'Blend softness', 0, 1, pct)
+    param_slider('resolution', 'Grid resolution', 24, 160, (v) => `${Math.round(v)}`)
+  } else {
+    row('Backend', result?.template_name ?? (state.template_status === 'ready' ? 'Template' : state.template_status))
+    if (state.template_status === 'error') row('Error', state.template_error ?? 'unknown')
+  }
   cy += 6 * scale
 
-  const result = state.result
   if (result) {
+    const meshes = result.meshes ?? [result.mesh]
+    let vertices = 0
+    let triangles = 0
+    let geometry = 0
+    for (const mesh of meshes) {
+      vertices += mesh.positions.length / 3
+      triangles += mesh.indices.length / 3
+      geometry += mesh.positions.byteLength + mesh.normals.byteLength + (mesh.uvs?.byteLength ?? 0) + mesh.indices.byteLength
+    }
     section('MESH')
-    row('Vertices', `${result.mesh.positions.length / 3}`)
-    row('Triangles', `${result.mesh.indices.length / 3}`)
-    row('Grid', `${result.cells[0]}×${result.cells[1]}×${result.cells[2]}`)
+    row('Meshes', `${meshes.length}`)
+    row('Vertices', `${vertices}`)
+    row('Triangles', `${triangles}`)
+    if (state.backend === 'sdf') row('Grid', `${result.cells[0]}×${result.cells[1]}×${result.cells[2]}`)
     row('Generated in', `${result.generation_ms.toFixed(1)} ms`)
-    row('Geometry', format_asset_bytes(result.mesh.positions.byteLength + result.mesh.normals.byteLength + result.mesh.indices.byteLength))
+    row('Geometry', format_asset_bytes(geometry))
     cy += 6 * scale
     section('SKELETON')
     row('Joints', `${result.skeleton.joints.length}`)
@@ -591,14 +703,10 @@ function draw_sidebar(
   }
 
   section('PIPELINE')
-  cy += ui.draw_text_wrapped(
-    sx + pad,
-    cy,
-    inner_w,
-    'skeleton (finger/toe chains, breast anchors) → bone frame volumes → muscle layer → fat layer → smooth union → surface nets → mesh. No template geometry: every vertex derives from the parameters above.',
-    9.5 * scale,
-    slot('text_dim'),
-  ) + 8 * scale
+  const pipeline_text = state.backend === 'template'
+    ? 'Universal Base Characters template mesh → character selection → proportion scaling from sliders → stable material meshes → GLB export. SDF Draft remains available as an experimental fallback.'
+    : 'skeleton (finger/toe chains, breast anchors) → bone frame volumes → muscle layer → fat layer → smooth union → surface nets → mesh.'
+  cy += ui.draw_text_wrapped(sx + pad, cy, inner_w, pipeline_text, 9.5 * scale, slot('text_dim')) + 8 * scale
 
   state.sidebar_content_h = cy + state.sidebar_scroll.offset_y - sy + pad
   ui.pop_clip()

@@ -843,6 +843,11 @@ export type avatar_joint_offsets = Record<string, [number, number, number]>
 export interface avatar_build_result extends avatar_mesh_result {
   skeleton: avatar_skeleton
   skeleton_mesh: audit_mesh
+  /** Renderable avatar meshes. SDF generation uses one body mesh; template
+   * generation keeps the imported character split into material meshes. */
+  meshes?: audit_mesh[]
+  source?: 'sdf' | 'template'
+  template_name?: string
 }
 
 /** Run the whole pipeline: skeleton → bone frame → muscle layer → fat layer →
@@ -863,5 +868,5 @@ export function generate_avatar(params: avatar_params, resolution_override?: num
   apply_avatar_muscle_layer(parts, params, skeleton)
   apply_avatar_fat_layer(parts, params, skeleton)
   const result = polygonize_avatar(parts, params, resolution_override)
-  return { ...result, skeleton, skeleton_mesh: build_avatar_skeleton_mesh(skeleton, params.height) }
+  return { ...result, skeleton, skeleton_mesh: build_avatar_skeleton_mesh(skeleton, params.height), source: 'sdf' }
 }

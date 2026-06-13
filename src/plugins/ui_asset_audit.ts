@@ -30,6 +30,8 @@ import {
   asset_audit_view,
   create_orbit_camera,
   frame_orbit_camera,
+  orbit_camera_step_damping,
+  orbit_camera_zoom,
   type asset_audit_view_mode,
   type orbit_camera,
 } from './ui_asset_audit_view'
@@ -643,11 +645,18 @@ function draw_viewport(
       state.panning = false
     }
     if (inside && input.wheel_y !== 0) {
-      cam.distance = Math.max(1e-4, cam.distance * Math.exp(input.wheel_y * 0.0012))
+      const bounds = state.stats?.bounds
+      const bounds_radius = bounds ? Math.max(1e-4, Math.hypot(bounds.max[0] - bounds.min[0], bounds.max[1] - bounds.min[1], bounds.max[2] - bounds.min[2]) / 2) : cam.distance
+      orbit_camera_zoom(cam, Math.exp(-input.wheel_y * 0.16), bounds_radius)
       state.view_dirty = true
     }
     if (inside && input.zoom_factor && input.zoom_factor !== 1) {
-      cam.distance = Math.max(1e-4, cam.distance / input.zoom_factor)
+      const bounds = state.stats?.bounds
+      const bounds_radius = bounds ? Math.max(1e-4, Math.hypot(bounds.max[0] - bounds.min[0], bounds.max[1] - bounds.min[1], bounds.max[2] - bounds.min[2]) / 2) : cam.distance
+      orbit_camera_zoom(cam, 1 / input.zoom_factor, bounds_radius)
+      state.view_dirty = true
+    }
+    if (orbit_camera_step_damping(cam)) {
       state.view_dirty = true
     }
   }
