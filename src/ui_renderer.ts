@@ -578,7 +578,15 @@ export class ui_renderer {
     const adapter = await navigator.gpu.requestAdapter()
     if (!adapter) throw new Error('WebGPU adapter unavailable')
     const requiredFeatures: GPUFeatureName[] = adapter.features.has('shader-f16') ? ['shader-f16'] : []
-    this.device = await adapter.requestDevice({ requiredFeatures })
+    const requiredLimits: Record<string, number> = {}
+    const storageLimit = adapter.limits.maxStorageBufferBindingSize
+    const bufferLimit = adapter.limits.maxBufferSize
+    if (storageLimit > 128 * 1024 * 1024) requiredLimits.maxStorageBufferBindingSize = storageLimit
+    if (bufferLimit > 256 * 1024 * 1024) requiredLimits.maxBufferSize = bufferLimit
+    this.device = await adapter.requestDevice({
+      requiredFeatures,
+      ...(Object.keys(requiredLimits).length > 0 ? { requiredLimits } : {}),
+    })
     this.context = this.canvas.getContext('webgpu')
     if (!this.context) throw new Error('WebGPU canvas context unavailable')
     this.format = navigator.gpu.getPreferredCanvasFormat()
