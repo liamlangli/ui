@@ -474,9 +474,12 @@ texture the panel composites with `draw_texture`.
 It shares the host `GPUDevice` (no second WebGPU context), ships built-in
 procedural scenes (sphere, torus, box, spheres + ground), an orbit viewport and
 a live Disney-material sidebar (metallic / roughness / specular / transmission /
-subsurface / clearcoat / IOR / base colour). Each frame traces one more sample
-and asks the adaptive renderer to keep ticking until it hits the sample budget,
-then idles — any camera, material or scene change restarts accumulation.
+subsurface / clearcoat / IOR / base colour). It is a wavefront integrator: a
+persistent per-pixel ray queue is advanced by a bounded number of single-bounce
+compute runs per frame, so frame cost stays roughly constant regardless of the
+bounce budget while the image refines progressively. It asks the adaptive
+renderer to keep ticking until it hits the sample budget, then idles — any
+camera, material or scene change restarts accumulation.
 
 ```ts
 import { webtix, create_webtix_state } from '@liamlangli/ui/plugins'

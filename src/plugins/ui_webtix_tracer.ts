@@ -1,17 +1,30 @@
-// webtix — WebGPU progressive path tracer.
+// webtix — WebGPU wavefront path tracer.
 //
 // The WebGL2 original ran the whole integrator in a GLSL fragment shader, read
 // geometry + BVH out of RGB float *textures* via computed UVs, and accumulated
-// through a ping-pong of framebuffers (see webtix `path-trace-engine.ts`). This
-// is the WebGPU reimplementation:
+// through a ping-pong of framebuffers. The first WebGPU port kept that
+// "megakernel" shape: a single full-screen fragment pass walked the *entire*
+// bounce loop for every pixel in one draw. That made frame time scale with the
+// deepest path on screen and wasted GPU lanes once short paths terminated —
+// frames stuttered whenever the bounce budget went up.
 //
-//   • Geometry and the BVH live in `var<storage, read>` buffers — random access
-//     by index, no texel-address arithmetic. The BVH is a flat skip-list walked
-//     with a single forward scan (no stack).
-//   • A full-screen fragment pass traces one new sample per draw and blends it
-//     into an rgba16float accumulation target (ping-pong A/B).
-//   • A present pass tonemaps the HDR accumulator into an rgba8unorm texture the
-//     host UI composites with `draw_texture`.
+// This is the wavefront reimplementation:
+//
+//   • One ray "task" slot per pixel lives in a persistent `read_write` storage
+//     buffer (origin, direction, throughput, accumulated radiance, bounce,
+//     alive). Because this is a single-sample-per-pixel integrator (no path
+//     splitting), a pixel owns at most one live ray, so the queue is just
+//     indexed by pixel — no atomics, no compaction.
+//   • A compute "run" traces every live ray exactly **once**, shades it, and
+//     either writes the continuation ray back into its own slot or finalizes the
+//     path (adding its radiance to the accumulation buffer and starting a fresh
+//     primary next time the slot is visited).
+//   • Each frame issues a small, fixed number of runs (`runs_per_frame`). Deep
+//     paths simply spill across frames, so per-frame GPU cost is bounded and
+//     roughly constant regardless of the bounce budget — the image refines
+//     progressively and frames stay smooth.
+//   • A present pass divides the accumulation buffer by its per-pixel sample
+//     count, tonemaps, and writes the rgba8unorm texture the host composites.
 //
 // It shares the host `GPUDevice` (no second WebGPU context), exactly like the
 // asset-audit viewport.
@@ -72,10 +85,13 @@ export interface webtix_render_params {
 
 const UNIFORM_F32 = 52 // 13 × vec4
 const MAX_DEPTH = 32
+const WORKGROUP = 8 // 8×8 = 64 invocations
+const TASK_F32 = 16 // 4 × vec4 per ray task
 
 export class webtix_tracer {
   private device: GPUDevice | null = null
-  private trace_pipeline: GPURenderPipeline | null = null
+  private trace_pipeline: GPUComputePipeline | null = null
+  private clear_pipeline: GPUComputePipeline | null = null
   private present_pipeline: GPURenderPipeline | null = null
   private trace_layout: GPUBindGroupLayout | null = null
   private present_layout: GPUBindGroupLayout | null = null
@@ -88,51 +104,70 @@ export class webtix_tracer {
   private node_count = 0
   private has_scene = false
 
-  private accum: [GPUTexture, GPUTexture] | null = null
+  // Wavefront state: one ray task + one accumulator slot per pixel, plus a
+  // single atomic counter of finalized paths (read back to report progress).
+  private task_buffer: GPUBuffer | null = null
+  private accum_buffer: GPUBuffer | null = null
+  private counter_buffer: GPUBuffer | null = null
+  private counter_staging: GPUBuffer | null = null
+  private readback_pending = false
+  private completed_total = 0
+  // Bumped on every reset so an in-flight readback issued for an older
+  // accumulation generation is discarded instead of reviving a stale count.
+  private accum_generation = 0
+
   private display: GPUTexture | null = null
   private width = 0
   private height = 0
 
-  // Ping-pong bind groups: trace[p] reads accum[p], writes accum[p^1];
-  // present[p] reads accum[p^1] (the just-written target).
-  private trace_bind: [GPUBindGroup, GPUBindGroup] | null = null
-  private present_bind: [GPUBindGroup, GPUBindGroup] | null = null
-  private pp = 0
+  private trace_bind: GPUBindGroup | null = null
+  private present_bind: GPUBindGroup | null = null
   private uniform_data = new Float32Array(UNIFORM_F32)
 
-  /** 0-based index of the next sample to accumulate. */
-  frame_index = 0
+  /** Compute "runs" (single-bounce trace dispatches) issued per frame. */
+  runs_per_frame = 4
+  /** Restart the queue + accumulation on the next render. */
+  private needs_clear = true
+  /** Monotonic run index — seeds per-run RNG so successive runs decorrelate. */
+  private run_counter = 0
 
   init(device: GPUDevice): void {
     if (this.device === device && this.trace_pipeline) return
     this.device = device
-    const module = device.createShaderModule({ label: 'webtix.trace_shader', code: TRACE_WGSL })
+    const trace_module = device.createShaderModule({ label: 'webtix.trace_shader', code: TRACE_WGSL })
     const present_module = device.createShaderModule({ label: 'webtix.present_shader', code: PRESENT_WGSL })
 
     this.trace_layout = device.createBindGroupLayout({
       label: 'webtix.trace_layout',
       entries: [
-        { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
-        { binding: 1, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
-        { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
-        { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
-        { binding: 4, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
-        { binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
+        { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+        { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+        { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+        { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+        { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+        { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },       // ray tasks
+        { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },       // accumulator
+        { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },       // finalized counter
       ],
     })
     this.present_layout = device.createBindGroupLayout({
       label: 'webtix.present_layout',
       entries: [
-        { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
       ],
     })
 
-    this.trace_pipeline = device.createRenderPipeline({
+    const trace_pipeline_layout = device.createPipelineLayout({ bindGroupLayouts: [this.trace_layout] })
+    this.trace_pipeline = device.createComputePipeline({
       label: 'webtix.trace_pipeline',
-      layout: device.createPipelineLayout({ bindGroupLayouts: [this.trace_layout] }),
-      vertex: { module, entryPoint: 'vs_main' },
-      fragment: { module, entryPoint: 'fs_main', targets: [{ format: 'rgba16float' }] },
-      primitive: { topology: 'triangle-list' },
+      layout: trace_pipeline_layout,
+      compute: { module: trace_module, entryPoint: 'cs_trace' },
+    })
+    this.clear_pipeline = device.createComputePipeline({
+      label: 'webtix.clear_pipeline',
+      layout: trace_pipeline_layout,
+      compute: { module: trace_module, entryPoint: 'cs_clear' },
     })
     this.present_pipeline = device.createRenderPipeline({
       label: 'webtix.present_pipeline',
@@ -146,6 +181,16 @@ export class webtix_tracer {
       label: 'webtix.uniform',
       size: UNIFORM_F32 * 4,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    })
+    this.counter_buffer = device.createBuffer({
+      label: 'webtix.counter',
+      size: 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    })
+    this.counter_staging = device.createBuffer({
+      label: 'webtix.counter_staging',
+      size: 4,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
     })
   }
 
@@ -168,104 +213,139 @@ export class webtix_tracer {
     this.reset()
   }
 
-  /** Restart accumulation (call on any camera/material/scene change). */
+  /** Restart the queue + accumulation (call on any camera/material/scene change). */
   reset(): void {
-    this.frame_index = 0
-    this.pp = 0
+    this.needs_clear = true
+    this.completed_total = 0
+    this.accum_generation = (this.accum_generation + 1) >>> 0
   }
 
   private ensure_targets(w: number, h: number): void {
     const device = this.device!
-    if (this.accum && this.width === w && this.height === h) return
-    this.accum?.[0].destroy()
-    this.accum?.[1].destroy()
+    if (this.display && this.width === w && this.height === h) return
+    this.task_buffer?.destroy()
+    this.accum_buffer?.destroy()
     this.display?.destroy()
     this.width = w
     this.height = h
-    const make_accum = (label: string) => device.createTexture({
-      label, size: [w, h, 1], format: 'rgba16float',
-      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+    const pixels = w * h
+    this.task_buffer = device.createBuffer({
+      label: 'webtix.tasks', size: pixels * TASK_F32 * 4, usage: GPUBufferUsage.STORAGE,
     })
-    this.accum = [make_accum('webtix.accum_a'), make_accum('webtix.accum_b')]
+    this.accum_buffer = device.createBuffer({
+      label: 'webtix.accum', size: pixels * 16, usage: GPUBufferUsage.STORAGE,
+    })
     this.display = device.createTexture({
       label: 'webtix.display', size: [w, h, 1], format: 'rgba8unorm',
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
     })
     this.trace_bind = null
     this.present_bind = null
+    this.needs_clear = true
   }
 
   private ensure_bind_groups(): void {
     const device = this.device!
-    if (!this.accum || !this.trace_layout || !this.present_layout) return
+    if (!this.trace_layout || !this.present_layout) return
     if (this.trace_bind && this.present_bind) return
-    const geom = (p: number): GPUBindGroup => device.createBindGroup({
+    this.trace_bind = device.createBindGroup({
       label: 'webtix.trace_bind',
-      layout: this.trace_layout!,
+      layout: this.trace_layout,
       entries: [
         { binding: 0, resource: { buffer: this.uniform! } },
         { binding: 1, resource: { buffer: this.bvh_buffer! } },
         { binding: 2, resource: { buffer: this.position_buffer! } },
         { binding: 3, resource: { buffer: this.normal_buffer! } },
         { binding: 4, resource: { buffer: this.index_buffer! } },
-        { binding: 5, resource: this.accum![p].createView() },
+        { binding: 5, resource: { buffer: this.task_buffer! } },
+        { binding: 6, resource: { buffer: this.accum_buffer! } },
+        { binding: 7, resource: { buffer: this.counter_buffer! } },
       ],
     })
-    this.trace_bind = [geom(0), geom(1)]
-    const present = (p: number): GPUBindGroup => device.createBindGroup({
+    this.present_bind = device.createBindGroup({
       label: 'webtix.present_bind',
-      layout: this.present_layout!,
-      entries: [{ binding: 0, resource: this.accum![p].createView() }],
+      layout: this.present_layout,
+      entries: [
+        { binding: 0, resource: { buffer: this.uniform! } },
+        { binding: 1, resource: { buffer: this.accum_buffer! } },
+      ],
     })
-    this.present_bind = [present(0), present(1)]
   }
 
-  /** Number of fully-accumulated samples currently in the display texture. */
-  get samples(): number { return this.frame_index }
+  /** Approximate number of fully-accumulated samples per pixel (averaged). */
+  get samples(): number {
+    if (this.width === 0 || this.height === 0) return 0
+    return Math.floor(this.completed_total / (this.width * this.height))
+  }
 
   /**
-   * Trace one more sample at the given size and return the rgba8unorm display
-   * texture (or null until init/scene/targets are ready).
+   * Advance the wavefront by `runs_per_frame` trace runs, present the current
+   * accumulation, and return the rgba8unorm display texture (or null until
+   * init/scene/targets are ready).
    */
   render_sample(w: number, h: number, params: webtix_render_params): GPUTexture | null {
     const device = this.device
-    if (!device || !this.trace_pipeline || !this.present_pipeline || !this.has_scene) return null
+    if (!device || !this.trace_pipeline || !this.clear_pipeline || !this.present_pipeline || !this.has_scene) return null
     const pw = Math.max(1, Math.floor(w))
     const ph = Math.max(1, Math.floor(h))
     this.ensure_targets(pw, ph)
     this.ensure_bind_groups()
-    if (!this.accum || !this.display || !this.trace_bind || !this.present_bind) return null
+    if (!this.display || !this.trace_bind || !this.present_bind) return null
 
-    this.write_uniforms(pw, ph, params)
+    const gx = Math.ceil(pw / WORKGROUP)
+    const gy = Math.ceil(ph / WORKGROUP)
 
-    const read = this.pp
-    const write = this.pp ^ 1
-    const encoder = device.createCommandEncoder({ label: 'webtix.encoder' })
+    // Each run uses a fresh seed, so it needs its own uniform write + submit.
+    for (let run = 0; run < this.runs_per_frame; run++) {
+      this.write_uniforms(pw, ph, params)
+      this.run_counter = (this.run_counter + 1) >>> 0
+      const encoder = device.createCommandEncoder({ label: 'webtix.run' })
+      const pass = encoder.beginComputePass({ label: 'webtix.trace_pass' })
+      // Clear the queue + accumulator once, immediately before the first trace.
+      if (run === 0 && this.needs_clear) {
+        pass.setPipeline(this.clear_pipeline)
+        pass.setBindGroup(0, this.trace_bind)
+        pass.dispatchWorkgroups(gx, gy, 1)
+        this.needs_clear = false
+      }
+      pass.setPipeline(this.trace_pipeline)
+      pass.setBindGroup(0, this.trace_bind)
+      pass.dispatchWorkgroups(gx, gy, 1)
+      pass.end()
+      device.queue.submit([encoder.finish()])
+    }
 
-    // Trace + accumulate into accum[write], reading history from accum[read].
-    const trace_pass = encoder.beginRenderPass({
-      label: 'webtix.trace_pass',
-      colorAttachments: [{ view: this.accum[write].createView(), loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 1 } }],
-    })
-    trace_pass.setPipeline(this.trace_pipeline)
-    trace_pass.setBindGroup(0, this.trace_bind[read])
-    trace_pass.draw(3)
-    trace_pass.end()
-
-    // Tonemap accum[write] → display.
+    // Tonemap the accumulator → display, and snapshot the finalized counter.
+    const encoder = device.createCommandEncoder({ label: 'webtix.present' })
     const present_pass = encoder.beginRenderPass({
       label: 'webtix.present_pass',
       colorAttachments: [{ view: this.display.createView(), loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 1 } }],
     })
     present_pass.setPipeline(this.present_pipeline)
-    present_pass.setBindGroup(0, this.present_bind[write])
+    present_pass.setBindGroup(0, this.present_bind)
     present_pass.draw(3)
     present_pass.end()
-
+    if (!this.readback_pending && this.counter_buffer && this.counter_staging) {
+      encoder.copyBufferToBuffer(this.counter_buffer, 0, this.counter_staging, 0, 4)
+    }
     device.queue.submit([encoder.finish()])
-    this.pp = write
-    this.frame_index += 1
+    this.read_counter()
     return this.display
+  }
+
+  /** Throttled async readback of the finalized-path counter for progress UI. */
+  private read_counter(): void {
+    const staging = this.counter_staging
+    if (this.readback_pending || !staging) return
+    this.readback_pending = true
+    const gen = this.accum_generation
+    staging.mapAsync(GPUMapMode.READ).then(() => {
+      const value = new Uint32Array(staging.getMappedRange())[0] ?? 0
+      staging.unmap()
+      this.readback_pending = false
+      // Drop the result if accumulation was reset while this was in flight.
+      if (gen === this.accum_generation) this.completed_total = value
+    }).catch(() => { this.readback_pending = false })
   }
 
   private write_uniforms(w: number, h: number, p: webtix_render_params): void {
@@ -275,7 +355,7 @@ export class webtix_tracer {
     u[0] = p.eye[0]; u[1] = p.eye[1]; u[2] = p.eye[2]; u[3] = 0
     u[4] = fwd[0]; u[5] = fwd[1]; u[6] = fwd[2]; u[7] = 0
     u[8] = 0; u[9] = 1; u[10] = 0; u[11] = 0 // world up
-    u[12] = this.frame_index; u[13] = 0; u[14] = Math.random(); u[15] = this.node_count
+    u[12] = this.run_counter; u[13] = 0; u[14] = Math.random(); u[15] = this.node_count
     u[16] = m.emission[0]; u[17] = m.emission[1]; u[18] = m.emission[2]; u[19] = m.eta
     u[20] = m.color[0]; u[21] = m.color[1]; u[22] = m.color[2]; u[23] = m.metallic
     u[24] = m.absorption[0]; u[25] = m.absorption[1]; u[26] = m.absorption[2]; u[27] = m.subsurface
@@ -294,10 +374,13 @@ export class webtix_tracer {
     this.normal_buffer?.destroy()
     this.index_buffer?.destroy()
     this.uniform?.destroy()
-    this.accum?.[0].destroy()
-    this.accum?.[1].destroy()
+    this.task_buffer?.destroy()
+    this.accum_buffer?.destroy()
+    this.counter_buffer?.destroy()
+    this.counter_staging?.destroy()
     this.display?.destroy()
-    this.accum = null
+    this.task_buffer = null
+    this.accum_buffer = null
     this.display = null
     this.has_scene = false
   }
@@ -319,7 +402,7 @@ function normalize(a: [number, number, number]): [number, number, number] {
 }
 
 // ============================================================================
-// WGSL — full-screen progressive path tracer.
+// WGSL — wavefront path tracer (one bounce per run over a per-pixel ray queue).
 // ============================================================================
 
 const TRACE_WGSL = /* wgsl */ `
@@ -328,13 +411,12 @@ const PI2: f32 = 6.283185307179586;
 const PI_INV: f32 = 0.3183098861837907;
 const EPS: f32 = 1e-4;
 const MAX_T: f32 = 1e10;
-const MAX_DEPTH: i32 = ${MAX_DEPTH};
 
 struct Uniforms {
   cam_pos: vec4f,
   cam_fwd: vec4f,
   cam_up: vec4f,
-  frame: vec4f,     // frame_index, _, seed, node_count
+  frame: vec4f,     // run_counter, _, seed, node_count
   emission: vec4f,  // rgb, w = eta
   color: vec4f,     // rgb, w = metallic
   absorption: vec4f,// rgb, w = subsurface
@@ -353,12 +435,26 @@ struct bvh_node {
   prim: f32,
 }
 
+// One ray "task" per pixel. Packed into four vec4 for 16-byte alignment:
+//   o = origin.xyz,      o.w = bounce (as f32)
+//   d = direction.xyz,   d.w = alive flag (0 = needs a fresh primary)
+//   t = throughput.xyz
+//   r = radiance.xyz (accumulated along the current path)
+struct RayTask {
+  o: vec4f,
+  d: vec4f,
+  t: vec4f,
+  r: vec4f,
+}
+
 @group(0) @binding(0) var<uniform> U: Uniforms;
 @group(0) @binding(1) var<storage, read> bvh: array<bvh_node>;
 @group(0) @binding(2) var<storage, read> positions: array<f32>;
 @group(0) @binding(3) var<storage, read> normals: array<f32>;
 @group(0) @binding(4) var<storage, read> indices: array<u32>;
-@group(0) @binding(5) var history: texture_2d<f32>;
+@group(0) @binding(5) var<storage, read_write> tasks: array<RayTask>;
+@group(0) @binding(6) var<storage, read_write> accum: array<vec4f>;
+@group(0) @binding(7) var<storage, read_write> counter: atomic<u32>;
 
 struct Material {
   emission: vec3f,
@@ -498,28 +594,6 @@ fn trace(ro: vec3f, rd: vec3f) -> Hit {
     result.normal = normalize(best_n0 * (1.0 - best_u - best_v) + best_n1 * best_u + best_n2 * best_v);
   }
   return result;
-}
-
-fn trace_shadow(ro: vec3f, rd: vec3f, max_dist: f32) -> bool {
-  let inv_dir = 1.0 / rd;
-  let n = i32(U.frame.w);
-  var i = 0;
-  loop {
-    if (i >= n) { break; }
-    let node = bvh[i];
-    let t = box_intersect(node.bmin, node.bmax, ro, inv_dir);
-    if (t >= 0.0 && t < max_dist) {
-      if (node.count < 0.5) {
-        let pi = u32(node.prim) * 3u;
-        let hit = tri_intersect(fetch_pos(indices[pi]), fetch_pos(indices[pi + 1u]), fetch_pos(indices[pi + 2u]), ro, rd);
-        if (hit.x > 0.0 && hit.x < max_dist) { return true; }
-      }
-      i = i + 1;
-    } else {
-      if (node.count >= 0.5) { i = i + i32(node.count) + 1; } else { i = i + 1; }
-    }
-  }
-  return false;
 }
 
 // --- environment (procedural sky) -------------------------------------------
@@ -698,7 +772,6 @@ fn disney_eval(m: Material, normal: vec3f, view: vec3f, light: vec3f) -> vec3f {
       let ds = gtr2(n_dot_h, a);
       let fh = fresnel_schlick(l_dot_h);
       let fs = mix(spec, vec3f(1.0), fh);
-      let gs = ggx_smith(n_dot_v, a) * ggx_smith(n_dot_l, a);
       let fl = fresnel_schlick(n_dot_l);
       let fv = fresnel_schlick(n_dot_v);
       let f0 = 0.5 + 2.0 * l_dot_h * l_dot_h * m.roughness;
@@ -716,96 +789,137 @@ fn face_normal(n: vec3f, v: vec3f) -> vec3f {
   return select(-n, n, dot(n, v) > 0.0);
 }
 
-// --- integrator -------------------------------------------------------------
-fn integrate(ro_in: vec3f, rd_in: vec3f) -> vec3f {
-  let m = get_material();
-  var throughput = vec3f(1.0);
-  var radiance = vec3f(0.0);
-  var ro = ro_in;
-  var rd = rd_in;
-  var ray_eta = 1.0;
-  let depth = i32(U.p2.y);
-
-  for (var bounce = 0; bounce < MAX_DEPTH; bounce = bounce + 1) {
-    if (bounce >= depth) { break; }
-    let hit = trace(ro, rd);
-    if (!hit.hit) {
-      radiance = radiance + throughput * sample_environment(rd);
-      break;
-    }
-
-    var normal = hit.normal;
-    let view = -rd;
-    var surface_eta = m.eta;
-    if (ray_eta != 1.0) { surface_eta = 1.0; }
-
-    radiance = radiance + throughput * m.emission;
-
-    let samp = disney_sample(m, normal, view);
-    if (samp.pdf <= 0.0) { break; }
-    let f = disney_eval(m, normal, view, samp.light);
-    if (dot(normal, samp.light) <= 0.0) { ray_eta = surface_eta; }
-    throughput = clamp(throughput * f * abs(dot(normal, samp.light)) / samp.pdf, vec3f(0.0), vec3f(1.0));
-
-    // Russian roulette after a few bounces keeps deep paths cheap.
-    if (bounce > 3) {
-      let q = max(throughput.x, max(throughput.y, throughput.z));
-      if (rand() > q) { break; }
-      throughput = throughput / max(EPS, q);
-    }
-
-    ro = hit.position + face_normal(normal, samp.light) * EPS;
-    rd = samp.light;
-  }
-  return radiance;
-}
-
-// --- full-screen plumbing ---------------------------------------------------
-struct VsOut {
-  @builtin(position) pos: vec4f,
-  @location(0) uv: vec2f,
-}
-
-@vertex
-fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
-  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
-  var out: VsOut;
-  let xy = p[vi];
-  out.pos = vec4f(xy, 0.0, 1.0);
-  out.uv = xy * 0.5 + vec2f(0.5);
-  return out;
-}
-
-@fragment
-fn fs_main(in: VsOut) -> @location(0) vec4f {
-  let width = U.res.x;
-  let height = U.res.y;
-  let px = vec2u(u32(in.pos.x), u32(in.pos.y));
-  let frame_index = U.frame.x;
-  // Seed per pixel + sample so each accumulation step is decorrelated.
-  rng_state = pcg(px.x + px.y * u32(width) + u32(frame_index) * 9781u + u32(U.frame.z * 4294967295.0));
-
-  // Camera ray with sub-pixel jitter for antialiasing.
+// Build the jittered primary ray for a pixel (the start of a new sample).
+fn primary_ray(px: vec2f, w: f32, h: f32) -> RayTask {
   let fwd = U.cam_fwd.xyz;
   let x_axis = normalize(cross(fwd, U.cam_up.xyz));
   let y_axis = normalize(cross(x_axis, fwd));
-  let aspect = width / max(1.0, height);
-  let jitter = vec2f(rand(), rand()) - vec2f(0.5);
-  let ndc = (vec2f(in.pos.xy) + jitter) / vec2f(width, height) * 2.0 - vec2f(1.0);
+  let aspect = w / max(1.0, h);
+  let ndc = (px + vec2f(rand(), rand())) / vec2f(w, h) * 2.0 - vec2f(1.0);
   let scale = tan(U.p2.z * 0.5);
   let dir = normalize(fwd + x_axis * ndc.x * scale * aspect - y_axis * ndc.y * scale);
+  var task: RayTask;
+  task.o = vec4f(U.cam_pos.xyz, 0.0);  // bounce 0
+  task.d = vec4f(dir, 1.0);            // alive
+  task.t = vec4f(1.0, 1.0, 1.0, 0.0);  // throughput = 1
+  task.r = vec4f(0.0);                 // radiance = 0
+  return task;
+}
 
-  var radiance = integrate(U.cam_pos.xyz, dir);
-  radiance = min(radiance, vec3f(1e3));
+// Reset the queue + accumulator (one invocation per pixel).
+@compute @workgroup_size(${WORKGROUP}, ${WORKGROUP}, 1)
+fn cs_clear(@builtin(global_invocation_id) gid: vec3u) {
+  let w = u32(U.res.x);
+  let h = u32(U.res.y);
+  if (gid.x >= w || gid.y >= h) { return; }
+  let pixel = gid.x + gid.y * w;
+  accum[pixel] = vec4f(0.0);
+  var task: RayTask;       // alive = 0 → a fresh primary is spawned on first trace
+  task.o = vec4f(0.0);
+  task.d = vec4f(0.0);
+  task.t = vec4f(0.0);
+  task.r = vec4f(0.0);
+  tasks[pixel] = task;
+  if (pixel == 0u) { atomicStore(&counter, 0u); }
+}
 
-  let prev = textureLoad(history, vec2i(px), 0).xyz;
-  let blended = mix(prev, radiance, 1.0 / (frame_index + 1.0));
-  return vec4f(blended, 1.0);
+// Trace each live ray exactly once: shade it, then write the continuation back
+// into the same slot or finalize the path into the accumulator.
+@compute @workgroup_size(${WORKGROUP}, ${WORKGROUP}, 1)
+fn cs_trace(@builtin(global_invocation_id) gid: vec3u) {
+  let w = u32(U.res.x);
+  let h = u32(U.res.y);
+  if (gid.x >= w || gid.y >= h) { return; }
+  let pixel = gid.x + gid.y * w;
+  // Seed per pixel + run so every trace draws fresh, decorrelated randoms.
+  rng_state = pcg(pixel * 9781u + u32(U.frame.x) * 26699u + u32(U.frame.z * 4294967295.0));
+
+  var task = tasks[pixel];
+  // A dead slot starts a new sample with a fresh jittered primary ray.
+  if (task.d.w < 0.5) {
+    task = primary_ray(vec2f(f32(gid.x), f32(gid.y)), f32(w), f32(h));
+  }
+
+  var origin = task.o.xyz;
+  var dir = task.d.xyz;
+  var bounce = u32(task.o.w);
+  var throughput = task.t.xyz;
+  var radiance = task.r.xyz;
+
+  let m = get_material();
+  let depth = u32(U.p2.y);
+  var alive = true;
+
+  let hit = trace(origin, dir);
+  if (!hit.hit) {
+    radiance = radiance + throughput * sample_environment(dir);
+    alive = false;
+  } else {
+    let normal = hit.normal;
+    let view = -dir;
+    radiance = radiance + throughput * m.emission;
+    let samp = disney_sample(m, normal, view);
+    if (samp.pdf <= 0.0) {
+      alive = false;
+    } else {
+      let f = disney_eval(m, normal, view, samp.light);
+      throughput = clamp(throughput * f * abs(dot(normal, samp.light)) / samp.pdf, vec3f(0.0), vec3f(1.0));
+      bounce = bounce + 1u;
+      if (bounce >= depth) {
+        alive = false;
+      } else if (bounce > 3u) {
+        // Russian roulette after a few bounces keeps deep paths cheap.
+        let q = max(throughput.x, max(throughput.y, throughput.z));
+        if (rand() > q) {
+          alive = false;
+        } else {
+          throughput = throughput / max(EPS, q);
+        }
+      }
+      if (alive) {
+        origin = hit.position + face_normal(normal, samp.light) * EPS;
+        dir = samp.light;
+      }
+    }
+  }
+
+  if (alive) {
+    // Park the continuation ray for a later run/frame.
+    task.o = vec4f(origin, f32(bounce));
+    task.d = vec4f(dir, 1.0);
+    task.t = vec4f(throughput, 0.0);
+    task.r = vec4f(radiance, 0.0);
+    tasks[pixel] = task;
+  } else {
+    // Path complete — fold its radiance into the running per-pixel average.
+    let c = min(radiance, vec3f(1e3));
+    accum[pixel] = accum[pixel] + vec4f(c, 1.0);
+    task.d.w = 0.0; // mark dead → respawn a primary next visit
+    tasks[pixel] = task;
+    atomicAdd(&counter, 1u);
+  }
 }
 `
 
 const PRESENT_WGSL = /* wgsl */ `
-@group(0) @binding(0) var src: texture_2d<f32>;
+struct Uniforms {
+  cam_pos: vec4f,
+  cam_fwd: vec4f,
+  cam_up: vec4f,
+  frame: vec4f,
+  emission: vec4f,
+  color: vec4f,
+  absorption: vec4f,
+  p0: vec4f,
+  p1: vec4f,
+  p2: vec4f,
+  env_top: vec4f,
+  env_bot: vec4f,
+  res: vec4f,
+}
+
+@group(0) @binding(0) var<uniform> U: Uniforms;
+@group(0) @binding(1) var<storage, read> accum: array<vec4f>;
 
 struct VsOut { @builtin(position) pos: vec4f }
 
@@ -830,7 +944,11 @@ fn linear_to_srgb(c: vec3f) -> vec3f {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4f {
-  let hdr = textureLoad(src, vec2i(i32(in.pos.x), i32(in.pos.y)), 0).xyz;
+  let w = u32(U.res.x);
+  let px = vec2u(u32(in.pos.x), u32(in.pos.y));
+  let pixel = px.x + px.y * w;
+  let a = accum[pixel];
+  let hdr = a.xyz / max(1.0, a.w);
   return vec4f(linear_to_srgb(aces(hdr)), 1.0);
 }
 `

@@ -4,9 +4,11 @@
 // plugin and reimplemented on WebGPU (see `ui_webtix_tracer.ts`) with a packed
 // storage-buffer BVH instead of the original RGB-texture buffer
 // (`ui_webtix_bvh.ts`). It owns an orbit viewport, a Disney-material sidebar and
-// progressive accumulation: each frame traces one more sample and composites the
-// converging image with `draw_texture`, asking the adaptive renderer to keep
-// ticking until it reaches the sample budget — then it idles.
+// progressive accumulation: the tracer is a wavefront integrator that traces
+// each pixel's ray a bounded number of times per frame and spills deeper bounces
+// into later frames, so the converging image (composited with `draw_texture`)
+// refines smoothly. The panel asks the adaptive renderer to keep ticking until
+// the average sample budget is reached — then it idles.
 
 import { pack_color } from '../ui_theme'
 import type { theme_definition } from '../ui_types'
