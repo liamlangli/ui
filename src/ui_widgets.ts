@@ -853,16 +853,8 @@ export class ui_widgets {
     const bg = open ? this.color('active') : hover ? this.color('hover') : this.color('panel')
     this.ui.fill_round_rect(x, y, w, h, w_radius * scale, bg)
     this.ui.stroke_round_rect(x, y, w, h, w_radius * scale, 1, open ? this.color('accent') : this.color('border'))
-    this.draw_checkerboard(x + 1, y + 1, Math.max(0, w - 2), Math.max(0, h - 2), 4 * scale)
-    this.ui.fill_rect(x + 1, y + 1, Math.max(0, w - 2), Math.max(0, h - 2), pack_rgba(current.r, current.g, current.b, current.a))
-
-    const swatch_w = Math.min(24 * scale, Math.max(12 * scale, h - 4 * scale))
-    const swatch_r = Math.max(0, w_radius * scale - 1)
-    this.ui.fill_round_rect(x + 2 * scale, y + 2 * scale, swatch_w, Math.max(0, h - 4 * scale), swatch_r, pack_rgba(current.r, current.g, current.b, current.a))
-    this.ui.stroke_round_rect(x + 2 * scale, y + 2 * scale, swatch_w, Math.max(0, h - 4 * scale), swatch_r, 1, this.color('border_strong'))
     const label = options?.label ?? 'Color'
-    const text_x = x + swatch_w + 8 * scale
-    this.ui.draw_text(text_x, this.ui.text_v_center_y(y, h, w_font_px * scale), label, w_font_px * scale, this.color('text'))
+    this.draw_color_bar(x + 1, y + 1, Math.max(0, w - 2), Math.max(0, h - 2), Math.max(0, w_radius * scale - 1), current, label, w_font_px * scale, scale)
 
     if (open) {
       this.pending_color_picker = {
@@ -1216,9 +1208,11 @@ export class ui_widgets {
     this.ui.draw_text(px + pad, this.ui.text_v_center_y(title_y, 12 * scale, 7 * scale), 'Color Picker', 7 * scale, this.color('text_dim'))
 
     const preview_y = title_y + 14 * scale
-    this.draw_checkerboard(px + pad, preview_y, placement.w - pad * 2, preview_h, 4 * scale)
-    this.ui.fill_rect(px + pad, preview_y, placement.w - pad * 2, preview_h, pack_rgba(popup.color_ref.r, popup.color_ref.g, popup.color_ref.b, popup.color_ref.a))
-    this.ui.stroke_rect(px + pad, preview_y, placement.w - pad * 2, preview_h, 1, this.color('border_strong'))
+    const preview_x = px + pad
+    const preview_w = placement.w - pad * 2
+    const preview_r = Math.min(w_radius * scale, preview_h * 0.5)
+    this.draw_color_bar(preview_x, preview_y, preview_w, preview_h, preview_r, popup.color_ref, this.color_hex_label(popup.color_ref), 9 * scale, scale)
+    this.ui.stroke_round_rect(preview_x, preview_y, preview_w, preview_h, preview_r, 1, this.color('border_strong'))
 
     const square_x = px + pad
     const square_y = preview_y + preview_h + 8 * scale
@@ -1409,6 +1403,41 @@ export class ui_widgets {
         this.ui.fill_rect(x + col * cell, y + row * cell, Math.min(cell, x + w - (x + col * cell)), Math.min(cell, y + h - (y + row * cell)), (row + col) % 2 === 0 ? dark : light)
       }
     }
+  }
+
+  private draw_color_bar(x: number, y: number, w: number, h: number, radius: number, color: ui_color_rgba, label: string, font_px: number, scale: number): void {
+    if (w <= 0 || h <= 0) return
+    const normalized = this.normalize_color(color)
+    const main = pack_rgba(normalized.r, normalized.g, normalized.b, normalized.a)
+    this.ui.fill_round_rect(x, y, w, h, radius, main)
+
+    const text = label || this.color_hex_label(normalized)
+    const pad_x = 6 * scale
+    const text_x = x + pad_x
+    const text_y = this.ui.text_v_center_y(y, h, font_px)
+    const shadow_offset = Math.max(0.5, 0.75 * scale)
+    this.ui.push_clip(x + pad_x, y, Math.max(0, w - pad_x * 2), h)
+    this.ui.draw_text_msdf(text_x, text_y, text, font_px, pack_rgba(normalized.r, normalized.g, normalized.b, 1), {
+      weight: 0.1 * scale,
+      shadow: {
+        dx: shadow_offset,
+        dy: shadow_offset,
+        color: this.inverse_color(normalized),
+        weight: 0.15 * scale,
+      },
+    })
+    this.ui.pop_clip()
+  }
+
+  private inverse_color(color: ui_color_rgba): number {
+    return pack_rgba(1 - color.r, 1 - color.g, 1 - color.b, 1)
+  }
+
+  private color_hex_label(color: ui_color_rgba): string {
+    const normalized = this.normalize_color(color)
+    const channel = (value: number) => Math.round(clamp_01(value) * 255).toString(16).padStart(2, '0').toUpperCase()
+    const rgb = `#${channel(normalized.r)}${channel(normalized.g)}${channel(normalized.b)}`
+    return normalized.a < 0.995 ? `${rgb}${channel(normalized.a)}` : rgb
   }
 
   private draw_hue_saturation_square(x: number, y: number, w: number, h: number, value: number): void {

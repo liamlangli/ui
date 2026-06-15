@@ -10,11 +10,14 @@ export interface ui_draw_command {
   vertex_offset: number
   vertex_count: number
   texture_id: number
+  kind?: ui_draw_command_kind
   clip_x: number
   clip_y: number
   clip_w: number
   clip_h: number
 }
+
+export type ui_draw_command_kind = 'image' | 'sdf' | 'msdf'
 
 /**
  * A retained slice of geometry captured between {@link ui_renderer.begin_layer}
@@ -78,6 +81,24 @@ export const FONT_ZH = 'FONT_ZH' as const
 export const FONT_MONO = 'FONT_MONO' as const
 
 export type ui_font_primitive = typeof FONT_MAIN | typeof FONT_ZH | typeof FONT_MONO
+export type ui_text_msdf_value = number | ((ch: string, index: number) => number)
+
+export interface ui_text_msdf_options {
+  font?: ui_font_primitive
+  /** Atlas distance range in texels. The bundled atlases use 5 by default. */
+  range?: ui_text_msdf_value
+  /** Positive values embolden, negative values lighten, in screen pixels. */
+  weight?: ui_text_msdf_value
+  /** Edge ramp width in screen pixels. Values above 1 soften the glyph. */
+  softness?: ui_text_msdf_value
+  shadow?: {
+    dx: number
+    dy: number
+    color: number
+    weight?: ui_text_msdf_value
+    softness?: ui_text_msdf_value
+  }
+}
 
 /**
  * Controls when `flush()` issues GPU work.
@@ -161,7 +182,7 @@ type data_texture = {
   filter: ui_texture_filter
 }
 
-const vertex_stride = 20
+const vertex_stride = 36
 const default_font_scale = 1
 const default_round_rect_feather = 1
 const circle_min_sector_count = 12
@@ -524,6 +545,7 @@ export class ui_renderer {
   private screen_buffer: GPUBuffer | null = null
   private pipeline_image: GPURenderPipeline | null = null
   private pipeline_sdf: GPURenderPipeline | null = null
+  private pipeline_msdf: GPURenderPipeline | null = null
   private color_panel_pipeline: GPURenderPipeline | null = null
   private bind_group_white: GPUBindGroup | null = null
   private readonly font_bind_groups = new Map<number, GPUBindGroup>()
@@ -629,6 +651,7 @@ export class ui_renderer {
         { shaderLocation: 0, offset: 0, format: 'float32x2' },
         { shaderLocation: 1, offset: 8, format: 'float32x2' },
         { shaderLocation: 2, offset: 16, format: 'unorm8x4' },
+        { shaderLocation: 3, offset: 20, format: 'float32x4' },
       ],
     }
     const color_target: GPUColorTargetState = {
@@ -650,6 +673,13 @@ export class ui_renderer {
       layout: pipeline_layout,
       vertex: { module: shader_module, entryPoint: 'vs_main', buffers: [vertex] },
       fragment: { module: shader_module, entryPoint: 'fs_sdf', targets: [color_target] },
+      primitive: { topology: 'triangle-list' },
+    })
+    this.pipeline_msdf = this.device.createRenderPipeline({
+      label: 'ui.pipeline.msdf',
+      layout: pipeline_layout,
+      vertex: { module: shader_module, entryPoint: 'vs_main', buffers: [vertex] },
+      fragment: { module: shader_module, entryPoint: 'fs_msdf_var', targets: [color_target] },
       primitive: { topology: 'triangle-list' },
     })
     this.color_panel_pipeline = this.device.createRenderPipeline({
@@ -737,6 +767,7 @@ export class ui_renderer {
         { shaderLocation: 0, offset: 0, format: 'float32x2' },
         { shaderLocation: 1, offset: 8, format: 'float32x2' },
         { shaderLocation: 2, offset: 16, format: 'unorm8x4' },
+        { shaderLocation: 3, offset: 20, format: 'float32x4' },
       ],
     }
     const color_target: GPUColorTargetState = {
@@ -758,6 +789,13 @@ export class ui_renderer {
       layout: pipeline_layout,
       vertex: { module: shader_module, entryPoint: 'vs_main', buffers: [vertex] },
       fragment: { module: shader_module, entryPoint: 'fs_sdf', targets: [color_target] },
+      primitive: { topology: 'triangle-list' },
+    })
+    this.pipeline_msdf = this.device.createRenderPipeline({
+      label: 'ui.pipeline.msdf',
+      layout: pipeline_layout,
+      vertex: { module: shader_module, entryPoint: 'vs_main', buffers: [vertex] },
+      fragment: { module: shader_module, entryPoint: 'fs_msdf_var', targets: [color_target] },
       primitive: { topology: 'triangle-list' },
     })
     this.color_panel_pipeline = this.device.createRenderPipeline({
@@ -1017,6 +1055,55 @@ export class ui_renderer {
     this.push_quad(x, y, x + w, y + h, 0, 0, 1, 1, 0xffffffff)
   }
 
+  draw_texture_round_rect(texture_id: number, x: number, y: number, w: number, h: number, radius: number, options?: { filter?: ui_texture_filter }): void {
+    if (w <= 0 || h <= 0) return
+    if (radius <= 0) {
+      this.draw_texture(texture_id, x, y, w, h, options)
+      return
+    }
+    if (options?.filter) {
+      const entry = this.data_textures.get(texture_id)
+      if (entry && entry.filter !== options.filter) {
+        entry.filter = options.filter
+        this.extra_bind_groups.set(texture_id, this.create_data_texture_bind_group(texture_id, entry.texture, entry.filter))
+      }
+    }
+    const pts = this.round_rect_points
+    const r = Math.min(Math.max(0, radius), Math.min(w, h) * 0.5)
+    const n = compact_closed_polyline_points(pts, build_round_rect_points(pts, x, y, w, h, r, r, r, r))
+    if (n < 3) return
+
+    this.current_texture_id = texture_id
+    const cx = x + w * 0.5
+    const cy = y + h * 0.5
+    const cu = 0.5
+    const cv = 0.5
+    const inv_w = 1 / w
+    const inv_h = 1 / h
+    for (let i = 0; i < n; i += 1) {
+      const j = (i + 1) % n
+      const x1 = pts[i * 2]!
+      const y1 = pts[i * 2 + 1]!
+      const x2 = pts[j * 2]!
+      const y2 = pts[j * 2 + 1]!
+      this.push_tri_textured(
+        cx,
+        cy,
+        cu,
+        cv,
+        x1,
+        y1,
+        (x1 - x) * inv_w,
+        (y1 - y) * inv_h,
+        x2,
+        y2,
+        (x2 - x) * inv_w,
+        (y2 - y) * inv_h,
+        0xffffffff,
+      )
+    }
+  }
+
   draw_texture_region(texture_id: number, x: number, y: number, w: number, h: number, u0: number, v0: number, u1: number, v1: number, color = 0xffffffff): void {
     if (w <= 0 || h <= 0) return
     this.current_texture_id = texture_id
@@ -1185,6 +1272,7 @@ export class ui_renderer {
         vertex_offset: base + c.vertex_offset,
         vertex_count: c.vertex_count,
         texture_id: c.texture_id,
+        kind: c.kind,
         clip_x: Math.floor(cc.x),
         clip_y: Math.floor(cc.y),
         clip_w: Math.ceil(cc.w),
@@ -1195,6 +1283,7 @@ export class ui_renderer {
         prev &&
         prev.vertex_offset + prev.vertex_count === cmd.vertex_offset &&
         prev.texture_id === cmd.texture_id &&
+        prev.kind === cmd.kind &&
         prev.clip_x === cmd.clip_x &&
         prev.clip_y === cmd.clip_y &&
         prev.clip_w === cmd.clip_w &&
@@ -1605,6 +1694,104 @@ export class ui_renderer {
     }
   }
 
+  draw_text_msdf(x: number, y: number, text: string, font_px: number, rgba: number, options?: ui_text_msdf_options): void {
+    if (!text || !this.font_atlases.size) return
+    const font_type = options?.font ?? FONT_MAIN
+    if (options?.shadow) {
+      const sh = options.shadow
+      this.draw_text_msdf_run(
+        x + sh.dx,
+        y + sh.dy,
+        text,
+        font_px,
+        sh.color,
+        font_type,
+        options.range ?? 5,
+        sh.weight ?? options.weight ?? 0,
+        sh.softness ?? options.softness ?? 1,
+      )
+    }
+    this.draw_text_msdf_run(
+      x,
+      y,
+      text,
+      font_px,
+      rgba,
+      font_type,
+      options?.range ?? 5,
+      options?.weight ?? 0,
+      options?.softness ?? 1,
+    )
+  }
+
+  private draw_text_msdf_run(
+    x: number,
+    y: number,
+    text: string,
+    font_px: number,
+    rgba: number,
+    font_type: ui_font_primitive,
+    range: ui_text_msdf_value,
+    weight: ui_text_msdf_value,
+    softness: ui_text_msdf_value,
+  ): void {
+    const clip = this.current_clip()
+    if (x >= clip.x + clip.w || y >= clip.y + clip.h) return
+    if (text.indexOf('\n') < 0 && y + this.text_line_height(font_px, font_type) <= clip.y) return
+    const effective_font_px = font_px * default_font_scale
+    const primary = this.font_atlases.get(font_type) ?? this.font_atlases.get(FONT_MAIN)
+    let cx = x
+    let cy = y
+    let glyph_index = 0
+    let baseline_y = primary ? cy + primary.baseline * (effective_font_px / primary.font_size) : cy
+    for (const ch of text) {
+      if (ch === '\n') {
+        cx = x
+        cy += this.text_line_height(font_px, font_type)
+        baseline_y = primary ? cy + primary.baseline * (effective_font_px / primary.font_size) : cy
+        continue
+      }
+      const char_index = glyph_index
+      glyph_index += 1
+      const code = ch.codePointAt(0) ?? 32
+      const font = this.font_for_codepoint(code, font_type)
+      if (!font) continue
+      const glyph = font.atlas.glyphs.get(code) ?? font.atlas.glyphs.get(32)
+      if (!glyph) continue
+      const scale = effective_font_px / font.atlas.font_size
+      if (glyph.width <= 0 || glyph.height <= 0) {
+        cx += glyph.x_advance * scale
+        continue
+      }
+      const inv_w = 1 / font.atlas.width
+      const inv_h = 1 / font.atlas.height
+      const x0 = cx + glyph.x_offset * scale
+      const y0 = baseline_y - (font.atlas.baseline - glyph.y_offset) * scale
+      const x1 = x0 + glyph.width * scale
+      const y1 = y0 + glyph.height * scale
+      this.current_texture_id = font.texture_id
+      this.push_quad_msdf(
+        x0,
+        y0,
+        x1,
+        y1,
+        glyph.atlas_x * inv_w,
+        glyph.atlas_y * inv_h,
+        (glyph.atlas_x + glyph.width) * inv_w,
+        (glyph.atlas_y + glyph.height) * inv_h,
+        rgba,
+        this.resolve_text_msdf_value(range, ch, char_index),
+        this.resolve_text_msdf_value(weight, ch, char_index),
+        this.resolve_text_msdf_value(softness, ch, char_index),
+      )
+      cx += glyph.x_advance * scale
+    }
+  }
+
+  private resolve_text_msdf_value(value: ui_text_msdf_value, ch: string, index: number): number {
+    return typeof value === 'function' ? value(ch, index) : value
+  }
+
   wrap_text(text: string, font_px: number, max_w: number, font_type: ui_font_primitive = FONT_MAIN): string[] {
     const normalized = text.replace(/\r/g, '')
     if (!normalized) return ['']
@@ -1708,7 +1895,7 @@ export class ui_renderer {
   }
 
   flush(clear_color: GPUColorDict): void {
-    if (!this.device || !this.context || !this.pipeline_image || !this.pipeline_sdf || !this.bind_group_white) return
+    if (!this.device || !this.context || !this.pipeline_image || !this.pipeline_sdf || !this.pipeline_msdf || !this.bind_group_white) return
     const vertex_byte_length = this.vertex_count * vertex_stride
     const byte_length = Math.max(vertex_byte_length, vertex_stride)
     const should_render = this.render_mode_ !== 'adaptive' || this.pending_render_frames > 0
@@ -1745,7 +1932,7 @@ export class ui_renderer {
   }
 
   render(pass: GPURenderPassEncoder): void {
-    if (!this.device || !this.pipeline_image || !this.pipeline_sdf || !this.bind_group_white) return
+    if (!this.device || !this.pipeline_image || !this.pipeline_sdf || !this.pipeline_msdf || !this.bind_group_white) return
     const vertex_byte_length = this.vertex_count * vertex_stride
     const byte_length = Math.max(vertex_byte_length, vertex_stride)
     this.ensure_vertex_buffer(byte_length)
@@ -1772,7 +1959,7 @@ export class ui_renderer {
    * how the icon module bakes a vector-drawn icon atlas into a single texture.
    */
   render_to_texture(target: GPUTexture, width: number, height: number, draw: () => void, clear?: GPUColorDict): void {
-    if (!this.device || !this.screen_buffer || !this.pipeline_image || !this.pipeline_sdf || !this.bind_group_white) return
+    if (!this.device || !this.screen_buffer || !this.pipeline_image || !this.pipeline_sdf || !this.pipeline_msdf || !this.bind_group_white) return
     const w = Math.max(1, Math.floor(width))
     const h = Math.max(1, Math.floor(height))
 
@@ -1850,7 +2037,7 @@ export class ui_renderer {
   }
 
   private encode_render_pass(pass: GPURenderPassEncoder): void {
-    if (!this.vertex_buffer || !this.pipeline_image || !this.pipeline_sdf || !this.bind_group_white) return
+    if (!this.vertex_buffer || !this.pipeline_image || !this.pipeline_sdf || !this.pipeline_msdf || !this.bind_group_white) return
     pass.setVertexBuffer(0, this.vertex_buffer)
     for (const cmd of this.commands) {
       if (cmd.clip_w <= 0 || cmd.clip_h <= 0) continue
@@ -1858,7 +2045,10 @@ export class ui_renderer {
       const font_bind_group = this.font_bind_groups.get(cmd.texture_id)
       const bind_group = font_bind_group ?? (cmd.texture_id === white_texture_id ? this.bind_group_white : this.extra_bind_groups.get(cmd.texture_id))
       if (!bind_group) continue
-      if (font_bind_group) {
+      if (font_bind_group && cmd.kind === 'msdf') {
+        pass.setPipeline(this.pipeline_msdf)
+        pass.setBindGroup(0, bind_group)
+      } else if (font_bind_group) {
         pass.setPipeline(this.pipeline_sdf)
         pass.setBindGroup(0, bind_group)
       } else {
@@ -2132,6 +2322,10 @@ export class ui_renderer {
   }
 
   private push_vertex(x: number, y: number, u: number, v: number, color: number): boolean {
+    return this.push_vertex_params(x, y, u, v, color, 0, 0, 0, 0)
+  }
+
+  private push_vertex_params(x: number, y: number, u: number, v: number, color: number, p0: number, p1: number, p2: number, p3: number): boolean {
     if ((this.vertex_count + 1) * vertex_stride > this.vertex_data.byteLength) {
       this.need_enlarge = true
       return false
@@ -2142,6 +2336,10 @@ export class ui_renderer {
     this.view.setFloat32(offset + 8, u, true)
     this.view.setFloat32(offset + 12, v, true)
     this.view.setUint32(offset + 16, color, true)
+    this.view.setFloat32(offset + 20, p0, true)
+    this.view.setFloat32(offset + 24, p1, true)
+    this.view.setFloat32(offset + 28, p2, true)
+    this.view.setFloat32(offset + 32, p3, true)
     this.vertex_count += 1
     return true
   }
@@ -2218,6 +2416,80 @@ export class ui_renderer {
     this.emit_command(base, 3)
   }
 
+  private push_tri_textured(
+    x0: number,
+    y0: number,
+    u0: number,
+    v0: number,
+    x1: number,
+    y1: number,
+    u1: number,
+    v1: number,
+    x2: number,
+    y2: number,
+    u2: number,
+    v2: number,
+    color: number,
+  ): void {
+    const clip = this.current_clip()
+    const min_x = Math.min(x0, x1, x2)
+    const min_y = Math.min(y0, y1, y2)
+    const max_x = Math.max(x0, x1, x2)
+    const max_y = Math.max(y0, y1, y2)
+    if (max_x <= clip.x || max_y <= clip.y || min_x >= clip.x + clip.w || min_y >= clip.y + clip.h) return
+    const base = this.vertex_count
+    if (
+      !this.push_vertex(x0, y0, u0, v0, color) ||
+      !this.push_vertex(x1, y1, u1, v1, color) ||
+      !this.push_vertex(x2, y2, u2, v2, color)
+    ) {
+      this.vertex_count = base
+      return
+    }
+    this.emit_command(base, 3)
+  }
+
+  private push_quad_msdf(
+    x0: number,
+    y0: number,
+    x1: number,
+    y1: number,
+    u0: number,
+    v0: number,
+    u1: number,
+    v1: number,
+    color: number,
+    range: number,
+    weight: number,
+    softness: number,
+  ): void {
+    const clip = this.current_clip()
+    const cx0 = Math.max(x0, clip.x)
+    const cy0 = Math.max(y0, clip.y)
+    const cx1 = Math.min(x1, clip.x + clip.w)
+    const cy1 = Math.min(y1, clip.y + clip.h)
+    if (cx1 <= cx0 || cy1 <= cy0) return
+    const inv_w = 1 / Math.max(1e-6, x1 - x0)
+    const inv_h = 1 / Math.max(1e-6, y1 - y0)
+    const cu0 = u0 + (u1 - u0) * ((cx0 - x0) * inv_w)
+    const cv0 = v0 + (v1 - v0) * ((cy0 - y0) * inv_h)
+    const cu1 = u0 + (u1 - u0) * ((cx1 - x0) * inv_w)
+    const cv1 = v0 + (v1 - v0) * ((cy1 - y0) * inv_h)
+    const base = this.vertex_count
+    if (
+      !this.push_vertex_params(cx0, cy0, cu0, cv0, color, range, weight, softness, 0) ||
+      !this.push_vertex_params(cx1, cy0, cu1, cv0, color, range, weight, softness, 0) ||
+      !this.push_vertex_params(cx1, cy1, cu1, cv1, color, range, weight, softness, 0) ||
+      !this.push_vertex_params(cx0, cy0, cu0, cv0, color, range, weight, softness, 0) ||
+      !this.push_vertex_params(cx1, cy1, cu1, cv1, color, range, weight, softness, 0) ||
+      !this.push_vertex_params(cx0, cy1, cu0, cv1, color, range, weight, softness, 0)
+    ) {
+      this.vertex_count = base
+      return
+    }
+    this.emit_command(base, 6, 'msdf')
+  }
+
   private push_quad(x0: number, y0: number, x1: number, y1: number, u0: number, v0: number, u1: number, v1: number, color: number): void {
     const clip = this.current_clip()
     const cx0 = Math.max(x0, clip.x)
@@ -2265,13 +2537,14 @@ export class ui_renderer {
     this.emit_command(base, 3)
   }
 
-  private emit_command(vertex_offset: number, vertex_count: number): void {
+  private emit_command(vertex_offset: number, vertex_count: number, kind: ui_draw_command_kind = 'image'): void {
     const clip = this.current_clip()
     if (clip.w <= 0 || clip.h <= 0) return
     const cmd: ui_draw_command = {
       vertex_offset,
       vertex_count,
       texture_id: this.current_texture_id,
+      kind,
       clip_x: Math.floor(clip.x),
       clip_y: Math.floor(clip.y),
       clip_w: Math.ceil(clip.w),
@@ -2283,6 +2556,7 @@ export class ui_renderer {
       prev &&
       prev.vertex_offset + prev.vertex_count === cmd.vertex_offset &&
       prev.texture_id === cmd.texture_id &&
+      prev.kind === cmd.kind &&
       prev.clip_x === cmd.clip_x &&
       prev.clip_y === cmd.clip_y &&
       prev.clip_w === cmd.clip_w &&
