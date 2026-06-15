@@ -11,7 +11,7 @@ It bundles the pieces needed to build a browser-native editor UI on top of WebGP
 - **`dock_system` / `window_system`** — ready-to-use workspace systems built on `dock`/`window`: a docked split workspace and a floating desktop-style window manager, both part of core so third-party projects can build directly on them. See [Workspace systems](#workspace-systems).
 - **`theme`** — palette/CSS-variable theming with `load_theme`, `apply_theme`, `theme_color`, `theme_rgba`, `pack_color`, and `hex_to_normalized_rgba`.
 - **`app_registry`** — installable apps described by a JSON manifest: install/uninstall, persistence, and update checks against each app's `shipping_path`. See [`dashboard`](#dashboard--full-screen-app-launcher).
-- **`plugins`** — opt-in, higher-level drop-in components (`file_browser`, `graph`, `node_graph`, `im_dialog`, `code_editor`, `dashboard`, `avatar_generator`, `material_audit`) packaged so other projects can reuse them piecemeal. See [Plugins](#plugins).
+- **`plugins`** — opt-in, higher-level drop-in components (`file_browser`, `graph`, `node_graph`, `im_dialog`, `code_editor`, `dashboard`, `avatar_generator`, `material_audit`, `webtix` WebGPU path tracer) packaged so other projects can reuse them piecemeal. See [Plugins](#plugins).
 
 ## Live preview
 
@@ -459,6 +459,47 @@ if (ev.loaded) console.log(`${ev.loaded.slot} map: ${ev.loaded.name} (${ev.loade
 The wheel-zoom / two-finger pan + pinch handling lives in core as
 `pan_zoom_apply` / `pan_zoom_drag` (`@liamlangli/ui` → `ui_pan_zoom`); the
 `graph` and `node_graph` canvases run on the same module.
+
+### `webtix` — WebGPU path tracer
+
+The [`webtix`](https://github.com/liamlangli/webtix) path-tracing engine,
+migrated into the toolkit as a plugin and **reimplemented from WebGL2 to
+WebGPU**. The original ran the integrator in a GLSL fragment shader and read the
+BVH + geometry out of RGB float *textures* addressed with `fract()`/`floor()`
+math; this version walks a packed **storage-buffer BVH** (`array<bvh_node>`,
+32 bytes/node, O(1) random access — no texel addressing) from a WGSL shader and
+accumulates progressively into an rgba16float ping-pong, presenting a tonemapped
+texture the panel composites with `draw_texture`.
+
+It shares the host `GPUDevice` (no second WebGPU context), ships built-in
+procedural scenes (sphere, torus, box, spheres + ground), an orbit viewport and
+a live Disney-material sidebar (metallic / roughness / specular / transmission /
+subsurface / clearcoat / IOR / base colour). Each frame traces one more sample
+and asks the adaptive renderer to keep ticking until it hits the sample budget,
+then idles — any camera, material or scene change restarts accumulation.
+
+```ts
+import { webtix, create_webtix_state } from '@liamlangli/ui/plugins'
+
+const pt = create_webtix_state('sphere')
+
+// each frame, between renderer.begin_frame() and renderer.flush():
+webtix(renderer, widgets, theme, input, x, y, w, h, pt, { scale })
+```
+
+The BVH builder and procedural geometry are also exported standalone
+(`build_bvh`, `build_scene`, `make_sphere`, …) alongside the GPU engine
+(`webtix_tracer`), so a host can trace its own meshes:
+
+```ts
+import { build_bvh, webtix_tracer, default_material } from '@liamlangli/ui/plugins'
+
+const bvh = build_bvh(positions, indices) // packed storage-buffer BVH
+const tracer = new webtix_tracer()
+tracer.init(device)
+tracer.set_scene(bvh, positions, normals)
+const texture = tracer.render_sample(w, h, { eye, target, fov, bounces: 5, material: default_material(), env_top, env_bottom, env_intensity: 1 })
+```
 
 ## Usage
 

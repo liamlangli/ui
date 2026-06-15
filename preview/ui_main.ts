@@ -366,6 +366,7 @@ interface demo_plugins {
   node_graph_nodes: node_graph_node[]
   terrain_graph_state: ReturnType<plugin_module['create_terrain_graph_state']>
   terrain_graph: terrain_graph
+  webtix_state: ReturnType<plugin_module['create_webtix_state']>
 }
 let plugins: demo_plugins | null = null
 
@@ -429,6 +430,7 @@ const VIEW_TABS: { id: string; title: string; win?: window_new_options }[] = [
   { id: 'asset_audit', title: 'Asset Audit', win: { w: 900, h: 560 } },
   { id: 'avatar', title: 'Avatar Generator', win: { w: 920, h: 600 } },
   { id: 'material_audit', title: 'Material Audit', win: { w: 760, h: 560 } },
+  { id: 'webtix', title: 'Path Tracer', win: { w: 900, h: 600 } },
 ]
 
 // Spawn or focus the Demo Editor app window.
@@ -559,6 +561,7 @@ function build_main_menu(mod: plugin_module): ui_main_menu {
           { id: 'asset_audit', label: 'Asset Audit' },
           { id: 'avatar', label: 'Avatar Generator' },
           { id: 'material_audit', label: 'Material Audit' },
+          { id: 'webtix', label: 'Path Tracer' },
           { id: 'about', label: 'About' },
         ],
       },
@@ -694,6 +697,7 @@ function init_plugins(mod: plugin_module): void {
     node_graph_state: mod.create_node_graph_state(),
     terrain_graph_state: mod.create_terrain_graph_state(),
     terrain_graph: mod.create_default_terrain_graph(),
+    webtix_state: mod.create_webtix_state(),
     node_graph_nodes: [
       mod.add_node('Input', 20, 40, { id: 'in', outputs: [{ label: 'Position', type: 'vec3' }, { label: 'UV', type: 'vec2' }] }),
       mod.add_node('Sample', 240, 60, { id: 'tex', inputs: [{ label: 'UV', type: 'vec2' }], outputs: [{ label: 'Color', type: 'color' }] }),
@@ -1068,6 +1072,9 @@ async function main(): Promise<void> {
           if (ev.loaded) append_console(`material audit: ${ev.loaded.slot} map ${ev.loaded.name} (${ev.loaded.width}×${ev.loaded.height})`, '#5fb878')
           break
         }
+        case 'webtix':
+          live.mod.webtix(renderer, widgets, theme, snapshot, px, py, pw, ph, live.webtix_state, { scale })
+          break
       }
       profiler.end()
     }
