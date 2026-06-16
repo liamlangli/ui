@@ -50,13 +50,6 @@
         <p><a href="https://caniuse.com/webgpu">Browser support →</a></p>
       </div>
     </div>
-    <script type="module">
-      if (!('gpu' in navigator)) {
-        document.getElementById('nogpu').style.display = 'grid'
-        document.getElementById('app').style.display = 'none'
-      } else {
-        import('./preview/ui_main.ts')
-      }
-    </script>
+    <script type="module" src="./preview/ui_boot.ts"></script>
   </body>
 </html>

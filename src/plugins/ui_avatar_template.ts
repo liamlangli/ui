@@ -33,7 +33,7 @@ interface template_gltf_node {
 
 type mat4 = Float64Array
 
-const TEMPLATE_BASE_URL = '/avatar_base/'
+const TEMPLATE_BASE_URL = `${import.meta.env.BASE_URL}avatar_base/`
 
 const TEMPLATE_FILES: Record<avatar_template_key, { gltf: string; externals: string[]; label: string }> = {
   male: {
