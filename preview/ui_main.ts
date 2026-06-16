@@ -372,6 +372,71 @@ let plugins: demo_plugins | null = null
 
 let dashboard_open = false
 let last_update_check = 0
+let last_update_toast_signature = ''
+
+type toast_kind = 'info' | 'success' | 'error'
+
+interface toast_message {
+  id: number
+  title: string
+  body: string
+  kind: toast_kind
+  created_at: number
+  ttl_ms: number
+}
+
+const toast_messages: toast_message[] = []
+let next_toast_id = 1
+
+function push_toast(title: string, body: string, kind: toast_kind = 'info', ttl_ms = 9000): void {
+  toast_messages.push({ id: next_toast_id++, title, body, kind, created_at: performance.now(), ttl_ms })
+  while (toast_messages.length > 3) toast_messages.shift()
+  active_renderer?.request_render()
+}
+
+function color_with_alpha(hex: string, alpha: string): string {
+  const raw = hex.trim().replace('#', '')
+  return `#${raw.slice(0, 6)}${alpha}`
+}
+
+function available_plugin_updates(): installed_app[] {
+  return registry.apps.filter((app) => app.update_available)
+}
+
+function notify_available_plugin_updates(): void {
+  const updates = available_plugin_updates()
+  if (updates.length === 0) return
+  const signature = updates
+    .map((app) => `${app.manifest.id}@${app.update_available?.version ?? ''}`)
+    .sort()
+    .join('|')
+  if (signature === last_update_toast_signature) return
+  last_update_toast_signature = signature
+  if (updates.length === 1) {
+    const app = updates[0]!
+    push_toast(
+      `${app.manifest.name} can be updated`,
+      `Version ${app.update_available?.version} is available. Use Help > Installed Plugins to update.`,
+    )
+    return
+  }
+  push_toast(
+    `${updates.length} plugins can be updated`,
+    'Use Help > Installed Plugins to review and apply available updates.',
+  )
+}
+
+function check_all_plugin_updates(options?: { toast?: boolean; toast_when_current?: boolean; log?: boolean }): void {
+  void registry.check_all_updates().then(() => {
+    const updates = available_plugin_updates()
+    if (options?.log) append_console(`checked ${registry.apps.filter((app) => app.shipping_path).length} plugin update channel(s)`, '#4c8bf5')
+    if (updates.length > 0) {
+      if (options?.toast !== false) notify_available_plugin_updates()
+      return
+    }
+    if (options?.toast_when_current) push_toast('Plugins are up to date', 'No installed plugin updates were found.', 'success', 5000)
+  })
+}
 
 // Show the full-screen dashboard; piggyback a (throttled) update sweep so
 // freshly published manifests show their badge without a manual check.
@@ -381,7 +446,7 @@ function open_dashboard(): void {
   const now = Date.now()
   if (now - last_update_check > 30_000) {
     last_update_check = now
-    void registry.check_all_updates()
+    check_all_plugin_updates({ toast: true })
   }
 }
 
@@ -401,10 +466,36 @@ function report_update_check(id: string): void {
   void registry.check_update(id).then((update) => {
     const app = registry.get(id)
     if (!app) return
-    if (update) append_console(`${app.manifest.name}: update v${update.version} available`, '#4c8bf5')
+    if (update) {
+      append_console(`${app.manifest.name}: update v${update.version} available`, '#4c8bf5')
+      notify_available_plugin_updates()
+    }
     else if (app.last_error) append_console(`${app.manifest.name}: update check failed — ${app.last_error}`, '#d9534f')
     else append_console(`${app.manifest.name}: up to date (v${app.manifest.version})`, '#5fb878')
   })
+}
+
+function apply_plugin_update(id: string): void {
+  void registry.apply_update(id).then((updated) => {
+    const app = registry.get(id)
+    if (!app) return
+    if (updated) {
+      append_console(`updated ${app.manifest.name} to v${app.manifest.version}`, '#5fb878')
+      push_toast(`${app.manifest.name} updated`, `Now running v${app.manifest.version}.`, 'success', 5000)
+      last_update_toast_signature = ''
+    } else if (app.last_error) {
+      append_console(`${app.manifest.name}: update failed — ${app.last_error}`, '#d9534f')
+      push_toast(`${app.manifest.name} update failed`, app.last_error, 'error', 7000)
+    } else {
+      append_console(`${app.manifest.name}: no update available`, '#9aa3b0')
+    }
+  })
+}
+
+function open_plugin_about(id: string): void {
+  const app = registry.get(id)
+  if (!app) return
+  windows.add_window(`plugin:${id}`, `${app.manifest.name} About`, { w: 460, h: 320 })
 }
 
 // Views that live as dock tabs inside the Demo Editor app window. Everything
@@ -458,6 +549,25 @@ function open_view_tab(id: string, title: string): void {
 // The Theme sub-menu is rebuilt each frame (to reflect the live selection), so
 // keep a reference to splice fresh children into.
 const theme_menu: ui_menu_node = { label: 'Theme', children: [] }
+const installed_plugins_menu: ui_menu_node = { label: 'Installed Plugins', children: [] }
+
+function refresh_installed_plugins_menu(): void {
+  installed_plugins_menu.children = registry.apps.map((app) => {
+    const pending = app.update_available ? ` -> v${app.update_available.version}` : ''
+    const status = app.checking ? ' (checking)' : pending
+    const children: ui_menu_node[] = [
+      { id: `plugin-about:${app.manifest.id}`, label: 'About' },
+      { id: `plugin-check:${app.manifest.id}`, label: app.checking ? 'Checking...' : 'Check for Updates', disabled: app.checking || !app.shipping_path },
+      app.update_available
+        ? { id: `plugin-update:${app.manifest.id}`, label: `Update to v${app.update_available.version}`, disabled: app.checking }
+        : { id: `plugin-update:${app.manifest.id}`, label: 'Update', disabled: true },
+    ]
+    return { label: `${app.manifest.name} v${app.manifest.version}${status}`, children }
+  })
+  if (installed_plugins_menu.children.length === 0) {
+    installed_plugins_menu.children = [{ label: 'No installed plugins', disabled: true }]
+  }
+}
 
 const compile_ctrl = {
   auto_compile: true,
@@ -578,6 +688,15 @@ function build_main_menu(mod: plugin_module): ui_main_menu {
     ],
   },
   theme_menu,
+  {
+    label: 'Help',
+    children: [
+      { id: 'about', label: 'About' },
+      { label: '', separator: true },
+      { id: 'plugin-check-all', label: 'Check All Plugin Updates' },
+      installed_plugins_menu,
+    ],
+  },
   ])
 }
 
@@ -586,6 +705,22 @@ function handle_menu(node: ui_menu_node): void {
   if (!id) return
   if (id === 'dashboard') {
     open_dashboard()
+    return
+  }
+  if (id === 'plugin-check-all') {
+    check_all_plugin_updates({ toast: true, toast_when_current: true, log: true })
+    return
+  }
+  if (id.startsWith('plugin-about:')) {
+    open_plugin_about(id.slice('plugin-about:'.length))
+    return
+  }
+  if (id.startsWith('plugin-check:')) {
+    report_update_check(id.slice('plugin-check:'.length))
+    return
+  }
+  if (id.startsWith('plugin-update:')) {
+    apply_plugin_update(id.slice('plugin-update:'.length))
     return
   }
   if (id.startsWith('theme:')) {
@@ -904,6 +1039,7 @@ async function main(): Promise<void> {
   const input = new input_collector(canvas, () => renderer.request_render())
   const resize = () => renderer.resize()
   window.addEventListener('resize', resize)
+  window.setTimeout(() => check_all_plugin_updates({ toast: true }), 800)
 
   function frame(): void {
     const frame_start_ms = performance.now()
@@ -983,6 +1119,13 @@ async function main(): Promise<void> {
       if (panel.tab.id.startsWith('app:')) {
         // A window for an app installed from a description JSON: show its manifest.
         render_installed_app(renderer, widgets, theme, panel.tab.id.slice('app:'.length), px, py, pw, ph, scale)
+        profiler.end()
+        return
+      }
+      if (panel.tab.id.startsWith('plugin:')) {
+        // Help > Installed Plugins opens manifest/update details for any plugin,
+        // including built-ins whose normal launch target is a feature view.
+        render_installed_app(renderer, widgets, theme, panel.tab.id.slice('plugin:'.length), px, py, pw, ph, scale)
         profiler.end()
         return
       }
@@ -1098,6 +1241,7 @@ async function main(): Promise<void> {
     profiler.begin('menu')
     if (plugins) {
       theme_menu.children = theme_ctrl.presets.map((preset, i) => ({ id: `theme:${i}`, label: preset.name, checked: i === theme_ctrl.index }))
+      refresh_installed_plugins_menu()
       const menu_event = plugins.main_menu.frame(renderer, theme, desktop_snapshot, bar_x, bar_y, bar_w, menu_h)
       profiler.end()
       if (menu_event.activated) handle_menu(menu_event.activated)
@@ -1121,15 +1265,12 @@ async function main(): Promise<void> {
       }
       if (ev.check_updates_requested) report_update_check(ev.check_updates_requested.manifest.id)
       if (ev.update_requested) {
-        const id = ev.update_requested.manifest.id
-        void registry.apply_update(id).then((updated) => {
-          const app = registry.get(id)
-          if (updated && app) append_console(`updated ${app.manifest.name} to v${app.manifest.version}`, '#5fb878')
-        })
+        apply_plugin_update(ev.update_requested.manifest.id)
       }
     }
 
     widgets.end_frame()
+    render_toasts(renderer, theme, safe.x, safe.y, safe.w, safe.h, scale)
     // Controller cursor rides above every window, menu and popup.
     gamepad_cursor_draw(renderer, theme, gamepad.active, gamepad_cursor)
     profiler.begin('flush')
@@ -1169,6 +1310,48 @@ function render_loading_panel(
   const label = 'Loading…'
   const font = 11.5 * scale
   renderer.draw_text(x + (w - renderer.text_width(label, font)) / 2, renderer.text_v_center_y(y, h, font), label, font, slot('text_dim'))
+}
+
+function render_toasts(
+  renderer: ui_renderer,
+  theme: theme_definition,
+  safe_x: number,
+  safe_y: number,
+  safe_w: number,
+  safe_h: number,
+  scale: number,
+): void {
+  const now = performance.now()
+  for (let i = toast_messages.length - 1; i >= 0; i -= 1) {
+    const toast = toast_messages[i]!
+    if (now - toast.created_at > toast.ttl_ms) toast_messages.splice(i, 1)
+  }
+  if (toast_messages.length === 0) return
+
+  const slot = (name: keyof theme_definition['palette']) => pack_color(theme.palette[name])
+  const toast_w = Math.min(360 * scale, Math.max(180 * scale, safe_w - 20 * scale))
+  const pad = 12 * scale
+  const gap = 8 * scale
+  const title_font = 12 * scale
+  const body_font = 10.5 * scale
+  const line_w = Math.max(20 * scale, toast_w - pad * 2 - 6 * scale)
+  let y = safe_y + safe_h - 10 * scale
+
+  for (let i = toast_messages.length - 1; i >= 0; i -= 1) {
+    const toast = toast_messages[i]!
+    const body_h = renderer.wrap_text(toast.body, body_font, line_w).length * renderer.text_line_height(body_font)
+    const toast_h = Math.max(68 * scale, pad * 2 + renderer.text_line_height(title_font) + 3 * scale + body_h)
+    y -= toast_h
+    const x = safe_x + safe_w - toast_w - 10 * scale
+    const accent = toast.kind === 'success' ? pack_color('#5fb878') : toast.kind === 'error' ? pack_color('#d9534f') : slot('accent')
+    renderer.fill_round_rect(x, y, toast_w, toast_h, 7 * scale, pack_color(color_with_alpha(theme.palette.panel_alt, 'f2')))
+    renderer.stroke_round_rect(x, y, toast_w, toast_h, 7 * scale, 1, slot('border_strong'))
+    renderer.fill_round_rect(x + pad, y + pad, 4 * scale, toast_h - pad * 2, 2 * scale, accent)
+    renderer.draw_text(x + pad + 10 * scale, y + pad - 1 * scale, toast.title, title_font, slot('text'))
+    renderer.draw_text_wrapped(x + pad + 10 * scale, y + pad + renderer.text_line_height(title_font) + 2 * scale, line_w, toast.body, body_font, slot('text_dim'))
+    y -= gap
+  }
+  active_renderer?.request_render()
 }
 
 function render_files(
@@ -1265,9 +1448,7 @@ function render_installed_app(
     }
     if (app.update_available) {
       if (widgets.button(`app_update:${id}`, x + pad + 162 * scale, cy, 150 * scale, btn_h, `Update to v${app.update_available.version}`, { active: true })) {
-        void registry.apply_update(id).then((updated) => {
-          if (updated) append_console(`updated ${app.manifest.name} to v${registry.get(id)?.manifest.version}`, '#5fb878')
-        })
+        apply_plugin_update(id)
       }
     }
   }
