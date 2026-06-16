@@ -30,6 +30,7 @@
 // asset-audit viewport.
 
 import type { webtix_bvh } from './ui_webtix_bvh'
+import type { webtix_hdr_image } from './ui_webtix_hdr'
 
 /** Disney-style material — mirrors the engine's `material` struct. */
 export interface webtix_material {
@@ -81,7 +82,10 @@ export interface webtix_render_params {
   /** Linear horizon/ground colour. */
   env_bottom: [number, number, number]
   env_intensity: number
+  render_mode?: webtix_render_mode
 }
+
+export type webtix_render_mode = 'ao' | 'lighting'
 
 const UNIFORM_F32 = 52 // 13 × vec4
 const MAX_DEPTH = 32
@@ -101,6 +105,8 @@ export class webtix_tracer {
   private position_buffer: GPUBuffer | null = null
   private normal_buffer: GPUBuffer | null = null
   private index_buffer: GPUBuffer | null = null
+  private env_texture: GPUTexture | null = null
+  private env_sampler: GPUSampler | null = null
   private node_count = 0
   private has_scene = false
 
@@ -148,6 +154,8 @@ export class webtix_tracer {
         { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },       // ray tasks
         { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },       // accumulator
         { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },       // finalized counter
+        { binding: 8, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float', viewDimension: '2d' } },
+        { binding: 9, visibility: GPUShaderStage.COMPUTE, sampler: { type: 'filtering' } },
       ],
     })
     this.present_layout = device.createBindGroupLayout({
@@ -192,6 +200,14 @@ export class webtix_tracer {
       size: 4,
       usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
     })
+    this.env_sampler = device.createSampler({
+      label: 'webtix.env_sampler',
+      addressModeU: 'repeat',
+      addressModeV: 'clamp-to-edge',
+      magFilter: 'linear',
+      minFilter: 'linear',
+    })
+    this.ensure_environment_texture()
   }
 
   /** Upload a built BVH + geometry into storage buffers. Resets accumulation. */
@@ -210,6 +226,15 @@ export class webtix_tracer {
     this.index_buffer = make_storage(device, 'webtix.indices', bvh.indices)
     this.has_scene = true
     this.trace_bind = null // geometry changed → rebind
+    this.reset()
+  }
+
+  set_environment(hdr: webtix_hdr_image): void {
+    const device = this.device
+    if (!device) return
+    this.env_texture?.destroy()
+    this.env_texture = create_hdr_texture(device, hdr)
+    this.trace_bind = null
     this.reset()
   }
 
@@ -248,6 +273,7 @@ export class webtix_tracer {
     const device = this.device!
     if (!this.trace_layout || !this.present_layout) return
     if (this.trace_bind && this.present_bind) return
+    this.ensure_environment_texture()
     this.trace_bind = device.createBindGroup({
       label: 'webtix.trace_bind',
       layout: this.trace_layout,
@@ -260,6 +286,8 @@ export class webtix_tracer {
         { binding: 5, resource: { buffer: this.task_buffer! } },
         { binding: 6, resource: { buffer: this.accum_buffer! } },
         { binding: 7, resource: { buffer: this.counter_buffer! } },
+        { binding: 8, resource: this.env_texture!.createView() },
+        { binding: 9, resource: this.env_sampler! },
       ],
     })
     this.present_bind = device.createBindGroup({
@@ -364,8 +392,21 @@ export class webtix_tracer {
     u[36] = m.transmission; u[37] = Math.min(MAX_DEPTH, Math.max(1, p.bounces | 0)); u[38] = p.fov; u[39] = p.env_intensity
     u[40] = p.env_top[0]; u[41] = p.env_top[1]; u[42] = p.env_top[2]; u[43] = 0
     u[44] = p.env_bottom[0]; u[45] = p.env_bottom[1]; u[46] = p.env_bottom[2]; u[47] = 0
-    u[48] = w; u[49] = h; u[50] = 0; u[51] = 0
+    u[48] = w; u[49] = h; u[50] = p.render_mode === 'lighting' ? 1 : 0; u[51] = 0
     this.device!.queue.writeBuffer(this.uniform!, 0, u)
+  }
+
+  private ensure_environment_texture(): void {
+    const device = this.device
+    if (!device || this.env_texture) return
+    this.env_texture = create_hdr_texture(device, { width: 1, height: 1, data: new Float32Array([0.8, 0.85, 1.0]) })
+    this.env_sampler ??= device.createSampler({
+      label: 'webtix.env_sampler',
+      addressModeU: 'repeat',
+      addressModeV: 'clamp-to-edge',
+      magFilter: 'linear',
+      minFilter: 'linear',
+    })
   }
 
   dispose(): void {
@@ -373,6 +414,7 @@ export class webtix_tracer {
     this.position_buffer?.destroy()
     this.normal_buffer?.destroy()
     this.index_buffer?.destroy()
+    this.env_texture?.destroy()
     this.uniform?.destroy()
     this.task_buffer?.destroy()
     this.accum_buffer?.destroy()
@@ -382,6 +424,8 @@ export class webtix_tracer {
     this.task_buffer = null
     this.accum_buffer = null
     this.display = null
+    this.env_texture = null
+    this.env_sampler = null
     this.has_scene = false
   }
 }
@@ -390,6 +434,63 @@ function make_storage(device: GPUDevice, label: string, data: Float32Array | Uin
   const buffer = device.createBuffer({ label, size: Math.max(4, data.byteLength), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST })
   device.queue.writeBuffer(buffer, 0, data as unknown as GPUAllowSharedBufferSource)
   return buffer
+}
+
+function create_hdr_texture(device: GPUDevice, hdr: webtix_hdr_image): GPUTexture {
+  const width = Math.max(1, hdr.width | 0)
+  const height = Math.max(1, hdr.height | 0)
+  const texture = device.createTexture({
+    label: 'webtix.env_texture',
+    size: [width, height, 1],
+    format: 'rgba16float',
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+  })
+  const row_bytes = width * 8
+  const padded_row_bytes = align(row_bytes, 256)
+  const half = new Uint16Array((padded_row_bytes / 2) * height)
+  for (let y = 0; y < height; y++) {
+    const row = (padded_row_bytes / 2) * y
+    for (let x = 0; x < width; x++) {
+      const si = (y * width + x) * 3
+      const di = row + x * 4
+      half[di] = float_to_half(hdr.data[si] ?? 0)
+      half[di + 1] = float_to_half(hdr.data[si + 1] ?? 0)
+      half[di + 2] = float_to_half(hdr.data[si + 2] ?? 0)
+      half[di + 3] = float_to_half(1)
+    }
+  }
+  device.queue.writeTexture(
+    { texture },
+    new Uint8Array(half.buffer),
+    { bytesPerRow: padded_row_bytes, rowsPerImage: height },
+    { width, height, depthOrArrayLayers: 1 },
+  )
+  return texture
+}
+
+function align(value: number, alignment: number): number {
+  return Math.ceil(value / alignment) * alignment
+}
+
+function float_to_half(value: number): number {
+  if (!Number.isFinite(value)) return value < 0 ? 0xfc00 : 0x7c00
+  const f32 = new Float32Array(1)
+  const u32 = new Uint32Array(f32.buffer)
+  f32[0] = value
+  const x = u32[0]!
+  const sign = (x >>> 16) & 0x8000
+  let mantissa = x & 0x7fffff
+  let exp = (x >>> 23) & 0xff
+
+  if (exp === 0xff) return sign | (mantissa ? 0x7e00 : 0x7c00)
+  exp = exp - 127 + 15
+  if (exp >= 0x1f) return sign | 0x7c00
+  if (exp <= 0) {
+    if (exp < -10) return sign
+    mantissa = (mantissa | 0x800000) >>> (1 - exp)
+    return sign | ((mantissa + 0x1000) >>> 13)
+  }
+  return sign | (exp << 10) | ((mantissa + 0x1000) >>> 13)
 }
 
 function sub(a: [number, number, number], b: [number, number, number]): [number, number, number] {
@@ -425,7 +526,7 @@ struct Uniforms {
   p2: vec4f,        // transmission, depth, fov, env_intensity
   env_top: vec4f,
   env_bot: vec4f,
-  res: vec4f,       // width, height
+  res: vec4f,       // width, height, render_mode (0 = ao, 1 = lighting)
 }
 
 struct bvh_node {
@@ -455,6 +556,8 @@ struct RayTask {
 @group(0) @binding(5) var<storage, read_write> tasks: array<RayTask>;
 @group(0) @binding(6) var<storage, read_write> accum: array<vec4f>;
 @group(0) @binding(7) var<storage, read_write> counter: atomic<u32>;
+@group(0) @binding(8) var env_tex: texture_2d<f32>;
+@group(0) @binding(9) var env_samp: sampler;
 
 struct Material {
   emission: vec3f,
@@ -596,14 +699,28 @@ fn trace(ro: vec3f, rd: vec3f) -> Hit {
   return result;
 }
 
-// --- environment (procedural sky) -------------------------------------------
-fn sample_environment(dir: vec3f) -> vec3f {
+// --- environment -------------------------------------------------------------
+fn sample_procedural_environment(dir: vec3f) -> vec3f {
   let t = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
   let sky = mix(U.env_bot.xyz, U.env_top.xyz, t);
   // soft sun towards (0.4, 0.8, 0.3)
   let sun = normalize(vec3f(0.4, 0.8, 0.3));
   let s = pow(max(dot(dir, sun), 0.0), 64.0);
   return (sky + vec3f(1.0, 0.9, 0.7) * s * 1.5) * U.p2.w;
+}
+
+fn sample_hdr_environment(dir: vec3f) -> vec3f {
+  let d = normalize(dir);
+  let u = fract(atan2(d.z, d.x) / PI2 + 0.5);
+  let v = acos(clamp(d.y, -1.0, 1.0)) * PI_INV;
+  return textureSampleLevel(env_tex, env_samp, vec2f(u, v), 0.0).rgb * U.p2.w;
+}
+
+fn sample_environment(dir: vec3f) -> vec3f {
+  if (U.res.z > 0.5) {
+    return sample_hdr_environment(dir);
+  }
+  return sample_procedural_environment(dir);
 }
 
 // --- Disney BSDF (ported from disney.glsl) ----------------------------------

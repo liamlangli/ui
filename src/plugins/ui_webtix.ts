@@ -23,7 +23,8 @@ import {
   type orbit_camera,
 } from './ui_asset_audit_view'
 import { build_bvh, build_scene, WEBTIX_SCENES, type webtix_scene_id } from './ui_webtix_bvh'
-import { default_material, webtix_tracer, type webtix_material } from './ui_webtix_tracer'
+import { default_material, webtix_tracer, type webtix_material, type webtix_render_mode } from './ui_webtix_tracer'
+import { default_webtix_hdr_url, parse_webtix_hdr, type webtix_hdr_image } from './ui_webtix_hdr'
 
 export interface webtix_state {
   tracer: webtix_tracer
@@ -31,8 +32,15 @@ export interface webtix_state {
   scene: webtix_scene_id
   synced_scene: webtix_scene_id | null
   material: webtix_material
+  render_mode: webtix_render_mode
   bounces: number
   sample_count: number
+  environment_url: string
+  environment: webtix_hdr_image | null
+  environment_status: 'idle' | 'loading' | 'ready' | 'error'
+  environment_error: string | null
+  environment_promise: Promise<void> | null
+  environment_uploaded: boolean
   /** Bounds radius of the current scene (for zoom limits / camera framing). */
   bounds_radius: number
   texture_id: number | null
@@ -52,8 +60,15 @@ export function create_webtix_state(scene: webtix_scene_id = 'sphere'): webtix_s
     scene,
     synced_scene: null,
     material: default_material(),
+    render_mode: 'lighting',
     bounces: 5,
     sample_count: 256,
+    environment_url: default_webtix_hdr_url,
+    environment: null,
+    environment_status: 'idle',
+    environment_error: null,
+    environment_promise: null,
+    environment_uploaded: false,
     bounds_radius: 2,
     texture_id: null,
     orbiting: false,
@@ -137,6 +152,11 @@ export function webtix(
   const { device } = ui.gpu()
   if (device) {
     state.tracer.init(device)
+    ensure_environment(state)
+    if (state.environment_status === 'ready' && state.environment && !state.environment_uploaded) {
+      state.tracer.set_environment(state.environment)
+      state.environment_uploaded = true
+    }
     if (state.synced_scene !== state.scene || state.dirty) {
       const mesh = build_scene(state.scene)
       const bvh = build_bvh(mesh.positions, mesh.indices)
@@ -247,12 +267,15 @@ function draw_viewport(
       env_top: [0.55, 0.7, 1.0],
       env_bottom: [0.85, 0.86, 0.9],
       env_intensity: 1.0,
+      render_mode: state.render_mode,
     })
     if (texture) {
       if (state.texture_id === null) state.texture_id = ui.register_external_texture(texture)
       else ui.update_external_texture(state.texture_id, texture)
     }
     // Keep the adaptive renderer awake until the image converges.
+    ui.request_render()
+  } else if (state.render_mode === 'lighting' && state.environment_status === 'loading') {
     ui.request_render()
   }
 
@@ -302,6 +325,14 @@ function draw_sidebar(
 
   const mat = state.material
   section('RENDER')
+  const render_modes: webtix_render_mode[] = ['lighting', 'ao']
+  const mode_index = Math.max(0, render_modes.indexOf(state.render_mode))
+  const next_mode = widgets.dropdown('webtix_render_mode', cx, cy, cw, 22 * scale, ['Lighting', 'AO'], mode_index)
+  if (render_modes[next_mode] && render_modes[next_mode] !== state.render_mode) {
+    state.render_mode = render_modes[next_mode]!
+    state.tracer.reset()
+  }
+  cy += 30 * scale
   slider('webtix_bounces', 'Bounces', state.bounces, 1, 16, (v) => { state.bounces = Math.round(v) })
   slider('webtix_spp', 'Samples', state.sample_count, 16, 1024, (v) => { state.sample_count = Math.round(v) })
 
@@ -320,4 +351,26 @@ function draw_sidebar(
   slider('webtix_col_r', 'Red', mat.color[0], 0, 1, (v) => { mat.color[0] = v })
   slider('webtix_col_g', 'Green', mat.color[1], 0, 1, (v) => { mat.color[1] = v })
   slider('webtix_col_b', 'Blue', mat.color[2], 0, 1, (v) => { mat.color[2] = v })
+}
+
+function ensure_environment(state: webtix_state): void {
+  if (state.environment_status !== 'idle') return
+  state.environment_status = 'loading'
+  state.environment_promise = fetch(state.environment_url)
+    .then((res) => {
+      if (!res.ok) throw new Error(`failed to load HDR (${res.status})`)
+      return res.arrayBuffer()
+    })
+    .then((buffer) => {
+      state.environment = parse_webtix_hdr(buffer)
+      state.environment_status = 'ready'
+      state.environment_error = null
+      state.environment_uploaded = false
+    })
+    .catch((err) => {
+      state.environment_status = 'error'
+      state.environment_error = err instanceof Error ? err.message : String(err)
+      state.environment = null
+      state.environment_uploaded = false
+    })
 }
