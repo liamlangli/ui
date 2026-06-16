@@ -1674,11 +1674,17 @@ function format_count(value: number): string {
   is_dashboard_open: () => dashboard_open,
 }
 
-main().catch((err) => {
-  console.error(err)
-  const el = document.getElementById('error')
-  if (el) {
-    el.style.display = 'block'
-    el.textContent = `${err}`
-  }
-})
+if (!('gpu' in navigator)) {
+  const fallback = document.getElementById('nogpu')
+  if (fallback) fallback.style.display = 'grid'
+  canvas.style.display = 'none'
+} else {
+  main().catch((err) => {
+    console.error(err)
+    const el = document.getElementById('error')
+    if (el) {
+      el.style.display = 'block'
+      el.textContent = `${err}`
+    }
+  })
+}
