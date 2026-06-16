@@ -27,11 +27,11 @@
 //
 //   gamepad_test_panel(ui, theme, input, x, y, w, h, gamepad, state)
 
-import { pack_color } from '../../ui_theme'
-import type { theme_definition, theme_slot } from '../../ui_types'
-import { FONT_MONO, type ui_renderer } from '../../ui_renderer'
-import type { ui_input_snapshot } from '../../ui_widgets'
-import { gamepad_axis_label, gamepad_button_label, GAMEPAD_STANDARD_BUTTONS, type gamepad_input, type ui_gamepad_snapshot } from '../../ui_gamepad'
+import { pack_color } from '../../core/ui_theme'
+import type { theme_definition, theme_slot } from '../../core/ui_types'
+import { FONT_MONO, type ui_renderer } from '../../core/ui_renderer'
+import type { ui_input_snapshot } from '../../core/ui_widgets'
+import { gamepad_axis_label, gamepad_button_label, GAMEPAD_STANDARD_BUTTONS, type gamepad_input, type ui_gamepad_snapshot } from '../../core/ui_gamepad'
 
 export interface gamepad_test_state {
   scroll_y: number

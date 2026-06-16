@@ -24,11 +24,11 @@
 // dragging and pushes to `links` on connect); events are returned so the host
 // can react (recompile, open a create menu, remove a node on Delete, …).
 
-import { theme_color } from '../../ui_theme'
-import type { theme_definition, theme_slot } from '../../ui_types'
-import { ui_renderer } from '../../ui_renderer'
-import { pan_zoom_apply } from '../../ui_pan_zoom'
-import type { ui_input_snapshot } from '../../ui_widgets'
+import { theme_color } from '../../core/ui_theme'
+import type { theme_definition, theme_slot } from '../../core/ui_types'
+import { ui_renderer } from '../../core/ui_renderer'
+import { pan_zoom_apply } from '../../core/ui_pan_zoom'
+import type { ui_input_snapshot } from '../../core/ui_widgets'
 
 /** Node identity. Stable across frames; used for selection + link endpoints. */
 export type graph_id = number | string

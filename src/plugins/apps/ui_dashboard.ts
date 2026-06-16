@@ -24,12 +24,12 @@
 //   if (ev.update_requested) registry.apply_update(...)
 //   if (ev.dismissed) hide_dashboard()
 
-import { pack_color } from '../../ui_theme'
-import type { theme_definition, theme_slot } from '../../ui_types'
-import { FONT_MONO, type ui_renderer } from '../../ui_renderer'
-import type { ui_input_snapshot } from '../../ui_widgets'
-import type { ui_icons, ui_icon_name } from '../../ui_icon'
-import type { app_registry, installed_app } from '../../ui_app_registry'
+import { pack_color } from '../../core/ui_theme'
+import type { theme_definition, theme_slot } from '../../core/ui_types'
+import { FONT_MONO, type ui_renderer } from '../../core/ui_renderer'
+import type { ui_input_snapshot } from '../../core/ui_widgets'
+import type { ui_icons, ui_icon_name } from '../../core/ui_icon'
+import type { app_registry, installed_app } from '../../core/ui_app_registry'
 
 export interface dashboard_state {
   scroll_y: number

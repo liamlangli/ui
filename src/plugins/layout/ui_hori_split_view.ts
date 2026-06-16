@@ -4,8 +4,8 @@
 // invisible resize hit target. Callers draw their pane contents into the
 // returned rects.
 
-import type { ui_renderer } from '../../ui_renderer'
-import type { ui_input_snapshot } from '../../ui_widgets'
+import type { ui_renderer } from '../../core/ui_renderer'
+import type { ui_input_snapshot } from '../../core/ui_widgets'
 
 export interface hori_split_view_state {
   left_w?: number

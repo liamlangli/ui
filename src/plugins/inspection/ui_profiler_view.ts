@@ -43,14 +43,14 @@
 //
 //   profiler_panel(ui, theme, input, x, y, w, h, profiler, state)
 
-import { theme_color, pack_color } from '../../ui_theme'
-import type { theme_definition, theme_slot } from '../../ui_types'
-import { ui_renderer, FONT_MONO } from '../../ui_renderer'
-import { draw_icon } from '../../ui_icon'
-import type { ui_input_snapshot } from '../../ui_widgets'
-import type { ui_profiler, profiler_frame, profiler_span } from '../../ui_profiler'
-import { memory as shared_memory, format_bytes } from '../../ui_memory'
-import type { ui_memory, memory_resource } from '../../ui_memory'
+import { theme_color, pack_color } from '../../core/ui_theme'
+import type { theme_definition, theme_slot } from '../../core/ui_types'
+import { ui_renderer, FONT_MONO } from '../../core/ui_renderer'
+import { draw_icon } from '../../core/ui_icon'
+import type { ui_input_snapshot } from '../../core/ui_widgets'
+import type { ui_profiler, profiler_frame, profiler_span } from '../../core/ui_profiler'
+import { memory as shared_memory, format_bytes } from '../../core/ui_memory'
+import type { ui_memory, memory_resource } from '../../core/ui_memory'
 
 export interface profiler_panel_options {
   /** Frame budget used to color the timeline bars (green ≤ budget ≤ amber ≤ 2× ≤ red). Defaults to 16.7 ms. */

@@ -11,10 +11,10 @@
 //   const ev = im_dialog(ui, widgets, theme, input, x, y, w, h, messages, state)
 //   if (ev.sent) messages.push({ text: ev.sent, side: 'right', author: 'Me' })
 
-import { theme_color } from '../../ui_theme'
-import type { theme_definition } from '../../ui_types'
-import { FONT_MAIN, ui_renderer } from '../../ui_renderer'
-import { ui_widgets, type ui_input_snapshot, type ui_input_text_state, type ui_scroll_state } from '../../ui_widgets'
+import { theme_color } from '../../core/ui_theme'
+import type { theme_definition } from '../../core/ui_types'
+import { FONT_MAIN, ui_renderer } from '../../core/ui_renderer'
+import { ui_widgets, type ui_input_snapshot, type ui_input_text_state, type ui_scroll_state } from '../../core/ui_widgets'
 
 export interface im_message {
   id?: string

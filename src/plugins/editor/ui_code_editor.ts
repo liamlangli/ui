@@ -20,11 +20,11 @@
 //     tokenize: (line) => my_tokenizer(line), // optional
 //   })
 
-import { pack_color, theme_color } from '../../ui_theme'
-import type { theme_definition } from '../../ui_types'
-import { draw_icon } from '../../ui_icon'
-import { FONT_MONO, ui_renderer } from '../../ui_renderer'
-import type { ui_input_snapshot, ui_scroll_state } from '../../ui_widgets'
+import { pack_color, theme_color } from '../../core/ui_theme'
+import type { theme_definition } from '../../core/ui_types'
+import { draw_icon } from '../../core/ui_icon'
+import { FONT_MONO, ui_renderer } from '../../core/ui_renderer'
+import type { ui_input_snapshot, ui_scroll_state } from '../../core/ui_widgets'
 import { hori_split_view, type hori_split_view_state } from '../layout/ui_hori_split_view'
 
 // ── Text model ──────────────────────────────────────────────────────────────

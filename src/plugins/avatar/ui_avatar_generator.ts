@@ -6,10 +6,10 @@
 // The 3D pass reuses the asset-audit viewer (`asset_audit_view`) and the GLB
 // writer (`encode_asset_glb`) — the generator only produces `audit_mesh` data.
 
-import { pack_color, hex_to_normalized_rgba } from '../../ui_theme'
-import type { theme_definition } from '../../ui_types'
-import { FONT_MONO, type ui_renderer } from '../../ui_renderer'
-import type { ui_input_snapshot, ui_scroll_state, ui_widgets } from '../../ui_widgets'
+import { pack_color, hex_to_normalized_rgba } from '../../core/ui_theme'
+import type { theme_definition } from '../../core/ui_types'
+import { FONT_MONO, type ui_renderer } from '../../core/ui_renderer'
+import type { ui_input_snapshot, ui_scroll_state, ui_widgets } from '../../core/ui_widgets'
 import { encode_asset_glb, format_asset_bytes, type audit_asset } from '../asset_audit/ui_asset_audit_data'
 import {
   asset_audit_view,

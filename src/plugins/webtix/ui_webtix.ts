@@ -10,10 +10,10 @@
 // refines smoothly. The panel asks the adaptive renderer to keep ticking until
 // the average sample budget is reached — then it idles.
 
-import { pack_color } from '../../ui_theme'
-import type { theme_definition } from '../../ui_types'
-import { FONT_MONO, type ui_renderer } from '../../ui_renderer'
-import type { ui_color_rgba, ui_input_snapshot, ui_scroll_state, ui_widgets } from '../../ui_widgets'
+import { pack_color } from '../../core/ui_theme'
+import type { theme_definition } from '../../core/ui_types'
+import { FONT_MONO, type ui_renderer } from '../../core/ui_renderer'
+import type { ui_color_rgba, ui_input_snapshot, ui_scroll_state, ui_widgets } from '../../core/ui_widgets'
 import {
   create_orbit_camera,
   frame_orbit_camera,
@@ -24,7 +24,7 @@ import {
 } from '../asset_audit/ui_asset_audit_view'
 import { build_tlas, build_tlas_scene, WEBTIX_SCENES, type webtix_scene_id } from './ui_webtix_bvh'
 import { default_material, webtix_tracer, type webtix_material, type webtix_render_mode } from './ui_webtix_tracer'
-import { default_webtix_hdr_url, parse_webtix_hdr, type webtix_hdr_image } from '../ui_webtix_hdr'
+import { default_webtix_hdr_url, parse_webtix_hdr, type webtix_hdr_image } from './ui_webtix_hdr'
 
 export interface webtix_state {
   tracer: webtix_tracer

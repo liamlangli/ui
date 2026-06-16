@@ -30,7 +30,7 @@
 // asset-audit viewport.
 
 import { build_tlas_from_bvh, type webtix_bvh, type webtix_tlas } from './ui_webtix_bvh'
-import type { webtix_hdr_image } from '../ui_webtix_hdr'
+import type { webtix_hdr_image } from './ui_webtix_hdr'
 
 /** Disney-style material — mirrors the engine's `material` struct. */
 export interface webtix_material {

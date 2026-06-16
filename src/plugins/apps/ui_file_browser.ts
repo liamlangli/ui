@@ -5,11 +5,11 @@
 // breadcrumb, search, list/grid modes, toolbar intents, and preview extension
 // hooks. Hosts own file data and optional preview rendering.
 
-import { theme_color } from '../../ui_theme'
-import type { theme_definition, theme_slot } from '../../ui_types'
-import { draw_icon } from '../../ui_icon'
-import { FONT_MAIN, ui_renderer } from '../../ui_renderer'
-import type { ui_input_snapshot, ui_input_text_state, ui_scroll_state, ui_widgets } from '../../ui_widgets'
+import { theme_color } from '../../core/ui_theme'
+import type { theme_definition, theme_slot } from '../../core/ui_types'
+import { draw_icon } from '../../core/ui_icon'
+import { FONT_MAIN, ui_renderer } from '../../core/ui_renderer'
+import type { ui_input_snapshot, ui_input_text_state, ui_scroll_state, ui_widgets } from '../../core/ui_widgets'
 import {
   STACK_ALIGN_CENTER_VERT,
   STACK_ALIGN_TOP_LEFT,
@@ -18,7 +18,7 @@ import {
   layout_hstack_into,
   layout_vstack_into,
   layout_zstack_into,
-} from '../../ui_stack_layout'
+} from '../../core/ui_stack_layout'
 import { hori_split_view, type hori_split_view_state } from '../layout/ui_hori_split_view'
 
 export interface file_node {

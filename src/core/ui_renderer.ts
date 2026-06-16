@@ -1,8 +1,8 @@
-import latin_mono_font_json_url from '../assets/latin_mono.json?url'
-import latin_mono_font_image_url from '../assets/latin_mono.webp?url'
-import ping_fang_font_json_url from '../assets/ping_fang_sc_regular.json?url'
-import ping_fang_font_image_url from '../assets/ping_fang_sc_regular.webp?url'
-import ui_shader_url from '../assets/ui.wgsl?url'
+import latin_mono_font_json_url from '../../assets/latin_mono.json?url'
+import latin_mono_font_image_url from '../../assets/latin_mono.webp?url'
+import ping_fang_font_json_url from '../../assets/ping_fang_sc_regular.json?url'
+import ping_fang_font_image_url from '../../assets/ping_fang_sc_regular.webp?url'
+import ui_shader_url from '../../assets/ui.wgsl?url'
 import { clamp } from './ui_math'
 import { memory } from './ui_memory'
 

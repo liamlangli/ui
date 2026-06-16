@@ -1,4 +1,4 @@
-import default_webtix_hdr_url from '../../assets/brown_photostudio_02_1k.hdr?url'
+import default_webtix_hdr_url from '../../../assets/brown_photostudio_02_1k.hdr?url'
 
 export interface webtix_hdr_image {
   width: number

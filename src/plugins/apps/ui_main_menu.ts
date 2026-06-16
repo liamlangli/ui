@@ -10,10 +10,10 @@
 // drives each frame (it owns the menu tree + the open-state), mirroring how
 // `dock_system` packages the pure dock engine.
 
-import { theme_color } from '../../ui_theme'
-import type { theme_definition } from '../../ui_types'
-import { ui_renderer } from '../../ui_renderer'
-import type { ui_input_snapshot } from '../../ui_widgets'
+import { theme_color } from '../../core/ui_theme'
+import type { theme_definition } from '../../core/ui_types'
+import { ui_renderer } from '../../core/ui_renderer'
+import type { ui_input_snapshot } from '../../core/ui_widgets'
 
 /** A node in the menu tree. A node with `children` is a sub-menu, otherwise a leaf. */
 export interface ui_menu_node {

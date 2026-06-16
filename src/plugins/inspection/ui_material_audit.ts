@@ -24,12 +24,12 @@
 // look like a normal map (`*_normal*`, `*_nrm*`, `*_n.*`, …) land in the
 // normal slot, everything else in base color.
 
-import { pack_color, hex_to_normalized_rgba } from '../../ui_theme'
-import type { theme_definition } from '../../ui_types'
-import { FONT_MONO, type ui_renderer } from '../../ui_renderer'
-import { clamp } from '../../ui_math'
-import { create_pan_zoom_state, pan_zoom_apply, pan_zoom_drag, type pan_zoom_state } from '../../ui_pan_zoom'
-import type { ui_input_snapshot, ui_widgets } from '../../ui_widgets'
+import { pack_color, hex_to_normalized_rgba } from '../../core/ui_theme'
+import type { theme_definition } from '../../core/ui_types'
+import { FONT_MONO, type ui_renderer } from '../../core/ui_renderer'
+import { clamp } from '../../core/ui_math'
+import { create_pan_zoom_state, pan_zoom_apply, pan_zoom_drag, type pan_zoom_state } from '../../core/ui_pan_zoom'
+import type { ui_input_snapshot, ui_widgets } from '../../core/ui_widgets'
 
 export type material_audit_mip_mode = 'auto' | 'on' | 'off'
 export type material_audit_map_slot = 'base' | 'normal'

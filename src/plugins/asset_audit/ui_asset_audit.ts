@@ -8,10 +8,10 @@
 // (`asset_audit_dom_target`) that wires drag-and-drop and the hidden file /
 // folder pickers onto the host canvas.
 
-import { pack_color, hex_to_normalized_rgba } from '../../ui_theme'
-import type { theme_definition } from '../../ui_types'
-import { FONT_MONO, type ui_renderer } from '../../ui_renderer'
-import type { ui_input_snapshot, ui_scroll_state, ui_widgets } from '../../ui_widgets'
+import { pack_color, hex_to_normalized_rgba } from '../../core/ui_theme'
+import type { theme_definition } from '../../core/ui_types'
+import { FONT_MONO, type ui_renderer } from '../../core/ui_renderer'
+import type { ui_input_snapshot, ui_scroll_state, ui_widgets } from '../../core/ui_widgets'
 import {
   compute_asset_stats,
   decode_asset_textures,

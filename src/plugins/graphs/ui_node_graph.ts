@@ -30,11 +30,11 @@
 //   if (ev.connection_created) recompile()
 //   if (ev.delete_requested) remove_selected(state.selected)
 
-import { theme_color } from '../../ui_theme'
-import type { theme_definition, theme_slot } from '../../ui_types'
-import { ui_renderer } from '../../ui_renderer'
-import { pan_zoom_apply } from '../../ui_pan_zoom'
-import type { ui_input_snapshot } from '../../ui_widgets'
+import { theme_color } from '../../core/ui_theme'
+import type { theme_definition, theme_slot } from '../../core/ui_types'
+import { ui_renderer } from '../../core/ui_renderer'
+import { pan_zoom_apply } from '../../core/ui_pan_zoom'
+import type { ui_input_snapshot } from '../../core/ui_widgets'
 
 /** Node identity. Stable across frames; used for selection + wire endpoints. */
 export type node_graph_id = number | string

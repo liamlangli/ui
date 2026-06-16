@@ -5,10 +5,10 @@
 // a procedural terrain graph, inspect node params, and preview the generated
 // height/ecology fields without depending on the li renderer.
 
-import { pack_color } from '../../ui_theme'
-import type { theme_definition, theme_slot } from '../../ui_types'
-import { FONT_MONO, type ui_renderer } from '../../ui_renderer'
-import type { ui_input_snapshot, ui_scroll_state, ui_widgets } from '../../ui_widgets'
+import { pack_color } from '../../core/ui_theme'
+import type { theme_definition, theme_slot } from '../../core/ui_types'
+import { FONT_MONO, type ui_renderer } from '../../core/ui_renderer'
+import type { ui_input_snapshot, ui_scroll_state, ui_widgets } from '../../core/ui_widgets'
 import {
   create_graph_state,
   graph_canvas,

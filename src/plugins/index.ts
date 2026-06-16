@@ -14,5 +14,5 @@ export * from './inspection'
 export * from './layout'
 export * from './webtix'
 
-export * from '../ui_dock_system'
-export * from '../ui_window_system'
+export * from '../core/ui_dock_system'
+export * from '../core/ui_window_system'
