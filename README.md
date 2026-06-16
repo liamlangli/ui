@@ -490,19 +490,24 @@ const pt = create_webtix_state('sphere')
 webtix(renderer, widgets, theme, input, x, y, w, h, pt, { scale })
 ```
 
-The BVH builder and procedural geometry are also exported standalone
-(`build_bvh`, `build_scene`, `make_sphere`, …) alongside the GPU engine
-(`webtix_tracer`), so a host can trace its own meshes:
+The TLAS builder, legacy BLAS builder and procedural geometry are also exported
+standalone (`build_tlas`, `build_tlas_scene`, `build_bvh`, `build_scene`,
+`make_sphere`, …) alongside the GPU engine (`webtix_tracer`), so a host can
+trace mixed analytic/mesh scenes or keep using its own triangle mesh:
 
 ```ts
-import { build_bvh, webtix_tracer, default_material } from '@liamlangli/ui/plugins'
+import { build_tlas, build_tlas_scene, webtix_tracer, default_material } from '@liamlangli/ui/plugins'
 
-const bvh = build_bvh(positions, indices) // packed storage-buffer BVH
+const scene = build_tlas(build_tlas_scene('spheres')) // analytic spheres + finite ground plane
 const tracer = new webtix_tracer()
 tracer.init(device)
-tracer.set_scene(bvh, positions, normals)
+tracer.set_tlas_scene(scene)
 const texture = tracer.render_sample(w, h, { eye, target, fov, bounces: 5, material: default_material(), env_top, env_bottom, env_intensity: 1 })
 ```
+
+`tracer.set_scene(build_bvh(positions, indices), positions, normals)` remains
+available for existing mesh-only callers; it is adapted to a one-instance TLAS
+internally.
 
 ## Usage
 
