@@ -26,7 +26,6 @@ export * from './ui_profiler_view'
 export * from './ui_terrain_graph'
 export * from './ui_webtix'
 export * from './ui_webtix_bvh'
-export * from './ui_webtix_hdr'
 export * from './ui_webtix_tracer'
 
 export * from '../ui_dock_system'
