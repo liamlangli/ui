@@ -776,6 +776,7 @@ fn disney_eval(m: Material, normal: vec3f, view: vec3f, light: vec3f) -> vec3f {
       let fv = fresnel_schlick(n_dot_v);
       let f0 = 0.5 + 2.0 * l_dot_h * l_dot_h * m.roughness;
       let fd = mix(1.0, f0, fl) * mix(1.0, f0, fv);
+      let gs = ggx_smith(n_dot_v, a) * ggx_smith(n_dot_l, a);
       let dr = gtr1(n_dot_h, mix(0.1, 0.001, m.clearcoat_glossiness));
       let fc = mix(0.04, 1.0, fh);
       let gr = ggx_smith(n_dot_l, 0.25) * ggx_smith(n_dot_v, 0.25);
