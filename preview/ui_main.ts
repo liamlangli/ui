@@ -417,6 +417,14 @@ function color_with_alpha(hex: string, alpha: string): string {
   return `#${raw.slice(0, 6)}${alpha}`
 }
 
+function pack_ui_color(color: ui_color_rgba): number {
+  const r = Math.max(0, Math.min(255, Math.round(color.r * 255)))
+  const g = Math.max(0, Math.min(255, Math.round(color.g * 255)))
+  const b = Math.max(0, Math.min(255, Math.round(color.b * 255)))
+  const a = Math.max(0, Math.min(255, Math.round(color.a * 255)))
+  return (((a & 255) << 24) | ((b & 255) << 16) | ((g & 255) << 8) | (r & 255)) >>> 0
+}
+
 function available_plugin_updates(): installed_app[] {
   return registry.apps.filter((app) => app.update_available)
 }
@@ -527,7 +535,7 @@ const VIEW_TABS: { id: string; title: string; win?: window_new_options }[] = [
   { id: 'editor', title: 'Editor' },
   { id: 'console', title: 'Console' },
   { id: 'metrics', title: 'Metrics' },
-  { id: 'gallery', title: 'Widgets', win: { w: 420, h: 540 } },
+  { id: 'gallery', title: 'Widgets', win: { w: 420, h: 680 } },
   { id: 'icons', title: 'Icons', win: { w: 560, h: 420 } },
   { id: 'graph', title: 'Graph', win: { w: 640, h: 420 } },
   { id: 'node_graph', title: 'Node Graph', win: { w: 640, h: 420 } },
@@ -966,6 +974,7 @@ const gallery = {
   input_state: { cursor: 0, sel_anchor: 0, sel_head: 0 } as ui_input_text_state,
   color: { r: 0.3, g: 0.55, b: 0.95, a: 1 } as ui_color_rgba,
   list_scroll: { offset_y: 0 } as ui_scroll_state,
+  scroll: { offset_y: 0 } as ui_scroll_state,
   list_selected: 0,
   clicks: 0,
 }
@@ -1538,16 +1547,33 @@ function render_gallery(
   scale: number,
 ): void {
   const pad = 16 * scale
-  const col_w = Math.min(360 * scale, w - pad * 2)
-  const cx = x + pad
   const sec = 22 * scale // section row height
   const ctrl = 28 * scale // control row height
+  const gap = 12 * scale
+  const stack_count = 17
+  const content_h = pad * 2
+    + sec * 8
+    + ctrl * 3
+    + 30 * scale
+    + 20 * scale * 2
+    + 18 * scale
+    + 30 * scale
+    + 96 * scale
+    + gap * (stack_count - 1)
+  const sb_w = 7 * scale
+  const overflow = content_h > h
+  const col_w = Math.min(360 * scale, Math.max(1, w - pad * 2 - (overflow ? sb_w + 8 * scale : 0)))
+  const cx = x + pad
   set_stack_layout_debug_wireframe(gallery.toggle_b)
+
+  widgets.handle_scroll_area(x, y, w, h, gallery.scroll, content_h)
+  gallery.scroll.offset_y = Math.max(0, Math.min(Math.max(0, content_h - h), gallery.scroll.offset_y))
 
   // A single vertical stack drives the whole panel: each section label and its
   // control is just the next slot, so there is no x/y cursor bookkeeping here.
   const stack = (gallery_col ??= create_stack_ui_layout(widgets))
-  stack.vstack(cx, y + pad, col_w, h - pad * 2, 15, { gap: 12 * scale })
+  renderer.push_clip(x, y, w, h)
+  stack.vstack(cx, y + pad - gallery.scroll.offset_y, col_w, Math.max(1, content_h - pad * 2), stack_count, { gap })
 
   stack.section(sec, 'THEME')
   const theme_names = theme_ctrl.presets.map((p) => p.name)
@@ -1578,6 +1604,71 @@ function render_gallery(
 
   stack.section(sec, 'COLOR')
   gallery.color = stack.ui_color_picker('g_col', { w: 180 * scale, h: ctrl }, gallery.color)
+
+  stack.section(sec, 'TEXT STYLE')
+  const text_rect = stack.next_rect(96 * scale)
+  draw_gallery_text_specimen(renderer, theme, text_rect.x, text_rect.y, text_rect.w, text_rect.h, scale)
+  renderer.pop_clip()
+
+  if (overflow) {
+    widgets.scrollbar('gallery_sb', x + w - sb_w - 4 * scale, y, sb_w, h, gallery.scroll, content_h)
+  }
+}
+
+function draw_gallery_text_specimen(
+  renderer: ui_renderer,
+  theme: theme_definition,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  scale: number,
+): void {
+  const slot = (name: keyof theme_definition['palette']) => pack_color(theme.palette[name])
+  const tint = pack_ui_color(gallery.color)
+  const pad = 10 * scale
+  const panel = pack_color(color_with_alpha(theme.palette.panel_alt, 'a8'))
+  const outline = slot('border_strong')
+  const shadow = 0x9c000000
+
+  renderer.fill_round_rect(x, y, w, h, 4 * scale, panel)
+  renderer.stroke_round_rect(x, y, w, h, 4 * scale, 1, slot('border'))
+
+  const left = x + pad
+  const top = y + 7 * scale
+  renderer.draw_text_msdf(left, top, 'Small / normal / tint', 10 * scale, slot('text_dim'), { weight: -0.1 })
+  renderer.draw_text_msdf(left, top + 17 * scale, 'Medium weighted', 13.5 * scale, tint, { weight: 0.2 })
+  draw_msdf_outline_text(renderer, left, top + 40 * scale, 'Outline', 18 * scale, slot('text'), outline, 1.15 * scale)
+
+  const right = x + Math.max(168 * scale, w * 0.52)
+  renderer.draw_text_msdf(right, top + 3 * scale, 'Shadow', 20 * scale, slot('accent'), {
+    weight: 0.12,
+    shadow: { dx: 2.5 * scale, dy: 3 * scale, color: shadow, weight: 0.28, softness: 2.25 },
+  })
+  renderer.draw_text_msdf(right, top + 39 * scale, 'Varied weight', 13 * scale, slot('text'), {
+    weight: (_ch, index) => (index % 2 === 0 ? 0.36 : -0.16),
+  })
+}
+
+function draw_msdf_outline_text(
+  renderer: ui_renderer,
+  x: number,
+  y: number,
+  text: string,
+  font_px: number,
+  fill: number,
+  outline: number,
+  outline_px: number,
+): void {
+  const steps = [
+    [-1, -1], [0, -1], [1, -1],
+    [-1, 0], [1, 0],
+    [-1, 1], [0, 1], [1, 1],
+  ] as const
+  for (const [dx, dy] of steps) {
+    renderer.draw_text_msdf(x + dx * outline_px, y + dy * outline_px, text, font_px, outline, { weight: 0.32, softness: 1.15 })
+  }
+  renderer.draw_text_msdf(x, y, text, font_px, fill, { weight: 0.02 })
 }
 
 function render_icons(
