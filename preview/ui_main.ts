@@ -73,6 +73,7 @@ import type {
   node_graph_connection,
   node_graph_template,
   terrain_graph,
+  asset_market_item,
 } from '../src/plugins'
 import theme_url from './theme.json?url'
 
@@ -235,6 +236,21 @@ const node_graph_templates: node_graph_template[] = [
   { type: 'Output', inputs: [{ label: 'Albedo', type: 'color' }, { label: 'Normal', type: 'vec3' }] },
 ]
 
+const audited_market_assets: asset_market_item[] = [
+  { id: 'hdr-studio-a', name: 'Studio HDR Rig', type_label: 'HDRI', subtitle: 'Lighting / audit batch 48', audit_status: 'passed', price_cents: 1200, thumbnail_color: pack_color('#4c8bf5') },
+  { id: 'mat-brushed-steel', name: 'Brushed Steel Material', type_label: 'MAT', subtitle: 'PBR material', audit_status: 'passed', price_cents: 800, thumbnail_color: pack_color('#8f96a3') },
+  { id: 'mesh-service-drone', name: 'Service Drone Mesh', type_label: 'MESH', subtitle: '12k tris / rigged', audit_status: 'warning', price_cents: 2400, thumbnail_color: pack_color('#d8a24a') },
+  { id: 'tex-panels', name: 'Sci-Fi Panel Textures', type_label: 'TEX', subtitle: '4K texture set', audit_status: 'passed', price_cents: 1600, thumbnail_color: pack_color('#5fb878') },
+  { id: 'anim-door-cycle', name: 'Door Cycle Animation', type_label: 'ANIM', subtitle: 'Loopable motion', audit_status: 'pending', price_cents: 0, thumbnail_color: pack_color('#5b9bd5') },
+  { id: 'sfx-interface-pack', name: 'Interface Sound Pack', type_label: 'SFX', subtitle: '32 normalized cues', audit_status: 'passed', price_cents: 600, thumbnail_color: pack_color('#49a6a6') },
+  { id: 'vfx-energy-core', name: 'Energy Core VFX', type_label: 'VFX', subtitle: 'Particle preset', audit_status: 'passed', price_cents: 1400, thumbnail_color: pack_color('#e0698b') },
+  { id: 'mat-carbon-fiber', name: 'Carbon Fiber Material', type_label: 'MAT', subtitle: 'PBR material', audit_status: 'passed', price_cents: 900, thumbnail_color: pack_color('#343746') },
+  { id: 'mesh-terminal', name: 'Wall Terminal Mesh', type_label: 'MESH', subtitle: '5k tris / LODs', audit_status: 'passed', price_cents: 1100, thumbnail_color: pack_color('#bd93f9') },
+  { id: 'tex-warning-decals', name: 'Warning Decal Sheet', type_label: 'TEX', subtitle: 'Transparent atlas', audit_status: 'warning', price_cents: 500, thumbnail_color: pack_color('#f1fa8c') },
+  { id: 'shader-hologram', name: 'Hologram Shader', type_label: 'SHDR', subtitle: 'WGSL material node', audit_status: 'passed', price_cents: 1300, thumbnail_color: pack_color('#88c0d0') },
+  { id: 'kit-warehouse-props', name: 'Warehouse Props Kit', type_label: 'KIT', subtitle: '18 modular props', audit_status: 'passed', price_cents: 3200, thumbnail_color: pack_color('#c08a2e') },
+]
+
 // The desktop: the Demo Editor app window (hosting the dock layout above)
 // next to a floating Chat window. Other apps spawn from the View menu.
 function build_window_layout(): window_layout {
@@ -320,6 +336,7 @@ const BUILTIN_APPS: { id: string; name: string; icon: string; accent?: string; d
   { id: 'profiler', name: 'Profiler', icon: 'search', description: 'Frame profiler and memory registry.' },
   { id: 'gamepad', name: 'Controller Test', icon: 'circle', description: 'Game controller visualiser.' },
   { id: 'asset_audit', name: 'Asset Audit', icon: 'file', accent: '#6b3d5a', description: 'Drop or upload .glb/.fbx assets: 3D preview, stats, optimize, re-export.' },
+  { id: 'asset_market', name: 'Asset Market', icon: 'image', accent: '#6b5a3d', description: 'Browse audited assets, add thumbnail cards to a cart, and check out.' },
   { id: 'avatar', name: 'Avatar Generator', icon: 'circle', accent: '#3d5a6b', description: 'Procedural human mesh from a parametric skeleton: SDF volumes → surface nets → GLB.' },
   { id: 'material_audit', name: 'Material Audit', icon: 'image', accent: '#5a6b3d', description: 'Upload base color / normal maps and validate them on a repeat grid, UV sphere or rounded cube.' },
   { id: 'about', name: 'About', icon: 'home', description: 'About this demo.' },
@@ -354,6 +371,7 @@ interface demo_plugins {
   dashboard_state: ReturnType<plugin_module['create_dashboard_state']>
   file_state: ReturnType<plugin_module['create_file_browser_state']>
   audit_state: ReturnType<plugin_module['create_asset_audit_state']>
+  market_state: ReturnType<plugin_module['create_asset_market_state']>
   avatar_state: ReturnType<plugin_module['create_avatar_generator_state']>
   material_audit_state: ReturnType<plugin_module['create_material_audit_state']>
   chat_state: ReturnType<plugin_module['create_im_dialog_state']>
@@ -519,6 +537,7 @@ const VIEW_TABS: { id: string; title: string; win?: window_new_options }[] = [
   { id: 'profiler', title: 'Profiler', win: { w: 760, h: 460 } },
   { id: 'gamepad', title: 'Controller Test', win: { w: 620, h: 540 } },
   { id: 'asset_audit', title: 'Asset Audit', win: { w: 900, h: 560 } },
+  { id: 'asset_market', title: 'Asset Market', win: { w: 920, h: 560 } },
   { id: 'avatar', title: 'Avatar Generator', win: { w: 920, h: 600 } },
   { id: 'material_audit', title: 'Material Audit', win: { w: 760, h: 560 } },
   { id: 'webtix', title: 'Path Tracer', win: { w: 900, h: 600 } },
@@ -585,6 +604,10 @@ function append_console(text: string, color?: string): void {
   console_state.scroll_to_line = console_lines.length - 1
   windows.invalidate('demo-editor') // the Console lives inside the Demo Editor window
   active_renderer?.request_render()
+}
+
+function format_market_total(cents: number): string {
+  return cents ? `$${(cents / 100).toFixed(2)}` : 'Free'
 }
 
 // Cancel any pending (debounced) compile and reset a queued status to idle.
@@ -669,6 +692,7 @@ function build_main_menu(mod: plugin_module): ui_main_menu {
           { id: 'profiler', label: 'Profiler' },
           { id: 'gamepad', label: 'Controller Test' },
           { id: 'asset_audit', label: 'Asset Audit' },
+          { id: 'asset_market', label: 'Asset Market' },
           { id: 'avatar', label: 'Avatar Generator' },
           { id: 'material_audit', label: 'Material Audit' },
           { id: 'webtix', label: 'Path Tracer' },
@@ -821,6 +845,7 @@ function init_plugins(mod: plugin_module): void {
     dashboard_state: mod.create_dashboard_state(),
     file_state: mod.create_file_browser_state(),
     audit_state: mod.create_asset_audit_state(),
+    market_state: mod.create_asset_market_state(),
     avatar_state: mod.create_avatar_generator_state(),
     material_audit_state: mod.create_material_audit_state(),
     chat_state: mod.create_im_dialog_state(),
@@ -1205,6 +1230,22 @@ async function main(): Promise<void> {
         case 'asset_audit':
           live.mod.asset_audit(renderer, widgets, theme, snapshot, px, py, pw, ph, live.audit_state, { scale })
           break
+        case 'asset_market': {
+          const ev = live.mod.asset_market(renderer, theme, snapshot, px, py, pw, ph, audited_market_assets, live.market_state)
+          if (ev.checkout) {
+            const count = ev.checkout.lines.reduce((sum, line) => sum + line.quantity, 0)
+            append_console(`asset market checkout: ${count} assets (${format_market_total(ev.checkout.total_cents)})`, '#5fb878')
+            live.market_state.cart.clear()
+            windows.invalidate('asset_market')
+          } else if (ev.added) {
+            append_console(`asset market add: ${ev.added.name}`, '#4c8bf5')
+            windows.invalidate('asset_market')
+          } else if (ev.removed) {
+            append_console(`asset market remove: ${ev.removed.name}`, '#d8a24a')
+            windows.invalidate('asset_market')
+          }
+          break
+        }
         case 'avatar': {
           const ev = live.mod.avatar_generator(renderer, widgets, theme, snapshot, px, py, pw, ph, live.avatar_state, { scale })
           if (ev.exported_bytes) append_console(`avatar.glb exported (${live.mod.format_asset_bytes(ev.exported_bytes)})`, '#5fb878')
