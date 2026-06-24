@@ -47,6 +47,8 @@ export interface ui_input_snapshot {
   key_down?: boolean
   key_page_up?: boolean
   key_page_down?: boolean
+  /** F12 key edge, used by host/debug integrations such as GPU capture. */
+  key_f12?: boolean
   /** `a` key — combined with ctrl/meta for select-all in the text view. */
   key_a?: boolean
   /** `c` key — combined with ctrl/meta for copy in the text view. */
@@ -257,6 +259,7 @@ export function create_empty_ui_input(): ui_input_snapshot {
     key_down: false,
     key_page_up: false,
     key_page_down: false,
+    key_f12: false,
     key_a: false,
     key_c: false,
     ime_composition: '',

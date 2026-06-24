@@ -204,6 +204,7 @@ export class input_collector {
       if (this.native_active && !e.isComposing && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Backspace', 'Delete', 'Home', 'End', 'Enter'].includes(e.key)) {
         e.preventDefault()
       }
+      if (e.key === 'F12') e.preventDefault()
       wake()
     })
     window.addEventListener('keyup', (e) => {
@@ -283,6 +284,7 @@ export class input_collector {
     s.key_end = this.keys.has('End')
     s.key_page_up = this.keys.has('PageUp')
     s.key_page_down = this.keys.has('PageDown')
+    s.key_f12 = this.keys.has('F12')
     s.key_a = this.keys.has('a') || this.keys.has('A')
     s.key_c = this.keys.has('c') || this.keys.has('C')
     s.shift = this.shift

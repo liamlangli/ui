@@ -3,6 +3,7 @@ import latin_mono_font_image_url from '../../assets/latin_mono.webp?url'
 import ping_fang_font_json_url from '../../assets/ping_fang_sc_regular.json?url'
 import ping_fang_font_image_url from '../../assets/ping_fang_sc_regular.webp?url'
 import ui_shader_url from '../../assets/ui.wgsl?url'
+import { ui_begin_metal_frame_capture, ui_consume_metal_frame_capture_request, ui_end_metal_frame_capture, ui_has_pending_metal_frame_capture } from './ui_gpu_capture'
 import { clamp } from './ui_math'
 import { memory } from './ui_memory'
 
@@ -1898,29 +1899,35 @@ export class ui_renderer {
     if (!this.device || !this.context || !this.pipeline_image || !this.pipeline_sdf || !this.pipeline_msdf || !this.bind_group_white) return
     const vertex_byte_length = this.vertex_count * vertex_stride
     const byte_length = Math.max(vertex_byte_length, vertex_stride)
-    const should_render = this.render_mode_ !== 'adaptive' || this.pending_render_frames > 0
+    const should_render = this.render_mode_ !== 'adaptive' || this.pending_render_frames > 0 || ui_has_pending_metal_frame_capture()
     if (should_render) {
-      if (this.render_mode_ === 'adaptive') this.pending_render_frames -= 1
+      if (this.render_mode_ === 'adaptive' && this.pending_render_frames > 0) this.pending_render_frames -= 1
+      const capture_request = ui_consume_metal_frame_capture_request()
+      const capture = capture_request ? ui_begin_metal_frame_capture(capture_request) : null
       // Grow the GPU vertex buffer only here, right before we render. The CPU
       // side buffer is grown per primitive during the frame, never per vertex.
-      this.ensure_vertex_buffer(byte_length)
-      this.last_frame_stats = this.capture_stats(byte_length)
-      this.device.queue.writeBuffer(this.vertex_buffer, 0, this.vertex_data, 0, vertex_byte_length)
-      const encoder = this.device.createCommandEncoder({ label: 'ui.command_encoder' })
-      const pass = encoder.beginRenderPass({
-        label: 'ui.render_pass',
-        colorAttachments: [
-          {
-            view: this.context.getCurrentTexture().createView({ label: 'ui.swapchain_view' }),
-            clearValue: clear_color,
-            loadOp: 'clear',
-            storeOp: 'store',
-          },
-        ],
-      })
-      this.encode_render_pass(pass)
-      pass.end()
-      this.device.queue.submit([encoder.finish()])
+      try {
+        this.ensure_vertex_buffer(byte_length)
+        this.last_frame_stats = this.capture_stats(byte_length)
+        this.device.queue.writeBuffer(this.vertex_buffer, 0, this.vertex_data, 0, vertex_byte_length)
+        const encoder = this.device.createCommandEncoder({ label: 'ui.command_encoder' })
+        const pass = encoder.beginRenderPass({
+          label: 'ui.render_pass',
+          colorAttachments: [
+            {
+              view: this.context.getCurrentTexture().createView({ label: 'ui.swapchain_view' }),
+              clearValue: clear_color,
+              loadOp: 'clear',
+              storeOp: 'store',
+            },
+          ],
+        })
+        this.encode_render_pass(pass)
+        pass.end()
+        this.device.queue.submit([encoder.finish()])
+      } finally {
+        ui_end_metal_frame_capture(capture)
+      }
     } else {
       this.last_frame_stats = this.capture_stats(this.vertex_buffer?.size ?? byte_length)
     }

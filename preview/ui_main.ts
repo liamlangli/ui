@@ -55,6 +55,8 @@ import {
   gamepad_cursor_update,
   gamepad_cursor_draw,
   create_gamepad_cursor_state,
+  ui_has_metal_gpu_capture_bridge,
+  ui_queue_metal_frame_capture,
 } from '../src/core'
 // Plugin types only — `import type` is erased at build time, so this does not
 // pull the plugin modules into the startup chunk.
@@ -1093,9 +1095,18 @@ async function main(): Promise<void> {
       key_backspace: false, key_delete: false, key_enter: false, key_escape: false,
       key_left: false, key_right: false, key_up: false, key_down: false,
       key_home: false, key_end: false, key_page_up: false, key_page_down: false,
-      key_a: false, key_c: false,
+      key_f12: false, key_a: false, key_c: false,
     }
     const desktop_snapshot = dashboard_open ? blank_input : snapshot
+    if (snapshot.key_f12) {
+      if (ui_queue_metal_frame_capture({ directory: '.', scope: 'frame', label: 'ui.preview.frame' })) {
+        append_console('Metal GPU frame capture requested: ./ui-frame-*.gputrace', '#5fb878')
+        renderer.request_render(1)
+      } else {
+        append_console('Metal GPU capture bridge unavailable (window.ui_metal_gpu_capture)', '#d8a24a')
+      }
+      if (!ui_has_metal_gpu_capture_bridge()) console.warn('Install window.ui_metal_gpu_capture or a uiMetalGpuCapture WebKit message handler to save Metal captures.')
+    }
     // The menu activates on mouse_pressed, so when it opens the dashboard the
     // press edge is still live in this frame's snapshot — feed the dashboard
     // blank input on its opening frame so that click can't instantly launch a
