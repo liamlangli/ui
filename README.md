@@ -603,6 +603,25 @@ await renderer.load_chinese_font()
 
 `chinese_font` defaults to `true`.
 
+#### Custom language font
+
+To overwrite the default PingFang SC atlas with your own font, supply a
+`language_font` source — a name plus the URLs of the font's JSON metrics
+(BMFont-style `chars` table) and its atlas image. The URLs are fetched as-is,
+so a bundler asset URL, an absolute path, or a remote URL all work:
+
+```ts
+import my_font_json from './my_font.json?url'
+import my_font_image from './my_font.webp?url'
+
+await renderer.init({
+  language_font: { name: 'My Font', json: my_font_json, image: my_font_image },
+})
+
+// Or swap fonts after init (passing a source always forces a reload):
+await renderer.load_chinese_font({ name: 'My Font', json: my_font_json, image: my_font_image })
+```
+
 ### Text view (selectable / copyable console)
 
 `ui_widgets.text_view` is a fully GPU-rendered, selectable and copyable

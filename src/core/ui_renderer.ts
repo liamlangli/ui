@@ -117,6 +117,22 @@ export interface ui_text_msdf_options {
  */
 export type ui_renderer_render_mode = 'realtime' | 'adaptive'
 
+/**
+ * A user-supplied override for the default language (CJK) font. Lets callers
+ * swap the bundled PingFang SC atlas for their own font by pointing at a JSON
+ * metrics document and its atlas image. The two URLs are fetched as-is (so any
+ * path the browser can `fetch()` works — bundler asset URL, absolute path, or
+ * remote), bypassing the bundled atlas registry.
+ */
+export interface ui_font_source {
+  /** Human-readable font name. Used only for memory-tracking labels. */
+  name?: string
+  /** URL/path to the font's JSON metrics document (BMFont-style chars table). */
+  json: string
+  /** URL/path to the font's atlas image (e.g. a `.webp`/`.png`). */
+  image: string
+}
+
 export interface ui_renderer_init_options {
   /**
    * Load the Chinese (PingFang SC) font atlas. Defaults to `true`.
@@ -128,6 +144,13 @@ export interface ui_renderer_init_options {
    * `load_chinese_font()`.
    */
   chinese_font?: boolean
+  /**
+   * Override the default language (CJK) font with a custom one. Provide the
+   * font's name plus the JSON metrics and atlas image URLs and they are loaded
+   * in place of the bundled PingFang SC atlas. Ignored when `chinese_font` is
+   * `false`. You can also swap fonts after init via `load_chinese_font(source)`.
+   */
+  language_font?: ui_font_source
   /**
    * How `flush()` decides whether to submit GPU work. Defaults to
    * `'adaptive'`. See `ui_renderer_render_mode` for details.
@@ -569,6 +592,7 @@ export class ui_renderer {
   private break_command_merge = false
   private readonly font_atlases = new Map<ui_font_primitive, font_atlas>()
   private chinese_font_load: Promise<void> | null = null
+  private language_font_name: string | null = null
   private canvas_width = 1
   private canvas_height = 1
   private bind_group_layout: GPUBindGroupLayout | null = null
@@ -719,8 +743,9 @@ export class ui_renderer {
     this.resize()
 
     // The Chinese atlas is large, so load it off the critical path. The CJK
-    // slot keeps its transparent placeholder until the real atlas arrives.
-    if (options?.chinese_font ?? true) void this.load_chinese_font()
+    // slot keeps its transparent placeholder until the real atlas arrives. A
+    // caller-supplied `language_font` overrides the bundled PingFang SC atlas.
+    if (options?.chinese_font ?? true) void this.load_chinese_font(options?.language_font)
   }
 
   async init_with_device(device: GPUDevice, format: GPUTextureFormat, options?: ui_renderer_init_options): Promise<void> {
@@ -834,29 +859,38 @@ export class ui_renderer {
     memory.track('ui.buffer.color_panel', 'buffer', 'gpu', 32, 'color panel uniform')
     this.resize_to(this.canvas.width || 1, this.canvas.height || 1)
 
-    if (options?.chinese_font ?? true) void this.load_chinese_font()
+    if (options?.chinese_font ?? true) void this.load_chinese_font(options?.language_font)
   }
 
   /**
-   * Asynchronously load the Chinese (PingFang SC) font atlas and swap it in
-   * once ready. Safe to call multiple times — concurrent and repeat calls
-   * share the same in-flight load. Resolves when the atlas is available (or
-   * immediately if it has already loaded).
+   * Asynchronously load the default language (CJK) font atlas and swap it in
+   * once ready. With no argument it loads the bundled PingFang SC atlas; pass a
+   * {@link ui_font_source} to load a custom font from your own JSON metrics and
+   * atlas image instead. Safe to call multiple times — concurrent and repeat
+   * calls share the same in-flight load. Resolves when the atlas is available
+   * (or immediately if it has already loaded). Supplying a `source` always
+   * forces a reload so a custom font can replace one already in place.
    */
-  load_chinese_font(): Promise<void> {
-    if (this.font_atlases.has(FONT_ZH)) return Promise.resolve()
-    if (this.chinese_font_load) return this.chinese_font_load
-    this.chinese_font_load = this.fetch_chinese_font().catch((err) => {
-      this.chinese_font_load = null
+  load_chinese_font(source?: ui_font_source): Promise<void> {
+    if (!source && this.font_atlases.has(FONT_ZH)) return Promise.resolve()
+    if (!source && this.chinese_font_load) return this.chinese_font_load
+    const load = this.fetch_chinese_font(source).catch((err) => {
+      if (this.chinese_font_load === load) this.chinese_font_load = null
       throw err
     })
-    return this.chinese_font_load
+    this.chinese_font_load = load
+    return load
   }
 
-  private async fetch_chinese_font(): Promise<void> {
-    const cjk_font_doc = await load_json<font_doc>(ping_fang_font_json_url)
-    const cjk_font_image = await load_image_bitmap_asset(font_image_url(cjk_font_doc, 'cjk'))
+  private async fetch_chinese_font(source?: ui_font_source): Promise<void> {
+    const json_url = source?.json ?? ping_fang_font_json_url
+    const cjk_font_doc = await load_json<font_doc>(json_url)
+    // A custom source points straight at its atlas image; the bundled font
+    // resolves its page through the asset registry.
+    const image_url = source?.image ?? font_image_url(cjk_font_doc, 'cjk')
+    const cjk_font_image = await load_image_bitmap_asset(image_url)
     if (!this.device || !this.sampler || !this.bind_group_layout || !this.screen_buffer) return
+    this.language_font_name = source?.name ?? null
     this.font_atlases.set(FONT_ZH, glyph_map(cjk_font_doc, cjk_font_doc.width, cjk_font_doc.height, { cjk_punctuation_fallbacks: true }))
     this.font_bind_groups.set(cjk_font_texture_id, this.create_texture_bind_group('ui.font_texture.cjk', cjk_font_image, this.sampler, this.bind_group_layout))
     memory.untrack('ui.font_texture.cjk.placeholder')
@@ -867,7 +901,8 @@ export class ui_renderer {
   private track_glyph_tables(): void {
     for (const [type, atlas] of this.font_atlases) {
       const label = type === FONT_MAIN ? 'main' : type === FONT_MONO ? 'mono' : 'cjk'
-      memory.track(`ui.font_glyphs.${label}`, 'font', 'cpu', atlas.glyphs.size * glyph_table_bytes_per_entry, `${atlas.glyphs.size} glyphs`)
+      const named = type === FONT_ZH && this.language_font_name ? ` (${this.language_font_name})` : ''
+      memory.track(`ui.font_glyphs.${label}`, 'font', 'cpu', atlas.glyphs.size * glyph_table_bytes_per_entry, `${atlas.glyphs.size} glyphs${named}`)
     }
   }
 
