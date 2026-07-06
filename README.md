@@ -689,6 +689,41 @@ renderer.draw_texture(tex, x, y, w, h) // sampler chosen at create time
 renderer.destroy_texture(tex)
 ```
 
+### Atlas render target
+
+The renderer keeps a single built-in **atlas** texture: a user-owned render
+target you paint into yourself, then sample back as a first-class `'atlas'`
+primitive. It gives the UI a scratch surface for content the immediate-mode
+primitives can't express directly — custom-shaded output, a cached composite,
+externally rendered imagery — while still flowing through the normal draw
+pipeline (clip stack, command batching, tinting).
+
+Allocate it at `init()` with `atlas`, or any time via `configure_atlas` (a
+single number makes a square atlas; pass `{ width, height }` for a non-square
+one). Paint into it with `render_to_atlas`, then blit the whole thing or a UV
+sub-region into the frame:
+
+```ts
+await renderer.init({ atlas: { size: 1024, filter: 'linear' } })
+// or, later / to resize: renderer.configure_atlas({ width: 800, height: 600 })
+
+// paint into the atlas — the pixel→NDC mapping is rebased to the atlas size,
+// so (0,0)..(atlas_width, atlas_height) covers it exactly. Pass a clear colour
+// to wipe it first; omit it to composite over the existing contents.
+renderer.render_to_atlas(() => {
+  renderer.fill_round_rect(32, 32, 256, 128, 16, 0xff3366ff)
+  renderer.draw_text(48, 64, 'baked into the atlas', 24, 0xffffffff)
+}, { r: 0, g: 0, b: 0, a: 0 })
+
+// draw it into the current frame as the dedicated 'atlas' primitive
+renderer.draw_atlas(x, y, w, h)                                  // whole atlas
+renderer.draw_atlas_region(x, y, w, h, 0, 0, 0.5, 0.5)          // top-left quadrant
+```
+
+`atlas_texture_id()` returns the texture id (usable anywhere a texture id is
+accepted, e.g. `draw_texture`), and `atlas_size()` reports the current
+dimensions (both are `-1` / `null` until the atlas is configured).
+
 ### Icons
 
 `ui_icons` composes a set of vector icons from the renderer's own draw commands

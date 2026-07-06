@@ -87,6 +87,15 @@ fn screen_px_range_var(uv: vec2f, msdf_range: f32) -> f32 {
   return vec4f(texel * in.col);
 }
 
+// The atlas primitive samples the renderer's user-owned atlas texture — a
+// render target callers paint into themselves — and tints it by the vertex
+// colour, exactly like a regular textured quad. Kept as its own entry point so
+// the atlas is a distinct primitive type in the pipeline.
+@fragment fn fs_atlas(in: vs_out) -> @location(0) vec4f {
+  let texel = vec4<f16>(textureSample(tex, samp, in.uv));
+  return vec4f(texel * in.col);
+}
+
 fn aces(x: vec3<f16>) -> vec3<f16> {
   // ACES fitted curve (Stephen Hill)
   let a: f16 = 2.51; let b: f16 = 0.03; let c: f16 = 2.43; let d: f16 = 0.59; let e: f16 = 0.14;

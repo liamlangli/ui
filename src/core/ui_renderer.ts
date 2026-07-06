@@ -18,7 +18,7 @@ export interface ui_draw_command {
   clip_h: number
 }
 
-export type ui_draw_command_kind = 'image' | 'sdf' | 'msdf'
+export type ui_draw_command_kind = 'image' | 'sdf' | 'msdf' | 'atlas'
 
 /**
  * A retained slice of geometry captured between {@link ui_renderer.begin_layer}
@@ -162,6 +162,15 @@ export interface ui_renderer_init_options {
    * `'adaptive'`. See `ui_renderer_render_mode` for details.
    */
   mode?: ui_renderer_render_mode
+  /**
+   * Allocate the built-in atlas texture at init with the given size. The atlas
+   * is a user-owned render target: paint into it via
+   * {@link ui_renderer.render_to_atlas} and draw it (or regions of it) with
+   * {@link ui_renderer.draw_atlas} / {@link ui_renderer.draw_atlas_region}. You
+   * can also allocate or resize it later via
+   * {@link ui_renderer.configure_atlas}.
+   */
+  atlas?: ui_atlas_options
 }
 
 const adaptive_render_burst_frames = 8
@@ -204,6 +213,25 @@ type color_panel_texture = {
 }
 
 export type ui_texture_filter = 'linear' | 'nearest'
+
+/**
+ * Configuration for the renderer's built-in atlas texture — a user-owned
+ * render target the UI can draw into and then sample back as a first-class
+ * primitive. See {@link ui_renderer.configure_atlas}.
+ */
+export interface ui_atlas_options {
+  /**
+   * Atlas dimensions in texels. A single number makes a square atlas of that
+   * edge length; pass `{ width, height }` for a non-square one.
+   */
+  size: number | { width: number; height: number }
+  /**
+   * Sampling filter used when the atlas is drawn at a different size than its
+   * texels. `'nearest'` keeps it crisp/pixelated, `'linear'` (the default)
+   * smooths on scale.
+   */
+  filter?: ui_texture_filter
+}
 
 type data_texture = {
   texture: GPUTexture
@@ -576,6 +604,7 @@ export class ui_renderer {
   private pipeline_image: GPURenderPipeline | null = null
   private pipeline_sdf: GPURenderPipeline | null = null
   private pipeline_msdf: GPURenderPipeline | null = null
+  private pipeline_atlas: GPURenderPipeline | null = null
   private color_panel_pipeline: GPURenderPipeline | null = null
   private bind_group_white: GPUBindGroup | null = null
   private readonly font_bind_groups = new Map<number, GPUBindGroup>()
@@ -588,6 +617,16 @@ export class ui_renderer {
   private commands: ui_draw_command[] = []
   private clip_stack: clip_rect[] = []
   private current_texture_id = white_texture_id
+  // Draw-command kind for the next textured quad emitted by push_quad. Stays
+  // 'image' for every normal fill/blit; the atlas draw helpers flip it to
+  // 'atlas' for the single quad they emit and reset it immediately after.
+  private pending_kind: ui_draw_command_kind = 'image'
+  // The built-in user-owned atlas render target (see configure_atlas).
+  private atlas_texture: GPUTexture | null = null
+  private atlas_texture_id_ = -1
+  private atlas_width = 0
+  private atlas_height = 0
+  private atlas_filter: ui_texture_filter = 'linear'
   // Retained-layer recording (see begin_layer / end_layer / replay_layer).
   private layer_start_vertex = 0
   private layer_start_command = 0
@@ -715,6 +754,13 @@ export class ui_renderer {
       fragment: { module: shader_module, entryPoint: 'fs_msdf_var', targets: [color_target] },
       primitive: { topology: 'triangle-list' },
     })
+    this.pipeline_atlas = this.device.createRenderPipeline({
+      label: 'ui.pipeline.atlas',
+      layout: pipeline_layout,
+      vertex: { module: shader_module, entryPoint: 'vs_main', buffers: [vertex] },
+      fragment: { module: shader_module, entryPoint: 'fs_atlas', targets: [color_target] },
+      primitive: { topology: 'triangle-list' },
+    })
     this.color_panel_pipeline = this.device.createRenderPipeline({
       label: 'ui.pipeline.color_panel',
       layout: color_panel_layout,
@@ -749,6 +795,8 @@ export class ui_renderer {
     })
     memory.track('ui.buffer.color_panel', 'buffer', 'gpu', 32, 'color panel uniform')
     this.resize()
+
+    if (options?.atlas) this.configure_atlas(options.atlas.size, { filter: options.atlas.filter })
 
     // The Chinese atlas is large, so load it off the critical path. The CJK
     // slot keeps its transparent placeholder until the real atlas arrives. A
@@ -833,6 +881,13 @@ export class ui_renderer {
       fragment: { module: shader_module, entryPoint: 'fs_msdf_var', targets: [color_target] },
       primitive: { topology: 'triangle-list' },
     })
+    this.pipeline_atlas = this.device.createRenderPipeline({
+      label: 'ui.pipeline.atlas',
+      layout: pipeline_layout,
+      vertex: { module: shader_module, entryPoint: 'vs_main', buffers: [vertex] },
+      fragment: { module: shader_module, entryPoint: 'fs_atlas', targets: [color_target] },
+      primitive: { topology: 'triangle-list' },
+    })
     this.color_panel_pipeline = this.device.createRenderPipeline({
       label: 'ui.pipeline.color_panel',
       layout: color_panel_layout,
@@ -867,6 +922,8 @@ export class ui_renderer {
     })
     memory.track('ui.buffer.color_panel', 'buffer', 'gpu', 32, 'color panel uniform')
     this.resize_to(this.canvas.width || 1, this.canvas.height || 1)
+
+    if (options?.atlas) this.configure_atlas(options.atlas.size, { filter: options.atlas.filter })
 
     if (options?.chinese_font ?? true) void this.load_chinese_font(options?.language_font)
   }
@@ -964,6 +1021,7 @@ export class ui_renderer {
     this.commands = []
     this.clip_stack = [make_clip(0, 0, this.canvas_width, this.canvas_height)]
     this.current_texture_id = white_texture_id
+    this.pending_kind = 'image'
     this.break_command_merge = false
   }
 
@@ -1155,6 +1213,104 @@ export class ui_renderer {
     if (w <= 0 || h <= 0) return
     this.current_texture_id = texture_id
     this.push_quad(x, y, x + w, y + h, u0, v0, u1, v1, color)
+  }
+
+  /**
+   * Allocate (or resize) the built-in atlas texture — a user-owned render
+   * target the UI can paint into and then sample back as a first-class atlas
+   * primitive. It gives callers a scratch surface for content the immediate-
+   * mode primitives can't express directly (custom-shaded output, cached
+   * composites, externally rendered imagery): draw into it with
+   * {@link render_to_atlas}, then blit it into the frame with {@link draw_atlas}
+   * / {@link draw_atlas_region}.
+   *
+   * `size` is an edge length (square) or `{ width, height }`, in texels. The
+   * atlas keeps the renderer's colour {@link gpu | format} so the same
+   * immediate-mode pipelines can render into it. Returns the atlas texture id
+   * (also available via {@link atlas_texture_id}). Safe to call repeatedly; a
+   * no-op when the size and filter are unchanged. Existing atlas contents are
+   * not preserved across a resize.
+   */
+  configure_atlas(size: number | { width: number; height: number }, options?: { filter?: ui_texture_filter }): number {
+    if (!this.device || !this.format) throw new Error('ui_renderer not initialized')
+    const w = Math.max(1, Math.floor(typeof size === 'number' ? size : size.width))
+    const h = Math.max(1, Math.floor(typeof size === 'number' ? size : size.height))
+    const filter = options?.filter ?? this.atlas_filter
+    if (this.atlas_texture && this.atlas_width === w && this.atlas_height === h) {
+      if (filter !== this.atlas_filter) this.set_atlas_filter(filter)
+      return this.atlas_texture_id_
+    }
+    this.atlas_texture?.destroy()
+    this.atlas_filter = filter
+    this.atlas_texture = this.device.createTexture({
+      label: 'ui.atlas_texture',
+      size: [w, h, 1],
+      format: this.format,
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_DST,
+    })
+    this.atlas_width = w
+    this.atlas_height = h
+    if (this.atlas_texture_id_ < 0) this.atlas_texture_id_ = this.next_texture_id++
+    this.extra_bind_groups.set(this.atlas_texture_id_, this.create_data_texture_bind_group(this.atlas_texture_id_, this.atlas_texture, filter))
+    memory.track('ui.atlas_texture', 'texture', 'gpu', gpu_texture_bytes(this.atlas_texture), `${w}×${h} ${this.format}`)
+    return this.atlas_texture_id_
+  }
+
+  /**
+   * The atlas texture id — usable anywhere a texture id is accepted (e.g.
+   * {@link draw_texture}) — or -1 if the atlas has not been configured yet.
+   */
+  atlas_texture_id(): number {
+    return this.atlas_texture_id_
+  }
+
+  /** The atlas dimensions in texels, or null if the atlas has not been configured yet. */
+  atlas_size(): { width: number; height: number } | null {
+    return this.atlas_texture ? { width: this.atlas_width, height: this.atlas_height } : null
+  }
+
+  private set_atlas_filter(filter: ui_texture_filter): void {
+    if (!this.atlas_texture || this.atlas_texture_id_ < 0) return
+    this.atlas_filter = filter
+    this.extra_bind_groups.set(this.atlas_texture_id_, this.create_data_texture_bind_group(this.atlas_texture_id_, this.atlas_texture, filter))
+  }
+
+  /**
+   * Paint into the atlas with the renderer's own immediate-mode primitives.
+   * `draw` runs against a pixel→NDC mapping rebased to the atlas size, so
+   * geometry over (0,0)..(atlas_width, atlas_height) covers it exactly. Pass
+   * `clear` to wipe the atlas first; omit it to composite over the existing
+   * contents. Safe to call at any time — the in-progress frame is saved and
+   * restored around it. A no-op until the atlas has been configured (see
+   * {@link configure_atlas}).
+   */
+  render_to_atlas(draw: () => void, clear?: GPUColorDict): void {
+    if (!this.atlas_texture) return
+    this.render_to_texture(this.atlas_texture, this.atlas_width, this.atlas_height, draw, clear)
+  }
+
+  /**
+   * Draw the whole atlas into the current frame at (x, y) sized w×h, tinted by
+   * `color` (packed `0xAABBGGRR`; defaults to opaque white — the atlas
+   * untouched). Emitted as the dedicated `'atlas'` primitive. A no-op until the
+   * atlas is configured.
+   */
+  draw_atlas(x: number, y: number, w: number, h: number, options?: { filter?: ui_texture_filter; color?: number }): void {
+    this.draw_atlas_region(x, y, w, h, 0, 0, 1, 1, options?.color ?? 0xffffffff, options?.filter)
+  }
+
+  /**
+   * Draw a UV sub-region of the atlas into the current frame. `u0,v0,u1,v1` are
+   * normalized atlas coordinates (top-left origin). Emitted as the dedicated
+   * `'atlas'` primitive. A no-op until the atlas is configured.
+   */
+  draw_atlas_region(x: number, y: number, w: number, h: number, u0: number, v0: number, u1: number, v1: number, color = 0xffffffff, filter?: ui_texture_filter): void {
+    if (this.atlas_texture_id_ < 0 || w <= 0 || h <= 0) return
+    if (filter && filter !== this.atlas_filter) this.set_atlas_filter(filter)
+    this.current_texture_id = this.atlas_texture_id_
+    this.pending_kind = 'atlas'
+    this.push_quad(x, y, x + w, y + h, u0, v0, u1, v1, color)
+    this.pending_kind = 'image'
   }
 
   draw_hsv_saturation_square(x: number, y: number, w: number, h: number, value: number): void {
@@ -2026,10 +2182,12 @@ export class ui_renderer {
     const saved_clip = this.clip_stack
     const saved_texture_id = this.current_texture_id
     const saved_break = this.break_command_merge
+    const saved_kind = this.pending_kind
 
     this.commands = []
     this.clip_stack = [make_clip(0, 0, w, h)]
     this.current_texture_id = white_texture_id
+    this.pending_kind = 'image'
     this.break_command_merge = true
     // draw() accumulates into this.commands / this.vertex_data, which
     // encode_render_pass then consumes directly below.
@@ -2076,6 +2234,7 @@ export class ui_renderer {
     this.vertex_count = saved_vertex_count
     this.clip_stack = saved_clip
     this.current_texture_id = saved_texture_id
+    this.pending_kind = saved_kind
     this.break_command_merge = saved_break
     this.enlarge_if_needed()
   }
@@ -2096,7 +2255,7 @@ export class ui_renderer {
   }
 
   private encode_render_pass(pass: GPURenderPassEncoder): void {
-    if (!this.vertex_buffer || !this.pipeline_image || !this.pipeline_sdf || !this.pipeline_msdf || !this.bind_group_white) return
+    if (!this.vertex_buffer || !this.pipeline_image || !this.pipeline_sdf || !this.pipeline_msdf || !this.pipeline_atlas || !this.bind_group_white) return
     pass.setVertexBuffer(0, this.vertex_buffer)
     for (const cmd of this.commands) {
       if (cmd.clip_w <= 0 || cmd.clip_h <= 0) continue
@@ -2109,6 +2268,9 @@ export class ui_renderer {
         pass.setBindGroup(0, bind_group)
       } else if (font_bind_group) {
         pass.setPipeline(this.pipeline_sdf)
+        pass.setBindGroup(0, bind_group)
+      } else if (cmd.kind === 'atlas') {
+        pass.setPipeline(this.pipeline_atlas)
         pass.setBindGroup(0, bind_group)
       } else {
         pass.setPipeline(this.pipeline_image)
@@ -2574,7 +2736,7 @@ export class ui_renderer {
       this.vertex_count = base
       return
     }
-    this.emit_command(base, 6)
+    this.emit_command(base, 6, this.pending_kind)
   }
 
   private push_tri(x0: number, y0: number, x1: number, y1: number, x2: number, y2: number, u: number, v: number, color: number): void {
