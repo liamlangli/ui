@@ -104,7 +104,6 @@ function extract_template_skeleton(gltf: ArrayBuffer): avatar_skeleton {
   const json = JSON.parse(new TextDecoder().decode(gltf)) as template_gltf_json
   const skin = json.skins?.[0]
   const joint_indices = skin?.joints ?? []
-  const joint_set = new Set(joint_indices)
   const world = new Map<number, mat4>()
   const visit = (index: number, parent: mat4, depth: number): void => {
     if (depth > 256) return

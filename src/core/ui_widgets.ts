@@ -1396,18 +1396,6 @@ export class ui_widgets {
     return a.r === next.r && a.g === next.g && a.b === next.b && a.a === next.a
   }
 
-  private draw_checkerboard(x: number, y: number, w: number, h: number, cell: number): void {
-    const dark = this.color('panel_alt')
-    const light = this.color('selected')
-    const cols = Math.ceil(w / Math.max(1, cell))
-    const rows = Math.ceil(h / Math.max(1, cell))
-    for (let row = 0; row < rows; row += 1) {
-      for (let col = 0; col < cols; col += 1) {
-        this.ui.fill_rect(x + col * cell, y + row * cell, Math.min(cell, x + w - (x + col * cell)), Math.min(cell, y + h - (y + row * cell)), (row + col) % 2 === 0 ? dark : light)
-      }
-    }
-  }
-
   private draw_color_bar(x: number, y: number, w: number, h: number, radius: number, color: ui_color_rgba, label: string, font_px: number, scale: number): void {
     if (w <= 0 || h <= 0) return
     const normalized = this.normalize_color(color)

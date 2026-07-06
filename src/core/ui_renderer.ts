@@ -1954,8 +1954,10 @@ export class ui_renderer {
       // side buffer is grown per primitive during the frame, never per vertex.
       try {
         this.ensure_vertex_buffer(byte_length)
+        const vertex_buffer = this.vertex_buffer
+        if (!vertex_buffer) throw new Error('ui vertex buffer unavailable')
         this.last_frame_stats = this.capture_stats(byte_length)
-        this.device.queue.writeBuffer(this.vertex_buffer, 0, this.vertex_data, 0, vertex_byte_length)
+        this.device.queue.writeBuffer(vertex_buffer, 0, this.vertex_data, 0, vertex_byte_length)
         const encoder = this.device.createCommandEncoder({ label: 'ui.command_encoder' })
         const pass = encoder.beginRenderPass({
           label: 'ui.render_pass',
@@ -1989,8 +1991,10 @@ export class ui_renderer {
     const vertex_byte_length = this.vertex_count * vertex_stride
     const byte_length = Math.max(vertex_byte_length, vertex_stride)
     this.ensure_vertex_buffer(byte_length)
+    const vertex_buffer = this.vertex_buffer
+    if (!vertex_buffer) throw new Error('ui vertex buffer unavailable')
     this.last_frame_stats = this.capture_stats(byte_length)
-    this.device.queue.writeBuffer(this.vertex_buffer, 0, this.vertex_data, 0, vertex_byte_length)
+    this.device.queue.writeBuffer(vertex_buffer, 0, this.vertex_data, 0, vertex_byte_length)
     this.encode_render_pass(pass)
     this.vertex_count = 0
     this.commands = []
@@ -2035,7 +2039,9 @@ export class ui_renderer {
     if (vertex_byte_length > 0) {
       const byte_length = Math.max(vertex_byte_length, vertex_stride)
       this.ensure_vertex_buffer(byte_length)
-      this.device.queue.writeBuffer(this.vertex_buffer, 0, this.vertex_data, 0, vertex_byte_length)
+      const vertex_buffer = this.vertex_buffer
+      if (!vertex_buffer) throw new Error('ui vertex buffer unavailable')
+      this.device.queue.writeBuffer(vertex_buffer, 0, this.vertex_data, 0, vertex_byte_length)
       // Rebase pixel→NDC onto the target's size for the duration of the pass.
       this.device.queue.writeBuffer(this.screen_buffer, 0, new Float32Array([w, h]))
       const encoder = this.device.createCommandEncoder({ label: 'ui.command_encoder.render_to_texture' })

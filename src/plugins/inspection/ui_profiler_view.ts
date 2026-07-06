@@ -429,7 +429,7 @@ function draw_frame_chart(
 
 function draw_flame_chart(
   ui: ui_renderer,
-  theme: theme_definition,
+  _theme: theme_definition,
   input: ui_input_snapshot,
   fl: { x: number; y: number; w: number; h: number },
   ruler_h: number,

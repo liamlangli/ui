@@ -179,9 +179,7 @@ export function terrain_graph_generator(
   const panel = col('panel')
   const panel_alt = col('panel_alt')
   const text = col('text')
-  const dim = col('text_dim')
   const border = col('border')
-  const accent = col('accent')
   const m = 8 * scale
   const toolbar_h = 34 * scale
   const side_w = w >= 650 * scale ? Math.min(294 * scale, Math.floor(w * 0.34)) : 0
@@ -304,7 +302,7 @@ function draw_side_panel(
   ui: ui_renderer,
   widgets: ui_widgets,
   theme: theme_definition,
-  input: ui_input_snapshot,
+  _input: ui_input_snapshot,
   x: number,
   y: number,
   w: number,
@@ -408,7 +406,7 @@ function terrain_node_view(node: terrain_graph_node): graph_node_view {
   }
 }
 
-function draw_terrain_node_body(ui: ui_renderer, graph: terrain_graph, node: terrain_graph_node, body: graph_body_rect, mode: terrain_graph_state['preview_mode']): void {
+function draw_terrain_node_body(ui: ui_renderer, graph: terrain_graph, _node: terrain_graph_node, body: graph_body_rect, mode: terrain_graph_state['preview_mode']): void {
   const sample = evaluate_terrain_graph_at(graph, { wx: 0, wz: 0, nx: 0, nz: 0, seed: graph.seed })
   const value = sample[mode] ?? 0
   const label = `${mode}: ${value.toFixed(2)}`
