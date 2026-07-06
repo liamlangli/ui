@@ -118,11 +118,11 @@ export interface ui_text_msdf_options {
 export type ui_renderer_render_mode = 'realtime' | 'adaptive'
 
 /**
- * A user-supplied override for the default language (CJK) font. Lets callers
- * swap the bundled PingFang SC atlas for their own font by pointing at a JSON
- * metrics document and its atlas image. The two URLs are fetched as-is (so any
- * path the browser can `fetch()` works — bundler asset URL, absolute path, or
- * remote), bypassing the bundled atlas registry.
+ * A user-supplied font override. Lets callers swap a bundled atlas for their
+ * own font by pointing at a JSON metrics document and its atlas image. The two
+ * URLs are fetched as-is (so any path the browser can `fetch()` works —
+ * bundler asset URL, absolute path, or remote), bypassing the bundled atlas
+ * registry.
  */
 export interface ui_font_source {
   /** Human-readable font name. Used only for memory-tracking labels. */
@@ -151,6 +151,12 @@ export interface ui_renderer_init_options {
    * `false`. You can also swap fonts after init via `load_chinese_font(source)`.
    */
   language_font?: ui_font_source
+  /**
+   * Override the default Latin/main/monospace font bundle with a custom one.
+   * The JSON must be a bundle document containing `FONT_MAIN` and `FONT_MONO`
+   * faces plus the atlas image URL.
+   */
+  latin_font?: ui_font_source
   /**
    * How `flush()` decides whether to submit GPU work. Defaults to
    * `'adaptive'`. See `ui_renderer_render_mode` for details.
@@ -593,6 +599,7 @@ export class ui_renderer {
   private readonly font_atlases = new Map<ui_font_primitive, font_atlas>()
   private chinese_font_load: Promise<void> | null = null
   private language_font_name: string | null = null
+  private latin_font_name: string | null = null
   private canvas_width = 1
   private canvas_height = 1
   private bind_group_layout: GPUBindGroupLayout | null = null
@@ -640,9 +647,10 @@ export class ui_renderer {
 
     const [shader_code, latin_mono_font_doc] = await Promise.all([
       load_text(ui_shader_url),
-      load_json<font_bundle_doc>(latin_mono_font_json_url),
+      load_json<font_bundle_doc>(options?.latin_font?.json ?? latin_mono_font_json_url),
     ])
-    const latin_mono_font_image = await load_image_bitmap_asset(font_image_url(latin_mono_font_doc, 'latin_mono'))
+    const latin_mono_font_image = await load_image_bitmap_asset(options?.latin_font?.image ?? font_image_url(latin_mono_font_doc, 'latin_mono'))
+    this.latin_font_name = options?.latin_font?.name ?? null
     this.font_atlases.set(FONT_MAIN, glyph_map(font_face(latin_mono_font_doc, FONT_MAIN), latin_mono_font_doc.width, latin_mono_font_doc.height))
     this.font_atlases.set(FONT_MONO, glyph_map(font_face(latin_mono_font_doc, FONT_MONO), latin_mono_font_doc.width, latin_mono_font_doc.height))
     this.screen_buffer = this.device.createBuffer({ label: 'ui.screen_buffer', size: 8, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST })
@@ -757,9 +765,10 @@ export class ui_renderer {
 
     const [shader_code, latin_mono_font_doc] = await Promise.all([
       load_text(ui_shader_url),
-      load_json<font_bundle_doc>(latin_mono_font_json_url),
+      load_json<font_bundle_doc>(options?.latin_font?.json ?? latin_mono_font_json_url),
     ])
-    const latin_mono_font_image = await load_image_bitmap_asset(font_image_url(latin_mono_font_doc, 'latin_mono'))
+    const latin_mono_font_image = await load_image_bitmap_asset(options?.latin_font?.image ?? font_image_url(latin_mono_font_doc, 'latin_mono'))
+    this.latin_font_name = options?.latin_font?.name ?? null
     this.font_atlases.set(FONT_MAIN, glyph_map(font_face(latin_mono_font_doc, FONT_MAIN), latin_mono_font_doc.width, latin_mono_font_doc.height))
     this.font_atlases.set(FONT_MONO, glyph_map(font_face(latin_mono_font_doc, FONT_MONO), latin_mono_font_doc.width, latin_mono_font_doc.height))
     this.screen_buffer = this.device.createBuffer({ label: 'ui.screen_buffer', size: 8, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST })
@@ -901,7 +910,9 @@ export class ui_renderer {
   private track_glyph_tables(): void {
     for (const [type, atlas] of this.font_atlases) {
       const label = type === FONT_MAIN ? 'main' : type === FONT_MONO ? 'mono' : 'cjk'
-      const named = type === FONT_ZH && this.language_font_name ? ` (${this.language_font_name})` : ''
+      let named = ''
+      if (type === FONT_ZH && this.language_font_name) named = ` (${this.language_font_name})`
+      else if (type !== FONT_ZH && this.latin_font_name) named = ` (${this.latin_font_name})`
       memory.track(`ui.font_glyphs.${label}`, 'font', 'cpu', atlas.glyphs.size * glyph_table_bytes_per_entry, `${atlas.glyphs.size} glyphs${named}`)
     }
   }

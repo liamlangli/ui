@@ -521,8 +521,10 @@ const widgets = new ui_widgets(renderer)
 
 The renderer loads its Latin/monospace font atlas (`assets/latin_mono.{json,webp}`),
 Chinese font atlas (`assets/ping_fang_sc_regular.{json,webp}`), and shader
-(`assets/ui.wgsl`) via Vite `?url` imports, so consumers are expected to build
-with Vite (or an equivalent bundler that understands the `?url` suffix).
+(`assets/ui.wgsl`) via Vite `?url` imports by default, so consumers are
+expected to build with Vite (or an equivalent bundler that understands the
+`?url` suffix). Font atlases can also be supplied as explicit URLs during
+renderer initialization.
 
 ### Stack layout (vstack / hstack / zstack)
 
@@ -620,6 +622,26 @@ await renderer.init({
 
 // Or swap fonts after init (passing a source always forces a reload):
 await renderer.load_chinese_font({ name: 'My Font', json: my_font_json, image: my_font_image })
+```
+
+#### Custom Latin/monospace font
+
+To overwrite the default Lato/jb_mono atlas with your own Latin font bundle,
+supply a `latin_font` source during initialization. Its JSON metrics document
+must be a bundle with `FONT_MAIN` and `FONT_MONO` faces plus the atlas image
+URL:
+
+```ts
+import my_latin_font_json from './my-latin-font.json?url'
+import my_latin_font_image from './my-latin-font.webp?url'
+
+await renderer.init({
+  latin_font: {
+    name: 'My Latin Font',
+    json: my_latin_font_json,
+    image: my_latin_font_image,
+  },
+})
 ```
 
 ### Text view (selectable / copyable console)
