@@ -75,7 +75,9 @@ import type {
   node_graph_connection,
   node_graph_template,
   terrain_graph,
-  asset_market_item,
+  scene_market_item,
+  scene_geometry,
+  draco_worker,
 } from '../src/plugins'
 import theme_url from './theme.json?url'
 
@@ -238,20 +240,151 @@ const node_graph_templates: node_graph_template[] = [
   { type: 'Output', inputs: [{ label: 'Albedo', type: 'color' }, { label: 'Normal', type: 'vec3' }] },
 ]
 
-const audited_market_assets: asset_market_item[] = [
-  { id: 'hdr-studio-a', name: 'Studio HDR Rig', type_label: 'HDRI', subtitle: 'Lighting / audit batch 48', audit_status: 'passed', price_cents: 1200, thumbnail_color: pack_color('#4c8bf5') },
-  { id: 'mat-brushed-steel', name: 'Brushed Steel Material', type_label: 'MAT', subtitle: 'PBR material', audit_status: 'passed', price_cents: 800, thumbnail_color: pack_color('#8f96a3') },
-  { id: 'mesh-service-drone', name: 'Service Drone Mesh', type_label: 'MESH', subtitle: '12k tris / rigged', audit_status: 'warning', price_cents: 2400, thumbnail_color: pack_color('#d8a24a') },
-  { id: 'tex-panels', name: 'Sci-Fi Panel Textures', type_label: 'TEX', subtitle: '4K texture set', audit_status: 'passed', price_cents: 1600, thumbnail_color: pack_color('#5fb878') },
-  { id: 'anim-door-cycle', name: 'Door Cycle Animation', type_label: 'ANIM', subtitle: 'Loopable motion', audit_status: 'pending', price_cents: 0, thumbnail_color: pack_color('#5b9bd5') },
-  { id: 'sfx-interface-pack', name: 'Interface Sound Pack', type_label: 'SFX', subtitle: '32 normalized cues', audit_status: 'passed', price_cents: 600, thumbnail_color: pack_color('#49a6a6') },
-  { id: 'vfx-energy-core', name: 'Energy Core VFX', type_label: 'VFX', subtitle: 'Particle preset', audit_status: 'passed', price_cents: 1400, thumbnail_color: pack_color('#e0698b') },
-  { id: 'mat-carbon-fiber', name: 'Carbon Fiber Material', type_label: 'MAT', subtitle: 'PBR material', audit_status: 'passed', price_cents: 900, thumbnail_color: pack_color('#343746') },
-  { id: 'mesh-terminal', name: 'Wall Terminal Mesh', type_label: 'MESH', subtitle: '5k tris / LODs', audit_status: 'passed', price_cents: 1100, thumbnail_color: pack_color('#bd93f9') },
-  { id: 'tex-warning-decals', name: 'Warning Decal Sheet', type_label: 'TEX', subtitle: 'Transparent atlas', audit_status: 'warning', price_cents: 500, thumbnail_color: pack_color('#f1fa8c') },
-  { id: 'shader-hologram', name: 'Hologram Shader', type_label: 'SHDR', subtitle: 'WGSL material node', audit_status: 'passed', price_cents: 1300, thumbnail_color: pack_color('#88c0d0') },
-  { id: 'kit-warehouse-props', name: 'Warehouse Props Kit', type_label: 'KIT', subtitle: '18 modular props', audit_status: 'passed', price_cents: 3200, thumbnail_color: pack_color('#c08a2e') },
+// --- Scene Market catalogue --------------------------------------------------
+// The storefront sells whole scenes as .glb only. Each listing is backed by a
+// procedurally built mesh; on boot the Draco worker compresses that geometry off
+// the main thread so the cards show a real raw-glb → Draco saving — and the
+// round-trip (encode here, decode on card click) proves the worker pipeline.
+
+interface scene_recipe {
+  item: scene_market_item
+  build: () => scene_geometry
+  /** The Draco container, cached after the boot-time compression pass. */
+  encoded?: Uint8Array
+}
+
+function build_uv_sphere(rings: number, segments: number, radius: number): scene_geometry {
+  const positions: number[] = [], normals: number[] = [], uvs: number[] = [], indices: number[] = []
+  for (let y = 0; y <= rings; y += 1) {
+    const v = y / rings, phi = v * Math.PI
+    for (let x = 0; x <= segments; x += 1) {
+      const u = x / segments, theta = u * Math.PI * 2
+      const nx = Math.sin(phi) * Math.cos(theta), ny = Math.cos(phi), nz = Math.sin(phi) * Math.sin(theta)
+      positions.push(nx * radius, ny * radius, nz * radius)
+      normals.push(nx, ny, nz)
+      uvs.push(u, v)
+    }
+  }
+  const stride = segments + 1
+  for (let y = 0; y < rings; y += 1) for (let x = 0; x < segments; x += 1) {
+    const a = y * stride + x, b = a + 1, c = a + stride, d = c + 1
+    indices.push(a, c, b, b, c, d)
+  }
+  return { positions: new Float32Array(positions), normals: new Float32Array(normals), uvs: new Float32Array(uvs), indices: new Uint32Array(indices) }
+}
+
+function build_torus(radius: number, tube: number, radial: number, tubular: number): scene_geometry {
+  const positions: number[] = [], normals: number[] = [], uvs: number[] = [], indices: number[] = []
+  for (let j = 0; j <= radial; j += 1) {
+    const v = j / radial, phi = v * Math.PI * 2
+    for (let i = 0; i <= tubular; i += 1) {
+      const u = i / tubular, theta = u * Math.PI * 2
+      const cx = Math.cos(theta), cz = Math.sin(theta)
+      positions.push((radius + tube * Math.cos(phi)) * cx, tube * Math.sin(phi), (radius + tube * Math.cos(phi)) * cz)
+      normals.push(Math.cos(phi) * cx, Math.sin(phi), Math.cos(phi) * cz)
+      uvs.push(u, v)
+    }
+  }
+  const stride = tubular + 1
+  for (let j = 0; j < radial; j += 1) for (let i = 0; i < tubular; i += 1) {
+    const a = j * stride + i, b = a + 1, c = a + stride, d = c + 1
+    indices.push(a, c, b, b, c, d)
+  }
+  return { positions: new Float32Array(positions), normals: new Float32Array(normals), uvs: new Float32Array(uvs), indices: new Uint32Array(indices) }
+}
+
+function translate_geometry(geo: scene_geometry, dx: number, dy: number, dz: number): scene_geometry {
+  for (let i = 0; i < geo.positions.length; i += 3) {
+    geo.positions[i] += dx; geo.positions[i + 1] += dy; geo.positions[i + 2] += dz
+  }
+  return geo
+}
+
+function merge_geometry(parts: scene_geometry[]): scene_geometry {
+  let vtx = 0, idx = 0
+  for (const p of parts) { vtx += p.positions.length / 3; idx += p.indices.length }
+  const positions = new Float32Array(vtx * 3), normals = new Float32Array(vtx * 3), uvs = new Float32Array(vtx * 2), indices = new Uint32Array(idx)
+  let vo = 0, io = 0
+  for (const p of parts) {
+    positions.set(p.positions, vo * 3)
+    if (p.normals) normals.set(p.normals, vo * 3)
+    if (p.uvs) uvs.set(p.uvs, vo * 2)
+    for (let i = 0; i < p.indices.length; i += 1) indices[io + i] = p.indices[i]! + vo
+    vo += p.positions.length / 3; io += p.indices.length
+  }
+  return { positions, normals, uvs, indices }
+}
+
+/** Rough uncompressed glb geometry footprint (attributes + indices). */
+function geometry_raw_bytes(geo: scene_geometry): number {
+  return geo.positions.byteLength + (geo.normals?.byteLength ?? 0) + (geo.uvs?.byteLength ?? 0) + geo.indices.byteLength
+}
+
+const scene_recipes: scene_recipe[] = [
+  {
+    item: { id: 'scene-observatory', name: 'Observatory Dome', author: 'Northlight', format: 'glb', triangle_count: 0, raw_bytes: 0, draco_bytes: 0, price_cents: 2400, subtitle: 'Dome + orbital ring', thumbnail_color: pack_color('#4c8bf5') },
+    build: () => merge_geometry([build_uv_sphere(48, 72, 1), build_torus(1.35, 0.06, 64, 20)]),
+  },
+  {
+    item: { id: 'scene-foundry', name: 'Foundry Hall', author: 'Ironworks', format: 'glb', triangle_count: 0, raw_bytes: 0, draco_bytes: 0, price_cents: 3200, subtitle: 'Twin reactor rings', thumbnail_color: pack_color('#d8a24a') },
+    build: () => merge_geometry([build_torus(1, 0.34, 96, 40), translate_geometry(build_torus(1, 0.2, 72, 28), 0, 0.7, 0)]),
+  },
+  {
+    item: { id: 'scene-garden', name: 'Atrium Garden', author: 'Verdant', format: 'glb', triangle_count: 0, raw_bytes: 0, draco_bytes: 0, price_cents: 1800, subtitle: 'Scatter of spheres', thumbnail_color: pack_color('#5fb878') },
+    build: () => merge_geometry(Array.from({ length: 9 }, (_, i) => translate_geometry(build_uv_sphere(24, 32, 0.4), (i % 3 - 1) * 1.2, 0, (Math.floor(i / 3) - 1) * 1.2))),
+  },
+  {
+    item: { id: 'scene-atrium', name: 'Grand Atrium', author: 'Northlight', format: 'glb', triangle_count: 0, raw_bytes: 0, draco_bytes: 0, price_cents: 4200, subtitle: 'High-density shell', thumbnail_color: pack_color('#bd93f9') },
+    build: () => build_uv_sphere(96, 128, 1.5),
+  },
+  {
+    item: { id: 'scene-reactor', name: 'Reactor Core', author: 'Ironworks', format: 'glb', triangle_count: 0, raw_bytes: 0, draco_bytes: 0, price_cents: 0, subtitle: 'Core + halo', thumbnail_color: pack_color('#e0698b') },
+    build: () => merge_geometry([build_uv_sphere(40, 56, 0.6), build_torus(1.1, 0.05, 80, 16)]),
+  },
+  {
+    item: { id: 'scene-promenade', name: 'Promenade Kit', author: 'Verdant', format: 'glb', triangle_count: 0, raw_bytes: 0, draco_bytes: 0, price_cents: 2600, subtitle: 'Modular sphere grid', thumbnail_color: pack_color('#49a6a6') },
+    build: () => merge_geometry(Array.from({ length: 16 }, (_, i) => translate_geometry(build_uv_sphere(28, 40, 0.35), (i % 4 - 1.5) * 1, 0, (Math.floor(i / 4) - 1.5) * 1))),
+  },
 ]
+
+const scene_catalog: scene_market_item[] = scene_recipes.map((recipe) => recipe.item)
+
+// The Draco worker, started lazily once the plugin chunk lands.
+let draco_worker_client: draco_worker | null = null
+
+// Compress every catalogue scene off the main thread so the storefront shows a
+// real raw-glb → Draco saving. Stores the container for the click-to-decompress
+// round-trip below.
+function compress_scene_catalog(mod: plugin_module): void {
+  if (!draco_worker_client) draco_worker_client = mod.create_draco_worker()
+  const worker = draco_worker_client
+  for (const recipe of scene_recipes) {
+    const geo = recipe.build()
+    recipe.item.triangle_count = geo.indices.length / 3
+    recipe.item.raw_bytes = geometry_raw_bytes(geo)
+    worker
+      .encode(geo)
+      .then((bytes) => {
+        recipe.encoded = bytes
+        recipe.item.draco_bytes = bytes.byteLength
+        const saved = Math.round((1 - bytes.byteLength / Math.max(1, recipe.item.raw_bytes)) * 100)
+        append_console(`draco: ${recipe.item.name} ${mod.format_asset_bytes(recipe.item.raw_bytes)} → ${mod.format_asset_bytes(bytes.byteLength)} (-${saved}%)`, '#5fb878')
+        windows.invalidate('asset_market')
+        active_renderer?.request_render()
+      })
+      .catch((err: unknown) => append_console(`draco encode failed: ${err instanceof Error ? err.message : String(err)}`, '#d9534f'))
+  }
+}
+
+// Click a card → decompress its scene on the worker and report the round-trip.
+function verify_scene_decompress(scene: scene_market_item): void {
+  const recipe = scene_recipes.find((r) => r.item.id === scene.id)
+  if (!recipe?.encoded || !draco_worker_client) return
+  draco_worker_client
+    .decode(recipe.encoded)
+    .then((geo) => append_console(`scene ${scene.name}: worker decompressed ${geo.indices.length / 3} tris`, '#4c8bf5'))
+    .catch((err: unknown) => append_console(`draco decode failed: ${err instanceof Error ? err.message : String(err)}`, '#d9534f'))
+}
 
 // The desktop: the Demo Editor app window (hosting the dock layout above)
 // next to a floating Chat window. Other apps spawn from the View menu.
@@ -338,7 +471,7 @@ const BUILTIN_APPS: { id: string; name: string; icon: string; accent?: string; d
   { id: 'profiler', name: 'Profiler', icon: 'search', description: 'Frame profiler and memory registry.' },
   { id: 'gamepad', name: 'Controller Test', icon: 'circle', description: 'Game controller visualiser.' },
   { id: 'asset_audit', name: 'Asset Audit', icon: 'file', accent: '#6b3d5a', description: 'Drop or upload .glb/.fbx assets: 3D preview, stats, optimize, re-export.' },
-  { id: 'asset_market', name: 'Asset Market', icon: 'image', accent: '#6b5a3d', description: 'Browse audited assets, add thumbnail cards to a cart, and check out.' },
+  { id: 'asset_market', name: 'Scene Market', icon: 'image', accent: '#6b5a3d', description: 'Buy whole .glb scenes; geometry is Draco-compressed on a worker.' },
   { id: 'avatar', name: 'Avatar Generator', icon: 'circle', accent: '#3d5a6b', description: 'Procedural human mesh from a parametric skeleton: SDF volumes → surface nets → GLB.' },
   { id: 'material_audit', name: 'Material Audit', icon: 'image', accent: '#5a6b3d', description: 'Upload base color / normal maps and validate them on a repeat grid, UV sphere or rounded cube.' },
   { id: 'about', name: 'About', icon: 'home', description: 'About this demo.' },
@@ -547,7 +680,7 @@ const VIEW_TABS: { id: string; title: string; win?: window_new_options }[] = [
   { id: 'profiler', title: 'Profiler', win: { w: 760, h: 460 } },
   { id: 'gamepad', title: 'Controller Test', win: { w: 620, h: 540 } },
   { id: 'asset_audit', title: 'Asset Audit', win: { w: 900, h: 560 } },
-  { id: 'asset_market', title: 'Asset Market', win: { w: 920, h: 560 } },
+  { id: 'asset_market', title: 'Scene Market', win: { w: 920, h: 560 } },
   { id: 'avatar', title: 'Avatar Generator', win: { w: 920, h: 600 } },
   { id: 'material_audit', title: 'Material Audit', win: { w: 760, h: 560 } },
   { id: 'webtix', title: 'Path Tracer', win: { w: 900, h: 600 } },
@@ -702,7 +835,7 @@ function build_main_menu(mod: plugin_module): ui_main_menu {
           { id: 'profiler', label: 'Profiler' },
           { id: 'gamepad', label: 'Controller Test' },
           { id: 'asset_audit', label: 'Asset Audit' },
-          { id: 'asset_market', label: 'Asset Market' },
+          { id: 'asset_market', label: 'Scene Market' },
           { id: 'avatar', label: 'Avatar Generator' },
           { id: 'material_audit', label: 'Material Audit' },
           { id: 'webtix', label: 'Path Tracer' },
@@ -938,6 +1071,10 @@ function init_plugins(mod: plugin_module): void {
       active_renderer?.request_render()
     },
   })
+
+  // Compress the Scene Market catalogue on the Draco worker so the storefront
+  // shows real raw-glb → Draco savings once the numbers land.
+  compress_scene_catalog(mod)
 
   // Cached window bodies rendered the loading hint — re-render them live.
   windows.invalidate()
@@ -1251,18 +1388,19 @@ async function main(): Promise<void> {
           live.mod.asset_audit(renderer, widgets, theme, snapshot, px, py, pw, ph, live.audit_state, { scale })
           break
         case 'asset_market': {
-          const ev = live.mod.asset_market(renderer, theme, snapshot, px, py, pw, ph, audited_market_assets, live.market_state)
+          const ev = live.mod.asset_market(renderer, theme, snapshot, px, py, pw, ph, scene_catalog, live.market_state)
           if (ev.checkout) {
-            const count = ev.checkout.lines.reduce((sum, line) => sum + line.quantity, 0)
-            append_console(`asset market checkout: ${count} assets (${format_market_total(ev.checkout.total_cents)})`, '#5fb878')
+            append_console(`scene market checkout: ${ev.checkout.scenes.length} scenes (${format_market_total(ev.checkout.total_cents)})`, '#5fb878')
             live.market_state.cart.clear()
             windows.invalidate('asset_market')
           } else if (ev.added) {
-            append_console(`asset market add: ${ev.added.name}`, '#4c8bf5')
+            append_console(`scene market add: ${ev.added.name}`, '#4c8bf5')
             windows.invalidate('asset_market')
           } else if (ev.removed) {
-            append_console(`asset market remove: ${ev.removed.name}`, '#d8a24a')
+            append_console(`scene market remove: ${ev.removed.name}`, '#d8a24a')
             windows.invalidate('asset_market')
+          } else if (ev.selected) {
+            verify_scene_decompress(ev.selected)
           }
           break
         }
