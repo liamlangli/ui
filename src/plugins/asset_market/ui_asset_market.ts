@@ -174,6 +174,7 @@ function draw_grid(
   const over = point_in(input, rect.x, rect.y, rect.w, rect.h)
 
   if (over && input.wheel_y) state.grid_scroll.offset_y = clamp(state.grid_scroll.offset_y - input.wheel_y * 28 * scale, 0, max_off)
+  if (over && input.pan_dy) state.grid_scroll.offset_y = clamp(state.grid_scroll.offset_y - input.pan_dy, 0, max_off)
   state.grid_scroll.offset_y = clamp(state.grid_scroll.offset_y, 0, max_off)
 
   ui.fill_rect(rect.x, rect.y, rect.w, rect.h, col('panel'))
@@ -282,6 +283,7 @@ function draw_cart(
   const total_cents = asset_market_cart_total(lines)
 
   if (over_list && input.wheel_y) state.cart_scroll.offset_y = clamp(state.cart_scroll.offset_y - input.wheel_y * 26 * scale, 0, max_off)
+  if (over_list && input.pan_dy) state.cart_scroll.offset_y = clamp(state.cart_scroll.offset_y - input.pan_dy, 0, max_off)
   state.cart_scroll.offset_y = clamp(state.cart_scroll.offset_y, 0, max_off)
 
   ui.fill_rect(rect.x, rect.y, rect.w, rect.h, col('panel_alt'))
