@@ -75,7 +75,6 @@ import type {
   node_graph_connection,
   node_graph_template,
   terrain_graph,
-  asset_hub_item,
 } from '../src/plugins'
 import theme_url from './theme.json?url'
 
@@ -238,141 +237,9 @@ const node_graph_templates: node_graph_template[] = [
   { type: 'Output', inputs: [{ label: 'Albedo', type: 'color' }, { label: 'Normal', type: 'vec3' }] },
 ]
 
-const asset_hub_assets: asset_hub_item[] = [
-  {
-    id: 'scene-orbital-hangar',
-    name: 'Orbital Hangar Scene',
-    type_label: 'SCENE',
-    category: 'Scene',
-    summary: 'Lighting, props and camera anchors for a compact sci-fi hangar.',
-    author: 'Mina Park',
-    license: 'CC-BY 4.0',
-    source: 'Internal scene jam',
-    storage_uri: 'hub://scenes/orbital-hangar.glb',
-    tags: ['hangar', 'lighting', 'camera-ready'],
-    audit_status: 'passed',
-    updated_at: '2026-06-18',
-    size_bytes: 48_200_000,
-    scene_count: 1,
-    preview_color: pack_color('#4c8bf5'),
-  },
-  {
-    id: 'scene-rainy-rooftop',
-    name: 'Rainy Rooftop Blockout',
-    type_label: 'SCENE',
-    category: 'Scene',
-    summary: 'Night rooftop layout with wet materials and skyline proxies.',
-    author: 'Noah Chen',
-    license: 'Studio-share',
-    source: 'Environment team',
-    storage_uri: 'hub://scenes/rainy-rooftop.glb',
-    tags: ['urban', 'rain', 'blockout'],
-    audit_status: 'warning',
-    updated_at: '2026-06-24',
-    size_bytes: 36_840_000,
-    scene_count: 1,
-    preview_color: pack_color('#49a6a6'),
-  },
-  {
-    id: 'kit-warehouse-props',
-    name: 'Warehouse Props Kit',
-    type_label: 'KIT',
-    category: 'Scene Kit',
-    summary: 'Reusable crates, rails, pallet stacks and scanner props.',
-    author: 'Liam Studio',
-    license: 'MIT',
-    source: 'Asset audit import',
-    storage_uri: 'hub://kits/warehouse-props/',
-    tags: ['modular', 'props', 'industrial'],
-    audit_status: 'passed',
-    updated_at: '2026-05-30',
-    size_bytes: 22_400_000,
-    scene_count: 18,
-    preview_color: pack_color('#c08a2e'),
-  },
-  {
-    id: 'hdr-studio-a',
-    name: 'Studio HDR Rig',
-    type_label: 'HDRI',
-    category: 'Lighting',
-    summary: 'Neutral product-lighting setup with softbox references.',
-    author: 'Ada Morris',
-    license: 'CC0',
-    source: 'Lighting library',
-    storage_uri: 'hub://lighting/studio-hdr-rig.hdr',
-    tags: ['lighting', 'studio', 'neutral'],
-    audit_status: 'passed',
-    updated_at: '2026-06-10',
-    size_bytes: 14_600_000,
-    preview_color: pack_color('#8f96a3'),
-  },
-  {
-    id: 'scene-market-plaza',
-    name: 'Market Plaza Layout',
-    type_label: 'SCENE',
-    category: 'Scene',
-    summary: 'Open plaza composition for crowd, stall and navigation testing.',
-    author: 'Sofia Ito',
-    license: 'CC-BY-SA 4.0',
-    source: 'Community exchange',
-    storage_uri: 'hub://scenes/market-plaza.glb',
-    tags: ['plaza', 'layout', 'community'],
-    audit_status: 'passed',
-    updated_at: '2026-06-02',
-    size_bytes: 41_900_000,
-    scene_count: 1,
-    preview_color: pack_color('#5fb878'),
-  },
-  {
-    id: 'mat-brushed-steel',
-    name: 'Brushed Steel Material',
-    type_label: 'MAT',
-    category: 'Material',
-    summary: 'Audited PBR material for rails, tools and hard-surface props.',
-    author: 'Ken Alvarez',
-    license: 'Apache-2.0',
-    source: 'Material audit',
-    storage_uri: 'hub://materials/brushed-steel/',
-    tags: ['pbr', 'metal', 'surface'],
-    audit_status: 'passed',
-    updated_at: '2026-05-21',
-    size_bytes: 8_300_000,
-    preview_color: pack_color('#8f72d8'),
-  },
-  {
-    id: 'scene-training-yard',
-    name: 'Training Yard Scene',
-    type_label: 'SCENE',
-    category: 'Scene',
-    summary: 'Outdoor combat-training yard with lanes and cover markers.',
-    author: 'Jules Wang',
-    license: 'Studio-share',
-    source: 'Design prototype',
-    storage_uri: 'hub://scenes/training-yard.glb',
-    tags: ['gameplay', 'cover', 'outdoor'],
-    audit_status: 'pending',
-    updated_at: '2026-06-27',
-    size_bytes: 29_760_000,
-    scene_count: 1,
-    preview_color: pack_color('#d8a24a'),
-  },
-  {
-    id: 'shader-hologram',
-    name: 'Hologram Shader',
-    type_label: 'SHDR',
-    category: 'Shader',
-    summary: 'WGSL material node for scene markers and diegetic UI panels.',
-    author: 'Iris Novak',
-    license: 'BSD-3-Clause',
-    source: 'Rendering lab',
-    storage_uri: 'hub://shaders/hologram.wgsl',
-    tags: ['wgsl', 'hologram', 'material'],
-    audit_status: 'passed',
-    updated_at: '2026-06-06',
-    size_bytes: 92_000,
-    preview_color: pack_color('#88c0d0'),
-  },
-]
+// Asset Hub is now a cloud drive viewer: it browses the `asset_hub/` folder in
+// the user's own Google Drive through the storage-provider abstraction (see
+// src/storage). The provider + panel state are built lazily in `init_plugins`.
 
 // The desktop: the Demo Editor app window (hosting the dock layout above)
 // next to a floating Chat window. Other apps spawn from the View menu.
@@ -459,7 +326,7 @@ const BUILTIN_APPS: { id: string; name: string; icon: string; accent?: string; d
   { id: 'profiler', name: 'Profiler', icon: 'search', description: 'Frame profiler and memory registry.' },
   { id: 'gamepad', name: 'Controller Test', icon: 'circle', description: 'Game controller visualiser.' },
   { id: 'asset_audit', name: 'Asset Audit', icon: 'file', accent: '#6b3d5a', description: 'Drop or upload .glb/.fbx assets: 3D preview, stats, optimize, re-export.' },
-  { id: 'asset_hub', name: 'Asset Hub', icon: 'image', accent: '#3d5f6b', description: 'Manage and preview shared scene assets with author, license and storage metadata.' },
+  { id: 'asset_hub', name: 'Asset Hub', icon: 'image', accent: '#3d5f6b', description: 'Browse the asset_hub folder of your Google Drive — read-only, entirely in the browser.' },
   { id: 'avatar', name: 'Avatar Generator', icon: 'circle', accent: '#3d5a6b', description: 'Procedural human mesh from a parametric skeleton: SDF volumes → surface nets → GLB.' },
   { id: 'material_audit', name: 'Material Audit', icon: 'image', accent: '#5a6b3d', description: 'Upload base color / normal maps and validate them on a repeat grid, UV sphere or rounded cube.' },
   { id: 'about', name: 'About', icon: 'home', description: 'About this demo.' },
@@ -494,7 +361,7 @@ interface demo_plugins {
   dashboard_state: ReturnType<plugin_module['create_dashboard_state']>
   file_state: ReturnType<plugin_module['create_file_browser_state']>
   audit_state: ReturnType<plugin_module['create_asset_audit_state']>
-  asset_hub_state: ReturnType<plugin_module['create_asset_hub_state']>
+  asset_hub_drive_state: ReturnType<plugin_module['create_asset_hub_drive_state']>
   avatar_state: ReturnType<plugin_module['create_avatar_generator_state']>
   material_audit_state: ReturnType<plugin_module['create_material_audit_state']>
   chat_state: ReturnType<plugin_module['create_im_dialog_state']>
@@ -949,6 +816,13 @@ const gamepad_cursor = create_gamepad_cursor_state()
 // switch from their loading hint to live content on the next frame.
 function init_plugins(mod: plugin_module): void {
   if (plugins) return
+  // Asset Hub: a read-only viewer over the `asset_hub/` folder in the user's
+  // Google Drive. The provider only exists when VITE_GOOGLE_CLIENT_ID is set;
+  // otherwise the panel shows a configuration message (see README).
+  const cloud_cfg = mod.load_cloud_config()
+  const drive_provider = cloud_cfg.google_client_id
+    ? new mod.google_drive_provider(cloud_cfg.google_client_id, cloud_cfg.default_root_folder_name)
+    : null
   const editor_buffer = new mod.text_buffer(
     [
       '// code_editor — a GPU-rendered editable text surface.',
@@ -972,7 +846,13 @@ function init_plugins(mod: plugin_module): void {
     dashboard_state: mod.create_dashboard_state(),
     file_state: mod.create_file_browser_state(),
     audit_state: mod.create_asset_audit_state(),
-    asset_hub_state: mod.create_asset_hub_state(),
+    asset_hub_drive_state: mod.create_asset_hub_drive_state(drive_provider, {
+      root_folder_name: cloud_cfg.default_root_folder_name,
+      on_change: () => {
+        windows.invalidate('asset_hub')
+        active_renderer?.request_render()
+      },
+    }),
     avatar_state: mod.create_avatar_generator_state(),
     material_audit_state: mod.create_material_audit_state(),
     chat_state: mod.create_im_dialog_state(),
@@ -1368,17 +1248,14 @@ async function main(): Promise<void> {
           live.mod.asset_audit(renderer, widgets, theme, snapshot, px, py, pw, ph, live.audit_state, { scale })
           break
         case 'asset_hub': {
-          const ev = live.mod.asset_hub(renderer, theme, snapshot, px, py, pw, ph, asset_hub_assets, live.asset_hub_state)
-          if (ev.preview_requested) {
-            append_console(`asset hub preview: ${ev.preview_requested.name}`, '#4c8bf5')
-            windows.invalidate('asset_hub')
-          } else if (ev.share_requested) {
-            append_console(`asset hub share: ${ev.share_requested.name} (${ev.share_requested.license ?? 'unlicensed'})`, '#5fb878')
-            windows.invalidate('asset_hub')
-          } else if (ev.selected) {
-            append_console(`asset hub selected: ${ev.selected.name}`, '#9aa3b0')
-            windows.invalidate('asset_hub')
-          }
+          const ev = live.mod.asset_hub_drive(renderer, theme, snapshot, px, py, pw, ph, live.asset_hub_drive_state)
+          if (ev.connect_requested) append_console('asset hub: connecting to Google Drive…', '#4c8bf5')
+          if (ev.signed_out) append_console('asset hub: signed out of Google Drive', '#9aa3b0')
+          if (ev.refreshed) append_console('asset hub: refreshing current folder', '#9aa3b0')
+          if (ev.folder_opened) append_console(`asset hub: opened ${ev.folder_opened.name}/`, '#4c8bf5')
+          if (ev.download_requested) append_console(`asset hub: downloading ${ev.download_requested.name}`, '#5fb878')
+          if (ev.open_requested) append_console(`asset hub: opened ${ev.open_requested.name} in Drive`, '#9aa3b0')
+          if (Object.keys(ev).length > 0) windows.invalidate('asset_hub')
           break
         }
         case 'avatar': {

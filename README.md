@@ -11,7 +11,8 @@ It bundles the pieces needed to build a browser-native editor UI on top of WebGP
 - **`dock_system` / `window_system`** — ready-to-use workspace systems built on `dock`/`window`: a docked split workspace and a floating desktop-style window manager, both part of core so third-party projects can build directly on them. See [Workspace systems](#workspace-systems).
 - **`theme`** — palette/CSS-variable theming with `load_theme`, `apply_theme`, `theme_color`, `theme_rgba`, `pack_color`, and `hex_to_normalized_rgba`.
 - **`app_registry`** — installable apps described by a JSON manifest: install/uninstall, persistence, and update checks against each app's `shipping_path`. See [`dashboard`](#dashboard--full-screen-app-launcher).
-- **`plugins`** — opt-in, higher-level drop-in components (`file_browser`, `graph`, `node_graph`, `im_dialog`, `code_editor`, `dashboard`, `avatar_generator`, `material_audit`, `webtix` WebGPU path tracer) packaged so other projects can reuse them piecemeal. See [Plugins](#plugins).
+- **`plugins`** — opt-in, higher-level drop-in components (`file_browser`, `graph`, `node_graph`, `im_dialog`, `code_editor`, `dashboard`, `asset_hub` cloud drive viewer, `avatar_generator`, `material_audit`, `webtix` WebGPU path tracer) packaged so other projects can reuse them piecemeal. See [Plugins](#plugins).
+- **`storage`** — a browser-only cloud storage abstraction (`cloud_storage_provider`) with a Google Drive backend, used by the Asset Hub viewer. See [Asset Hub](#asset_hub--cloud-drive-viewer-google-drive).
 
 ## Live preview
 
@@ -30,6 +31,12 @@ npm run build    # production build → dist/ (GitHub Pages base = /ui/)
 
 > Requires a WebGPU-capable browser (recent Chrome/Edge, or Safari Technology
 > Preview). The page shows a graceful fallback otherwise.
+
+The **Asset Hub** window (View ▸ Apps ▸ Asset Hub) is a Google Drive viewer
+and needs a Google OAuth client id: copy `.env.example` to `.env.local` and
+set `VITE_GOOGLE_CLIENT_ID` (setup steps in
+[Asset Hub](#asset_hub--cloud-drive-viewer-google-drive)). Without it the
+panel shows a configuration message — everything else works as before.
 
 ### GitHub Pages
 
@@ -459,6 +466,85 @@ if (ev.loaded) console.log(`${ev.loaded.slot} map: ${ev.loaded.name} (${ev.loade
 The wheel-zoom / two-finger pan + pinch handling lives in core as
 `pan_zoom_apply` / `pan_zoom_drag` (`@liamlangli/ui` → `ui_pan_zoom`); the
 `graph` and `node_graph` canvases run on the same module.
+
+### `asset_hub` — cloud drive viewer (Google Drive)
+
+A read-only static asset browser over the user's **own cloud drive** — a
+Google Drive viewer, not a storage backend. The site stays a pure static
+frontend: the user clicks *Connect Google Drive*, authorizes in the browser
+through the Google Identity Services access-token flow (no client secret, no
+server round-trip), and the panel looks up the folder named
+
+```text
+asset_hub/
+```
+
+in their Drive root and browses its contents — folders open on click with a
+`asset_hub / characters / hero` breadcrumb, images decode to GPU-texture
+thumbnails, text/JSON/shader files preview inline, and everything else
+(models, audio, video, binaries) shows a metadata card (name, MIME type,
+size, modified time) with Download / Open-in-Drive buttons. The viewer never
+creates or writes anything: the requested OAuth scope is
+`https://www.googleapis.com/auth/drive.readonly` (content downloads are what
+image/text previews need; drop to `drive.metadata.readonly` only if you fork
+it into a listing-only browser). File bytes stream straight from Google to
+the page — nothing is uploaded anywhere.
+
+The UI depends only on the `cloud_storage_provider` interface
+(`src/storage/ui_cloud_storage_provider.ts`); every Google Drive API call
+lives in `google_drive_provider` (`src/storage/ui_google_drive_provider.ts`),
+so a Dropbox / iCloud / local-folder backend can implement the same seven
+methods and reuse the panel unchanged.
+
+```ts
+import {
+  asset_hub_drive, create_asset_hub_drive_state,
+  google_drive_provider, load_cloud_config,
+} from '@liamlangli/ui/plugins'
+
+const cfg = load_cloud_config() // reads VITE_GOOGLE_CLIENT_ID
+const provider = cfg.google_client_id
+  ? new google_drive_provider(cfg.google_client_id, cfg.default_root_folder_name)
+  : null // panel shows a clear configuration message when null
+
+const hub = create_asset_hub_drive_state(provider, {
+  root_folder_name: cfg.default_root_folder_name,
+  on_change: () => renderer.request_render(), // async work landed — redraw
+})
+
+// each frame, between renderer.begin_frame() and renderer.flush():
+const ev = asset_hub_drive(renderer, theme, input, x, y, w, h, hub)
+if (ev.folder_opened) console.log('entered', ev.folder_opened.name)
+```
+
+#### Google OAuth setup
+
+The OAuth client id is **not** hardcoded — it comes from the Vite build
+environment. Copy `.env.example` to `.env.local` and set:
+
+```bash
+VITE_GOOGLE_CLIENT_ID=1234567890-abcdef.apps.googleusercontent.com
+```
+
+To create the client id:
+
+1. In [Google Cloud Console](https://console.cloud.google.com/) create (or
+   pick) a project and open **APIs & Services → Credentials → Create
+   Credentials → OAuth client ID**.
+2. Choose **Application type: Web application**.
+3. Add your site's origins to **Authorized JavaScript origins** — e.g.
+   `http://localhost:5173` for `npm run dev` and
+   `https://<user>.github.io` for the deployed static site. (The token flow
+   needs no redirect URI.)
+4. Enable the **Google Drive API** under **APIs & Services → Library**.
+5. Configure the **OAuth consent screen** (app name, scopes — add
+   `.../auth/drive.readonly` — and test users while the app is unverified).
+
+Notes on session handling: the access token lives in memory and is mirrored
+to per-tab `sessionStorage` so a reload doesn't re-prompt; it expires after
+about an hour, and any expired/revoked token flips the panel into a
+*Sign In Again* state instead of failing silently. There is no client secret
+anywhere in the app, and signing out revokes the token.
 
 ### `webtix` — WebGPU path tracer
 
