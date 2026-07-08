@@ -78,6 +78,7 @@ import type {
   scene_market_item,
   scene_geometry,
   draco_worker,
+  asset_detail_part_input,
 } from '../src/plugins'
 import theme_url from './theme.json?url'
 
@@ -248,9 +249,17 @@ const node_graph_templates: node_graph_template[] = [
 
 interface scene_recipe {
   item: scene_market_item
-  build: () => scene_geometry
+  /** Named sub-meshes: the Asset Detail viewer selects and reports per part. */
+  parts: () => asset_detail_part_input[]
+  /** Built parts, cached so market boot and detail view share one build. */
+  cached_parts?: asset_detail_part_input[]
   /** The Draco container, cached after the boot-time compression pass. */
   encoded?: Uint8Array
+}
+
+function recipe_parts(recipe: scene_recipe): asset_detail_part_input[] {
+  recipe.cached_parts ??= recipe.parts()
+  return recipe.cached_parts
 }
 
 function build_uv_sphere(rings: number, segments: number, radius: number): scene_geometry {
@@ -320,30 +329,41 @@ function geometry_raw_bytes(geo: scene_geometry): number {
   return geo.positions.byteLength + (geo.normals?.byteLength ?? 0) + (geo.uvs?.byteLength ?? 0) + geo.indices.byteLength
 }
 
+// Named part helpers: face_count is the parametric quad count (rings×segments
+// for a UV sphere, radial×tubular for a torus) so the detail view reports the
+// authored polygon faces instead of falling back to per-triangle counting.
+function sphere_part(name: string, rings: number, segments: number, radius: number, dx = 0, dy = 0, dz = 0): asset_detail_part_input {
+  return { name, geometry: translate_geometry(build_uv_sphere(rings, segments, radius), dx, dy, dz), face_count: rings * segments }
+}
+
+function torus_part(name: string, radius: number, tube: number, radial: number, tubular: number, dx = 0, dy = 0, dz = 0): asset_detail_part_input {
+  return { name, geometry: translate_geometry(build_torus(radius, tube, radial, tubular), dx, dy, dz), face_count: radial * tubular }
+}
+
 const scene_recipes: scene_recipe[] = [
   {
     item: { id: 'scene-observatory', name: 'Observatory Dome', author: 'Northlight', format: 'glb', triangle_count: 0, raw_bytes: 0, draco_bytes: 0, price_cents: 2400, subtitle: 'Dome + orbital ring', thumbnail_color: pack_color('#4c8bf5') },
-    build: () => merge_geometry([build_uv_sphere(48, 72, 1), build_torus(1.35, 0.06, 64, 20)]),
+    parts: () => [sphere_part('Dome', 48, 72, 1), torus_part('Orbital Ring', 1.35, 0.06, 64, 20)],
   },
   {
     item: { id: 'scene-foundry', name: 'Foundry Hall', author: 'Ironworks', format: 'glb', triangle_count: 0, raw_bytes: 0, draco_bytes: 0, price_cents: 3200, subtitle: 'Twin reactor rings', thumbnail_color: pack_color('#d8a24a') },
-    build: () => merge_geometry([build_torus(1, 0.34, 96, 40), translate_geometry(build_torus(1, 0.2, 72, 28), 0, 0.7, 0)]),
+    parts: () => [torus_part('Main Ring', 1, 0.34, 96, 40), torus_part('Upper Ring', 1, 0.2, 72, 28, 0, 0.7, 0)],
   },
   {
     item: { id: 'scene-garden', name: 'Atrium Garden', author: 'Verdant', format: 'glb', triangle_count: 0, raw_bytes: 0, draco_bytes: 0, price_cents: 1800, subtitle: 'Scatter of spheres', thumbnail_color: pack_color('#5fb878') },
-    build: () => merge_geometry(Array.from({ length: 9 }, (_, i) => translate_geometry(build_uv_sphere(24, 32, 0.4), (i % 3 - 1) * 1.2, 0, (Math.floor(i / 3) - 1) * 1.2))),
+    parts: () => Array.from({ length: 9 }, (_, i) => sphere_part(`Planter ${String.fromCharCode(65 + Math.floor(i / 3))}${(i % 3) + 1}`, 24, 32, 0.4, (i % 3 - 1) * 1.2, 0, (Math.floor(i / 3) - 1) * 1.2)),
   },
   {
     item: { id: 'scene-atrium', name: 'Grand Atrium', author: 'Northlight', format: 'glb', triangle_count: 0, raw_bytes: 0, draco_bytes: 0, price_cents: 4200, subtitle: 'High-density shell', thumbnail_color: pack_color('#bd93f9') },
-    build: () => build_uv_sphere(96, 128, 1.5),
+    parts: () => [sphere_part('Shell', 96, 128, 1.5)],
   },
   {
     item: { id: 'scene-reactor', name: 'Reactor Core', author: 'Ironworks', format: 'glb', triangle_count: 0, raw_bytes: 0, draco_bytes: 0, price_cents: 0, subtitle: 'Core + halo', thumbnail_color: pack_color('#e0698b') },
-    build: () => merge_geometry([build_uv_sphere(40, 56, 0.6), build_torus(1.1, 0.05, 80, 16)]),
+    parts: () => [sphere_part('Core', 40, 56, 0.6), torus_part('Halo Ring', 1.1, 0.05, 80, 16)],
   },
   {
     item: { id: 'scene-promenade', name: 'Promenade Kit', author: 'Verdant', format: 'glb', triangle_count: 0, raw_bytes: 0, draco_bytes: 0, price_cents: 2600, subtitle: 'Modular sphere grid', thumbnail_color: pack_color('#49a6a6') },
-    build: () => merge_geometry(Array.from({ length: 16 }, (_, i) => translate_geometry(build_uv_sphere(28, 40, 0.35), (i % 4 - 1.5) * 1, 0, (Math.floor(i / 4) - 1.5) * 1))),
+    parts: () => Array.from({ length: 16 }, (_, i) => sphere_part(`Module ${i + 1}`, 28, 40, 0.35, (i % 4 - 1.5) * 1, 0, (Math.floor(i / 4) - 1.5) * 1)),
   },
 ]
 
@@ -359,7 +379,7 @@ function compress_scene_catalog(mod: plugin_module): void {
   if (!draco_worker_client) draco_worker_client = mod.create_draco_worker()
   const worker = draco_worker_client
   for (const recipe of scene_recipes) {
-    const geo = recipe.build()
+    const geo = merge_geometry(recipe_parts(recipe).map((part) => part.geometry))
     recipe.item.triangle_count = geo.indices.length / 3
     recipe.item.raw_bytes = geometry_raw_bytes(geo)
     worker
@@ -374,6 +394,20 @@ function compress_scene_catalog(mod: plugin_module): void {
       })
       .catch((err: unknown) => append_console(`draco encode failed: ${err instanceof Error ? err.message : String(err)}`, '#d9534f'))
   }
+}
+
+// Click a card → load the scene's parts into the Asset Detail viewer.
+function open_asset_detail(scene: scene_market_item): void {
+  if (!plugins) return
+  const recipe = scene_recipes.find((r) => r.item.id === scene.id)
+  if (!recipe) return
+  plugins.mod.asset_detail_set_scene(plugins.detail_state, scene, recipe_parts(recipe))
+  // Deferred spawn: the market click lands mid-frame inside windows.frame().
+  window.setTimeout(() => {
+    open_view_tab('asset_detail', 'Asset Detail')
+    windows.invalidate('asset_detail')
+    active_renderer?.request_render()
+  }, 0)
 }
 
 // Click a card → decompress its scene on the worker and report the round-trip.
@@ -472,6 +506,7 @@ const BUILTIN_APPS: { id: string; name: string; icon: string; accent?: string; d
   { id: 'gamepad', name: 'Controller Test', icon: 'circle', description: 'Game controller visualiser.' },
   { id: 'asset_audit', name: 'Asset Audit', icon: 'file', accent: '#6b3d5a', description: 'Drop or upload .glb/.fbx assets: 3D preview, stats, optimize, re-export.' },
   { id: 'asset_market', name: 'Scene Market', icon: 'image', accent: '#6b5a3d', description: 'Buy whole .glb scenes; geometry is Draco-compressed on a worker.' },
+  { id: 'asset_detail', name: 'Asset Detail', icon: 'search', accent: '#3d5a6b', description: 'Inspect a market scene: orbit/free camera, shaded/wireframe/normal/UV/raytrace, per-part statistics.' },
   { id: 'avatar', name: 'Avatar Generator', icon: 'circle', accent: '#3d5a6b', description: 'Procedural human mesh from a parametric skeleton: SDF volumes → surface nets → GLB.' },
   { id: 'material_audit', name: 'Material Audit', icon: 'image', accent: '#5a6b3d', description: 'Upload base color / normal maps and validate them on a repeat grid, UV sphere or rounded cube.' },
   { id: 'about', name: 'About', icon: 'home', description: 'About this demo.' },
@@ -507,6 +542,7 @@ interface demo_plugins {
   file_state: ReturnType<plugin_module['create_file_browser_state']>
   audit_state: ReturnType<plugin_module['create_asset_audit_state']>
   market_state: ReturnType<plugin_module['create_asset_market_state']>
+  detail_state: ReturnType<plugin_module['create_asset_detail_state']>
   avatar_state: ReturnType<plugin_module['create_avatar_generator_state']>
   material_audit_state: ReturnType<plugin_module['create_material_audit_state']>
   chat_state: ReturnType<plugin_module['create_im_dialog_state']>
@@ -681,6 +717,7 @@ const VIEW_TABS: { id: string; title: string; win?: window_new_options }[] = [
   { id: 'gamepad', title: 'Controller Test', win: { w: 620, h: 540 } },
   { id: 'asset_audit', title: 'Asset Audit', win: { w: 900, h: 560 } },
   { id: 'asset_market', title: 'Scene Market', win: { w: 920, h: 560 } },
+  { id: 'asset_detail', title: 'Asset Detail', win: { w: 960, h: 620 } },
   { id: 'avatar', title: 'Avatar Generator', win: { w: 920, h: 600 } },
   { id: 'material_audit', title: 'Material Audit', win: { w: 760, h: 560 } },
   { id: 'webtix', title: 'Path Tracer', win: { w: 900, h: 600 } },
@@ -836,6 +873,7 @@ function build_main_menu(mod: plugin_module): ui_main_menu {
           { id: 'gamepad', label: 'Controller Test' },
           { id: 'asset_audit', label: 'Asset Audit' },
           { id: 'asset_market', label: 'Scene Market' },
+          { id: 'asset_detail', label: 'Asset Detail' },
           { id: 'avatar', label: 'Avatar Generator' },
           { id: 'material_audit', label: 'Material Audit' },
           { id: 'webtix', label: 'Path Tracer' },
@@ -989,6 +1027,7 @@ function init_plugins(mod: plugin_module): void {
     file_state: mod.create_file_browser_state(),
     audit_state: mod.create_asset_audit_state(),
     market_state: mod.create_asset_market_state(),
+    detail_state: mod.create_asset_detail_state(),
     avatar_state: mod.create_avatar_generator_state(),
     material_audit_state: mod.create_material_audit_state(),
     chat_state: mod.create_im_dialog_state(),
@@ -1401,7 +1440,24 @@ async function main(): Promise<void> {
             windows.invalidate('asset_market')
           } else if (ev.selected) {
             verify_scene_decompress(ev.selected)
+            open_asset_detail(ev.selected)
           }
+          break
+        }
+        case 'asset_detail': {
+          // Opened from the menu/dashboard before any card was clicked: default
+          // to the first catalogue scene so the viewer has something to show.
+          if (!live.detail_state.item && scene_recipes.length > 0) {
+            const recipe = scene_recipes[0]!
+            live.mod.asset_detail_set_scene(live.detail_state, recipe.item, recipe_parts(recipe))
+          }
+          const ev = live.mod.asset_market_detail(renderer, widgets, theme, snapshot, px, py, pw, ph, live.detail_state, { scale })
+          if (ev.selection_changed) {
+            append_console(`asset detail: inspect ${ev.selection_changed.part_name ?? 'whole scene'}`, '#4c8bf5')
+            windows.invalidate('asset_detail')
+          }
+          if (ev.view_mode_changed) append_console(`asset detail: ${ev.view_mode_changed} view`, '#9aa3b0')
+          if (ev.camera_mode_changed) append_console(`asset detail: ${ev.camera_mode_changed} camera`, '#9aa3b0')
           break
         }
         case 'avatar': {
