@@ -473,22 +473,28 @@ A read-only static asset browser over the user's **own cloud drive** — a
 Google Drive viewer, not a storage backend. The site stays a pure static
 frontend: the user clicks *Connect Google Drive*, authorizes in the browser
 through the Google Identity Services access-token flow (no client secret, no
-server round-trip), and the panel looks up the folder named
+server round-trip), then picks their asset folder — conventionally named
 
 ```text
 asset_hub/
 ```
 
-in their Drive root and browses its contents — folders open on click with a
-`asset_hub / characters / hero` breadcrumb, images decode to GPU-texture
-thumbnails, text/JSON/shader files preview inline, and everything else
-(models, audio, video, binaries) shows a metadata card (name, MIME type,
-size, modified time) with Download / Open-in-Drive buttons. The viewer never
-creates or writes anything: the requested OAuth scope is
-`https://www.googleapis.com/auth/drive.readonly` (content downloads are what
-image/text previews need; drop to `drive.metadata.readonly` only if you fork
-it into a listing-only browser). File bytes stream straight from Google to
-the page — nothing is uploaded anywhere.
+— in the Google Picker, and the panel browses its contents: folders open on
+click with a `asset_hub / characters / hero` breadcrumb, images decode to
+GPU-texture thumbnails, text/JSON/shader files preview inline, and everything
+else (models, audio, video, binaries) shows a metadata card (name, MIME type,
+size, modified time) with Download / Open-in-Drive buttons. File bytes stream
+straight from Google to the page — nothing is uploaded anywhere.
+
+The requested OAuth scope is `https://www.googleapis.com/auth/drive.file` — a
+**non-sensitive** scope, so the app needs **no Google verification**, shows no
+"unverified app" warning, and is open to any Google account. Under it the app
+can only ever see what the user explicitly grants: selecting the folder in the
+Picker *is* the grant, and it persists on the user's Google account. The
+picked folder id is remembered in `localStorage`, so later visits reopen it
+directly; a *Change Folder* button re-opens the Picker at any time (also the
+escape hatch if files added to the folder outside the app don't surface).
+The viewer never creates or writes anything.
 
 The UI depends only on the `cloud_storage_provider` interface
 (`src/storage/ui_cloud_storage_provider.ts`); every Google Drive API call
@@ -537,14 +543,24 @@ To create the client id:
    `https://<user>.github.io` for the deployed static site. (The token flow
    needs no redirect URI.)
 4. Enable the **Google Drive API** under **APIs & Services → Library**.
-5. Configure the **OAuth consent screen** (app name, scopes — add
-   `.../auth/drive.readonly` — and test users while the app is unverified).
+5. Configure the **OAuth consent screen** (app name, support email). The only
+   scope used is `.../auth/drive.file`, which is non-sensitive — publish the
+   app to production and it works for every Google account with no
+   verification review and no test-user list.
+
+Optionally set `VITE_GOOGLE_API_KEY` with an API key (restricted to the
+Google Picker API and your origins): the folder picker usually works with the
+OAuth token alone, but Google rejects the dialog with a developer-key error
+in some configurations — the key fixes that.
 
 Notes on session handling: the access token lives in memory and is mirrored
 to per-tab `sessionStorage` so a reload doesn't re-prompt; it expires after
 about an hour, and any expired/revoked token flips the panel into a
-*Sign In Again* state instead of failing silently. There is no client secret
-anywhere in the app, and signing out revokes the token.
+*Sign In Again* state instead of failing silently. The picked folder grant
+persists on the Google account (revocable at
+[myaccount.google.com/permissions](https://myaccount.google.com/permissions)).
+There is no client secret anywhere in the app, and signing out revokes the
+token.
 
 ### `webtix` — WebGPU path tracer
 

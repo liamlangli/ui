@@ -7,7 +7,13 @@
 export interface cloud_config {
   /** Google OAuth 2.0 Web application client id; empty when unconfigured. */
   google_client_id: string
-  /** Folder name looked up in the drive root, `asset_hub` by default. */
+  /**
+   * Optional Google API key handed to the Google Picker. The Picker usually
+   * works with the OAuth token alone; set VITE_GOOGLE_API_KEY if Google
+   * rejects the picker dialog with a developer-key error.
+   */
+  google_api_key: string
+  /** Suggested asset folder name shown in the picker prompt, `asset_hub` by default. */
   default_root_folder_name: string
 }
 
@@ -22,6 +28,7 @@ export function load_cloud_config(): cloud_config {
   const env = (import.meta as unknown as { env?: Record<string, string | undefined> }).env
   return {
     google_client_id: env?.VITE_GOOGLE_CLIENT_ID?.trim() ?? '',
+    google_api_key: env?.VITE_GOOGLE_API_KEY?.trim() ?? '',
     default_root_folder_name: env?.VITE_CLOUD_ROOT_FOLDER?.trim() || DEFAULT_ROOT_FOLDER_NAME,
   }
 }

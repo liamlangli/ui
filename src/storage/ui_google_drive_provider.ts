@@ -3,8 +3,15 @@
 // Pure browser implementation: OAuth runs through the Google Identity
 // Services access-token flow (implicit, browser-only — no client secret, no
 // backend), and file access goes through the Drive v3 REST API with `fetch`.
-// The requested scope is read-only (`drive.readonly`) so the viewer can list
-// metadata *and* download file bytes for previews, but can never write.
+//
+// The requested scope is `drive.file` — a non-sensitive scope that needs no
+// Google app verification and shows no "unverified app" warning. Under it the
+// app can only see files the user explicitly grants, so the asset hub root is
+// chosen through the Google Picker (`pick_asset_hub_root`): the user picks
+// their `asset_hub` folder once, the grant persists on their Google account,
+// and the folder id is remembered in `localStorage` so later visits reopen it
+// directly (`find_asset_hub_root` revalidates the stored id and returns null
+// when access was lost, prompting a re-pick).
 //
 // The access token is kept in memory and mirrored to `sessionStorage` so a
 // same-tab reload survives without a new consent popup; sessionStorage is
@@ -16,11 +23,13 @@ import { cloud_error, type cloud_file } from './ui_cloud_types'
 import type { cloud_storage_provider } from './ui_cloud_storage_provider'
 
 const GIS_SCRIPT_SRC = 'https://accounts.google.com/gsi/client'
+const GAPI_SCRIPT_SRC = 'https://apis.google.com/js/api.js'
 const DRIVE_API = 'https://www.googleapis.com/drive/v3'
-const DRIVE_READONLY_SCOPE = 'https://www.googleapis.com/auth/drive.readonly'
+const DRIVE_FILE_SCOPE = 'https://www.googleapis.com/auth/drive.file'
 const DRIVE_FOLDER_MIME = 'application/vnd.google-apps.folder'
 const FILE_FIELDS = 'id,name,mimeType,size,modifiedTime,webViewLink'
 const TOKEN_STORAGE_KEY = 'ui.cloud.gdrive.token'
+const ROOT_STORAGE_KEY = 'ui.cloud.gdrive.root'
 /** Treat tokens as expired slightly early so in-flight requests don't 401. */
 const TOKEN_EXPIRY_MARGIN_MS = 30_000
 
@@ -48,8 +57,40 @@ interface gis_oauth2 {
   revoke(token: string, done?: () => void): void
 }
 
-interface gis_window {
-  google?: { accounts?: { oauth2?: gis_oauth2 } }
+// --- Google Picker ambient surface --------------------------------------------
+// The Picker ships with the gapi loader (apis.google.com/js/api.js); only the
+// builder surface the folder pick needs is declared here.
+interface picker_docs_view {
+  setSelectFolderEnabled(enabled: boolean): picker_docs_view
+  setIncludeFolders(include: boolean): picker_docs_view
+  setMimeTypes(types: string): picker_docs_view
+}
+
+interface picker_response {
+  action: string
+  docs?: { id: string; name: string; mimeType?: string }[]
+}
+
+interface picker_builder {
+  addView(view: picker_docs_view): picker_builder
+  setOAuthToken(token: string): picker_builder
+  setDeveloperKey(key: string): picker_builder
+  setAppId(app_id: string): picker_builder
+  setTitle(title: string): picker_builder
+  setCallback(callback: (data: picker_response) => void): picker_builder
+  build(): { setVisible(visible: boolean): void }
+}
+
+interface picker_namespace {
+  PickerBuilder: new () => picker_builder
+  DocsView: new (view_id?: unknown) => picker_docs_view
+  ViewId: { FOLDERS: unknown }
+  Action: { PICKED: string; CANCEL: string }
+}
+
+interface google_window {
+  google?: { accounts?: { oauth2?: gis_oauth2 }; picker?: picker_namespace }
+  gapi?: { load(name: string, callback: () => void): void }
 }
 
 interface drive_file_resource {
@@ -61,18 +102,30 @@ interface drive_file_resource {
   webViewLink?: string
 }
 
+export interface google_drive_provider_options {
+  /**
+   * Optional Google API key passed to the Picker (`setDeveloperKey`). The
+   * Picker usually works with the OAuth token alone; set this if Google
+   * rejects the dialog with a developer-key error.
+   */
+  api_key?: string
+}
+
 export class google_drive_provider implements cloud_storage_provider {
   readonly label = 'Google Drive'
 
   private client_id: string
   private root_folder_name: string
+  private api_key: string
   private access_token: string | null = null
   private token_expires_at = 0
   private gis_load: Promise<gis_oauth2> | null = null
+  private picker_load: Promise<picker_namespace> | null = null
 
-  constructor(client_id: string, root_folder_name = 'asset_hub') {
+  constructor(client_id: string, root_folder_name = 'asset_hub', options?: google_drive_provider_options) {
     this.client_id = client_id
     this.root_folder_name = root_folder_name
+    this.api_key = options?.api_key ?? ''
     this.restore_session_token()
   }
 
@@ -93,7 +146,7 @@ export class google_drive_provider implements cloud_storage_provider {
       }
       const client = oauth2.initTokenClient({
         client_id: this.client_id,
-        scope: DRIVE_READONLY_SCOPE,
+        scope: DRIVE_FILE_SCOPE,
         callback: (response) => {
           if (!response.access_token) {
             settle(new cloud_error('auth', response.error_description ?? response.error ?? 'Google did not return an access token.'))
@@ -127,21 +180,69 @@ export class google_drive_provider implements cloud_storage_provider {
     return this.access_token !== null && Date.now() < this.token_expires_at - TOKEN_EXPIRY_MARGIN_MS
   }
 
-  // --- files -----------------------------------------------------------------
+  // --- root folder -------------------------------------------------------------
 
   async find_asset_hub_root(): Promise<cloud_file | null> {
-    const name = this.root_folder_name.replace(/\\/g, '\\\\').replace(/'/g, "\\'")
-    const query = `name = '${name}' and mimeType = '${DRIVE_FOLDER_MIME}' and 'root' in parents and trashed = false`
-    const params = new URLSearchParams({
-      q: query,
-      fields: `files(${FILE_FIELDS})`,
-      pageSize: '1',
-      spaces: 'drive',
-    })
-    const body = (await this.api_json(`${DRIVE_API}/files?${params}`)) as { files?: drive_file_resource[] }
-    const raw = body.files?.[0]
-    return raw ? to_cloud_file(raw) : null
+    const saved = this.load_root()
+    if (!saved) return null
+    // Revalidate the stored id: the folder may have been deleted, or the
+    // drive.file grant revoked (or this is a different Google account).
+    try {
+      const body = (await this.api_json(`${DRIVE_API}/files/${encodeURIComponent(saved.id)}?fields=${FILE_FIELDS}`)) as drive_file_resource
+      if (body.mimeType !== DRIVE_FOLDER_MIME) {
+        this.clear_root()
+        return null
+      }
+      return to_cloud_file(body)
+    } catch (err) {
+      const e = err instanceof cloud_error ? err : null
+      if (e?.kind === 'not_found') {
+        this.clear_root()
+        return null // folder deleted or grant lost — the UI offers the picker again
+      }
+      throw err
+    }
   }
+
+  async pick_asset_hub_root(): Promise<cloud_file | null> {
+    if (!this.is_signed_in()) {
+      throw new cloud_error('auth_expired', 'Your Google Drive session expired. Sign in again.')
+    }
+    const picker = await this.load_picker()
+    const token = this.access_token!
+    return new Promise<cloud_file | null>((resolve) => {
+      const view = new picker.DocsView(picker.ViewId.FOLDERS)
+        .setIncludeFolders(true)
+        .setSelectFolderEnabled(true)
+        .setMimeTypes(DRIVE_FOLDER_MIME)
+      let builder = new picker.PickerBuilder()
+        .addView(view)
+        .setOAuthToken(token)
+        .setTitle(`Select your ${this.root_folder_name} folder`)
+        .setCallback((data) => {
+          if (data.action === picker.Action.PICKED) {
+            const doc = data.docs?.[0]
+            if (!doc) {
+              resolve(null)
+              return
+            }
+            const root: cloud_file = { id: doc.id, name: doc.name, mime_type: doc.mimeType ?? DRIVE_FOLDER_MIME, is_folder: true }
+            this.store_root(root)
+            resolve(root)
+          } else if (data.action === picker.Action.CANCEL) {
+            resolve(null)
+          }
+        })
+      // The app id (the project number, the client id's leading segment) ties
+      // the picker grant to this app — required for drive.file access.
+      const app_id = this.client_id.split('-')[0] ?? ''
+      if (/^\d+$/.test(app_id)) builder = builder.setAppId(app_id)
+      if (this.api_key) builder = builder.setDeveloperKey(this.api_key)
+      builder.build().setVisible(true)
+    })
+  }
+
+  // --- files -----------------------------------------------------------------
 
   async list_folder(folder_id: string): Promise<cloud_file[]> {
     const id = folder_id.replace(/\\/g, '\\\\').replace(/'/g, "\\'")
@@ -181,7 +282,7 @@ export class google_drive_provider implements cloud_storage_provider {
   private load_gis(): Promise<gis_oauth2> {
     if (this.gis_load) return this.gis_load
     this.gis_load = new Promise<gis_oauth2>((resolve, reject) => {
-      const existing = (window as unknown as gis_window).google?.accounts?.oauth2
+      const existing = (window as unknown as google_window).google?.accounts?.oauth2
       if (existing) {
         resolve(existing)
         return
@@ -190,7 +291,7 @@ export class google_drive_provider implements cloud_storage_provider {
       script.src = GIS_SCRIPT_SRC
       script.async = true
       script.onload = () => {
-        const oauth2 = (window as unknown as gis_window).google?.accounts?.oauth2
+        const oauth2 = (window as unknown as google_window).google?.accounts?.oauth2
         if (oauth2) resolve(oauth2)
         else reject(new cloud_error('auth', 'Google Identity Services loaded but the OAuth2 API is unavailable.'))
       }
@@ -201,6 +302,37 @@ export class google_drive_provider implements cloud_storage_provider {
       document.head.appendChild(script)
     })
     return this.gis_load
+  }
+
+  private load_picker(): Promise<picker_namespace> {
+    if (this.picker_load) return this.picker_load
+    this.picker_load = new Promise<picker_namespace>((resolve, reject) => {
+      const load_module = () => {
+        const w = window as unknown as google_window
+        w.gapi!.load('picker', () => {
+          const picker = (window as unknown as google_window).google?.picker
+          if (picker) resolve(picker)
+          else {
+            this.picker_load = null
+            reject(new cloud_error('api', 'Google Picker failed to initialize.'))
+          }
+        })
+      }
+      if ((window as unknown as google_window).gapi?.load) {
+        load_module()
+        return
+      }
+      const script = document.createElement('script')
+      script.src = GAPI_SCRIPT_SRC
+      script.async = true
+      script.onload = load_module
+      script.onerror = () => {
+        this.picker_load = null
+        reject(new cloud_error('network', 'Failed to load the Google API loader (apis.google.com unreachable).'))
+      }
+      document.head.appendChild(script)
+    })
+    return this.picker_load
   }
 
   private async api_fetch(url: string): Promise<Response> {
@@ -263,6 +395,34 @@ export class google_drive_provider implements cloud_storage_provider {
     this.token_expires_at = 0
     try {
       window.sessionStorage.removeItem(TOKEN_STORAGE_KEY)
+    } catch {
+      // storage unavailable — nothing to clear
+    }
+  }
+
+  private store_root(root: cloud_file): void {
+    try {
+      window.localStorage.setItem(ROOT_STORAGE_KEY, JSON.stringify({ id: root.id, name: root.name }))
+    } catch {
+      // storage unavailable — the user just re-picks next visit
+    }
+  }
+
+  private load_root(): { id: string; name: string } | null {
+    try {
+      const raw = window.localStorage.getItem(ROOT_STORAGE_KEY)
+      if (!raw) return null
+      const saved = JSON.parse(raw) as { id?: string; name?: string }
+      if (typeof saved.id === 'string' && saved.id) return { id: saved.id, name: saved.name ?? '' }
+    } catch {
+      // storage unavailable or corrupt blob
+    }
+    return null
+  }
+
+  private clear_root(): void {
+    try {
+      window.localStorage.removeItem(ROOT_STORAGE_KEY)
     } catch {
       // storage unavailable — nothing to clear
     }

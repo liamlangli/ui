@@ -1,12 +1,14 @@
 // asset_hub drive browser — a read-only viewer over the user's own cloud
 // drive, rendered entirely with the immediate-mode GPU toolkit.
 //
-// The panel shows the contents of the `asset_hub/` folder in the root of the
-// user's cloud storage (Google Drive first). It only talks to the
-// `cloud_storage_provider` abstraction — no provider API call lives in this
-// file — so Dropbox / iCloud / local-folder backends slot in without touching
-// the UI. All work (OAuth, listing, previews) happens in the browser; file
-// bytes never leave the user's machine except to the storage provider itself.
+// The panel shows the contents of the user's `asset_hub/` folder (Google
+// Drive first; granted through the provider's folder picker under the
+// non-sensitive drive.file scope, so the app can only ever see that folder).
+// It only talks to the `cloud_storage_provider` abstraction — no provider API
+// call lives in this file — so Dropbox / iCloud / local-folder backends slot
+// in without touching the UI. All work (OAuth, listing, previews) happens in
+// the browser; file bytes never leave the user's machine except to the
+// storage provider itself.
 //
 // Image previews are decoded to RGBA in the browser and uploaded to renderer
 // textures (the GPU equivalent of an <img> object URL); textures and download
@@ -25,7 +27,8 @@ export type asset_hub_drive_status =
   | 'authorizing'
   | 'auth_error'
   | 'locating_root'
-  | 'root_missing'
+  | 'root_needed' // no root granted yet — the provider offers a folder picker
+  | 'root_missing' // pickerless provider found no asset hub folder
   | 'loading'
   | 'ready'
   | 'load_error'
@@ -65,6 +68,8 @@ export interface asset_hub_drive_state {
   on_change: (() => void) | null
   /** Internal: monotonically increasing token that cancels stale responses. */
   _seq: number
+  /** Internal: true while the provider's folder picker dialog is open. */
+  _picking: boolean
   _thumbnails: Map<string, hub_thumbnail>
   _text_previews: Map<string, hub_text_preview>
   /** Internal: texture ids queued for destruction on the next frame. */
@@ -83,6 +88,7 @@ export interface asset_hub_drive_event {
   connect_requested?: boolean
   signed_out?: boolean
   refreshed?: boolean
+  pick_requested?: boolean
   folder_opened?: cloud_file
   selected?: cloud_file
   download_requested?: cloud_file
@@ -111,6 +117,7 @@ export function create_asset_hub_drive_state(
     detail_scroll: { offset_y: 0 },
     on_change: options?.on_change ?? null,
     _seq: 0,
+    _picking: false,
     _thumbnails: new Map(),
     _text_previews: new Map(),
     _dispose_textures: [],
@@ -174,11 +181,38 @@ async function action_locate_root(state: asset_hub_drive_state): Promise<void> {
   }
   if (seq !== state._seq) return
   if (!root) {
-    set_status(state, 'root_missing')
+    // Under a picker-based grant (drive.file) the user selects the folder;
+    // pickerless providers can only report that the folder doesn't exist.
+    set_status(state, provider.pick_asset_hub_root ? 'root_needed' : 'root_missing')
     notify(state)
     return
   }
   state.breadcrumb = [root]
+  await action_load_folder(state)
+}
+
+/** Open the provider's folder picker; on a pick, make it the new hub root. */
+async function action_pick_root(state: asset_hub_drive_state): Promise<void> {
+  const provider = state.provider
+  if (!provider?.pick_asset_hub_root || state._picking) return
+  state._picking = true
+  state.notice = ''
+  let root: cloud_file | null = null
+  try {
+    root = await provider.pick_asset_hub_root()
+  } catch (err) {
+    state._picking = false
+    fail_action(state, err)
+    notify(state)
+    return
+  }
+  state._picking = false
+  if (!root) {
+    notify(state) // cancelled — keep whatever was on screen
+    return
+  }
+  state.breadcrumb = [root]
+  clear_caches(state)
   await action_load_folder(state)
 }
 
@@ -481,6 +515,14 @@ function draw_header(
       event.refreshed = true
       action_refresh(state)
     }
+    if (provider?.pick_asset_hub_root && state.breadcrumb.length > 0) {
+      const change = place('Change Folder')
+      if (button(ui, input, change.bx, button_y, change.bw, button_h, 'Change Folder', false, font_px, scale, col, state._picking) && !state._press_consumed) {
+        state._press_consumed = true
+        event.pick_requested = true
+        void action_pick_root(state)
+      }
+    }
   } else if (provider && state.status !== 'authorizing') {
     const label = state.status === 'auth_expired' ? 'Sign In Again' : 'Connect Google Drive'
     const connect = place(label)
@@ -583,6 +625,19 @@ function status_view_of(state: asset_hub_drive_state): status_view {
       }
     case 'locating_root':
       return { title: `Looking for the ${root} folder…`, lines: [] }
+    case 'root_needed':
+      return {
+        title: `Choose your ${root} folder`,
+        lines: [
+          'Pick the Google Drive folder that holds your assets.',
+          'The app can only ever read the folder you select — nothing else in your Drive.',
+        ],
+        action_label: 'Choose Folder',
+        action: (s, e) => {
+          e.pick_requested = true
+          void action_pick_root(s)
+        },
+      }
     case 'root_missing':
       return {
         title: `No ${root} folder found in your Google Drive root.`,

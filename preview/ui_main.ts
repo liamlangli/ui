@@ -821,7 +821,7 @@ function init_plugins(mod: plugin_module): void {
   // otherwise the panel shows a configuration message (see README).
   const cloud_cfg = mod.load_cloud_config()
   const drive_provider = cloud_cfg.google_client_id
-    ? new mod.google_drive_provider(cloud_cfg.google_client_id, cloud_cfg.default_root_folder_name)
+    ? new mod.google_drive_provider(cloud_cfg.google_client_id, cloud_cfg.default_root_folder_name, { api_key: cloud_cfg.google_api_key })
     : null
   const editor_buffer = new mod.text_buffer(
     [
@@ -1250,6 +1250,7 @@ async function main(): Promise<void> {
         case 'asset_hub': {
           const ev = live.mod.asset_hub_drive(renderer, theme, snapshot, px, py, pw, ph, live.asset_hub_drive_state)
           if (ev.connect_requested) append_console('asset hub: connecting to Google Drive…', '#4c8bf5')
+          if (ev.pick_requested) append_console('asset hub: choosing a Drive folder…', '#4c8bf5')
           if (ev.signed_out) append_console('asset hub: signed out of Google Drive', '#9aa3b0')
           if (ev.refreshed) append_console('asset hub: refreshing current folder', '#9aa3b0')
           if (ev.folder_opened) append_console(`asset hub: opened ${ev.folder_opened.name}/`, '#4c8bf5')

@@ -27,11 +27,22 @@ export interface cloud_storage_provider {
   is_signed_in(): boolean
 
   /**
-   * Locate the asset hub root folder (e.g. the `asset_hub/` folder in the
-   * user's Drive root). Resolves null when the folder does not exist — the
-   * viewer is read-only and never creates it.
+   * Locate the asset hub root folder the app already has access to (e.g. the
+   * Drive folder the user granted through the picker on a previous visit,
+   * revalidated against the provider). Resolves null when no root is known or
+   * it is no longer accessible — the viewer is read-only and never creates it.
    */
   find_asset_hub_root(): Promise<cloud_file | null>
+
+  /**
+   * Ask the user to grant a root folder through the provider's picker UI
+   * (e.g. the Google Picker under the `drive.file` scope, where the app can
+   * only ever see what the user explicitly selects). Resolves the picked
+   * folder — persisted so `find_asset_hub_root` returns it next time — or
+   * null when the user cancels. Optional: providers whose scope can already
+   * see the drive root don't need a picker.
+   */
+  pick_asset_hub_root?(): Promise<cloud_file | null>
 
   /** List the direct children of a folder, folders first, sorted by name. */
   list_folder(folder_id: string): Promise<cloud_file[]>
