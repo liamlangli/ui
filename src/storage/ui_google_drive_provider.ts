@@ -13,11 +13,19 @@
 // directly (`find_asset_hub_root` revalidates the stored id and returns null
 // when access was lost, prompting a re-pick).
 //
-// The access token is kept in memory and mirrored to `sessionStorage` so a
-// same-tab reload survives without a new consent popup; sessionStorage is
-// per-tab and cleared when the tab closes. Tokens expire after ~1 hour —
-// every API call re-checks expiry and 401 responses drop the token, so the
-// UI can ask the user to sign in again instead of assuming it lives forever.
+// The access token is kept in memory and mirrored to `localStorage` (lightly
+// obfuscated, not just raw JSON, so it doesn't sit in plain sight in devtools)
+// so a new tab or a full browser restart resumes the session too, instead of
+// forcing the Google consent popup on every visit. Tokens still expire after
+// ~1 hour regardless of where they're stored — every API call re-checks
+// expiry and 401 responses drop the token, so the UI asks the user to sign in
+// again once it actually lapses instead of assuming it lives forever.
+//
+// `upload_file` / `create_folder` write into the granted folder (Drive API
+// `files.create`, the upload variant taking a `multipart/related` body).
+// Under drive.file, files this app creates are automatically accessible to it
+// afterwards — no extra grant needed, unlike files added to the folder by
+// some other app or by the user directly in Drive.
 
 import { cloud_error, type cloud_file } from './ui_cloud_types'
 import type { cloud_storage_provider } from './ui_cloud_storage_provider'
@@ -25,11 +33,19 @@ import type { cloud_storage_provider } from './ui_cloud_storage_provider'
 const GIS_SCRIPT_SRC = 'https://accounts.google.com/gsi/client'
 const GAPI_SCRIPT_SRC = 'https://apis.google.com/js/api.js'
 const DRIVE_API = 'https://www.googleapis.com/drive/v3'
+const DRIVE_UPLOAD_API = 'https://www.googleapis.com/upload/drive/v3'
 const DRIVE_FILE_SCOPE = 'https://www.googleapis.com/auth/drive.file'
 const DRIVE_FOLDER_MIME = 'application/vnd.google-apps.folder'
 const FILE_FIELDS = 'id,name,mimeType,size,modifiedTime,webViewLink'
-const TOKEN_STORAGE_KEY = 'ui.cloud.gdrive.token'
+const TOKEN_STORAGE_KEY = 'ui.cloud.gdrive.token.v2'
 const ROOT_STORAGE_KEY = 'ui.cloud.gdrive.root'
+/**
+ * Fixed XOR key used to obfuscate the access token before it lands in
+ * `localStorage`. This is not encryption (there is no secret to keep it
+ * secure from anyone reading this source) — it just keeps the stored value
+ * from being a plain, instantly-recognizable bearer token in devtools.
+ */
+const TOKEN_OBFUSCATION_KEY = 'ui.asset_hub.gdrive.token'
 /** Treat tokens as expired slightly early so in-flight requests don't 401. */
 const TOKEN_EXPIRY_MARGIN_MS = 30_000
 
@@ -126,7 +142,7 @@ export class google_drive_provider implements cloud_storage_provider {
     this.client_id = client_id
     this.root_folder_name = root_folder_name
     this.api_key = options?.api_key ?? ''
-    this.restore_session_token()
+    this.restore_token()
   }
 
   // --- auth ------------------------------------------------------------------
@@ -196,7 +212,7 @@ export class google_drive_provider implements cloud_storage_provider {
       return to_cloud_file(body)
     } catch (err) {
       const e = err instanceof cloud_error ? err : null
-      if (e?.kind === 'not_found') {
+      if (e?.kind === 'not_found' || e?.kind === 'forbidden') {
         this.clear_root()
         return null // folder deleted or grant lost — the UI offers the picker again
       }
@@ -257,14 +273,53 @@ export class google_drive_provider implements cloud_storage_provider {
         spaces: 'drive',
       })
       if (page_token) params.set('pageToken', page_token)
-      const body = (await this.api_json(`${DRIVE_API}/files?${params}`)) as {
-        nextPageToken?: string
-        files?: drive_file_resource[]
+      let body: { nextPageToken?: string; files?: drive_file_resource[] }
+      try {
+        body = (await this.api_json(`${DRIVE_API}/files?${params}`)) as typeof body
+      } catch (err) {
+        // A drive.file grant on a folder picked through pick_asset_hub_root only
+        // covers files that existed in it at pick time (and anything this app
+        // has uploaded since) — a folder with none yet reports 403 on this
+        // query instead of an empty result. Treat that the same as "no files
+        // here" on the first page rather than surfacing a hard error, so a
+        // freshly granted, still-empty folder opens cleanly.
+        if (files.length === 0 && err instanceof cloud_error && err.kind === 'forbidden') return []
+        throw err
       }
       for (const raw of body.files ?? []) files.push(to_cloud_file(raw))
       page_token = body.nextPageToken
     } while (page_token)
     return files
+  }
+
+  async create_folder(parent_id: string, name: string): Promise<cloud_file> {
+    const body = (await this.api_json(`${DRIVE_API}/files?fields=${FILE_FIELDS}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, mimeType: DRIVE_FOLDER_MIME, parents: [parent_id] }),
+    })) as drive_file_resource
+    return to_cloud_file(body)
+  }
+
+  async upload_file(parent_id: string, name: string, data: Blob, mime_type?: string): Promise<cloud_file> {
+    const type = mime_type || data.type || 'application/octet-stream'
+    // multipart/related upload: a JSON metadata part followed by the file
+    // bytes. Built as a `Blob` (not a string) so binary content survives
+    // untouched — string concatenation would corrupt it on the first
+    // non-UTF8 byte.
+    const boundary = `ui-asset-hub-${Math.random().toString(36).slice(2)}`
+    const body = new Blob([
+      `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify({ name, parents: [parent_id], mimeType: type })}\r\n`,
+      `--${boundary}\r\nContent-Type: ${type}\r\n\r\n`,
+      data,
+      `\r\n--${boundary}--`,
+    ])
+    const result = (await this.api_json(`${DRIVE_UPLOAD_API}/files?uploadType=multipart&fields=${FILE_FIELDS}`, {
+      method: 'POST',
+      headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
+      body,
+    })) as drive_file_resource
+    return to_cloud_file(result)
   }
 
   async get_file_content(file: cloud_file): Promise<Blob> {
@@ -335,14 +390,14 @@ export class google_drive_provider implements cloud_storage_provider {
     return this.picker_load
   }
 
-  private async api_fetch(url: string): Promise<Response> {
+  private async api_fetch(url: string, init?: RequestInit): Promise<Response> {
     if (!this.is_signed_in()) {
       this.clear_token()
       throw new cloud_error('auth_expired', 'Your Google Drive session expired. Sign in again.')
     }
     let response: Response
     try {
-      response = await fetch(url, { headers: { Authorization: `Bearer ${this.access_token}` } })
+      response = await fetch(url, { ...init, headers: { ...init?.headers, Authorization: `Bearer ${this.access_token}` } })
     } catch {
       throw new cloud_error('network', 'Network request to Google Drive failed.')
     }
@@ -350,13 +405,14 @@ export class google_drive_provider implements cloud_storage_provider {
       this.clear_token()
       throw new cloud_error('auth_expired', 'Your Google Drive session expired. Sign in again.')
     }
+    if (response.status === 403) throw new cloud_error('forbidden', 'Google Drive denied access to this item (insufficient permissions).')
     if (response.status === 404) throw new cloud_error('not_found', 'File not found in Google Drive.')
     if (!response.ok) throw new cloud_error('api', `Google Drive API error (HTTP ${response.status}).`)
     return response
   }
 
-  private async api_json(url: string): Promise<unknown> {
-    const response = await this.api_fetch(url)
+  private async api_json(url: string, init?: RequestInit): Promise<unknown> {
+    const response = await this.api_fetch(url, init)
     try {
       return await response.json()
     } catch {
@@ -368,22 +424,24 @@ export class google_drive_provider implements cloud_storage_provider {
     this.access_token = token
     this.token_expires_at = Date.now() + expires_in_s * 1000
     try {
-      window.sessionStorage.setItem(TOKEN_STORAGE_KEY, JSON.stringify({ token, expires_at: this.token_expires_at }))
+      const payload = JSON.stringify({ token, expires_at: this.token_expires_at })
+      window.localStorage.setItem(TOKEN_STORAGE_KEY, obfuscate(payload))
     } catch {
       // storage unavailable (private mode / quota) — session just won't survive a reload
     }
   }
 
-  private restore_session_token(): void {
+  private restore_token(): void {
     try {
-      const raw = window.sessionStorage.getItem(TOKEN_STORAGE_KEY)
+      const raw = window.localStorage.getItem(TOKEN_STORAGE_KEY)
       if (!raw) return
-      const saved = JSON.parse(raw) as { token?: string; expires_at?: number }
-      if (typeof saved.token === 'string' && typeof saved.expires_at === 'number' && Date.now() < saved.expires_at - TOKEN_EXPIRY_MARGIN_MS) {
+      const payload = deobfuscate(raw)
+      const saved = payload ? (JSON.parse(payload) as { token?: string; expires_at?: number }) : null
+      if (saved && typeof saved.token === 'string' && typeof saved.expires_at === 'number' && Date.now() < saved.expires_at - TOKEN_EXPIRY_MARGIN_MS) {
         this.access_token = saved.token
         this.token_expires_at = saved.expires_at
       } else {
-        window.sessionStorage.removeItem(TOKEN_STORAGE_KEY)
+        window.localStorage.removeItem(TOKEN_STORAGE_KEY)
       }
     } catch {
       // storage unavailable or corrupt blob — start signed out
@@ -394,7 +452,7 @@ export class google_drive_provider implements cloud_storage_provider {
     this.access_token = null
     this.token_expires_at = 0
     try {
-      window.sessionStorage.removeItem(TOKEN_STORAGE_KEY)
+      window.localStorage.removeItem(TOKEN_STORAGE_KEY)
     } catch {
       // storage unavailable — nothing to clear
     }
@@ -426,6 +484,28 @@ export class google_drive_provider implements cloud_storage_provider {
     } catch {
       // storage unavailable — nothing to clear
     }
+  }
+}
+
+/** XOR the string against `TOKEN_OBFUSCATION_KEY`, then base64-encode it. */
+function obfuscate(value: string): string {
+  const bytes = new TextEncoder().encode(value)
+  const key = new TextEncoder().encode(TOKEN_OBFUSCATION_KEY)
+  let binary = ''
+  for (let i = 0; i < bytes.length; i += 1) binary += String.fromCharCode(bytes[i]! ^ key[i % key.length]!)
+  return btoa(binary)
+}
+
+/** Inverse of `obfuscate`; returns null for anything that isn't a valid blob. */
+function deobfuscate(value: string): string | null {
+  try {
+    const binary = atob(value)
+    const key = new TextEncoder().encode(TOKEN_OBFUSCATION_KEY)
+    const bytes = new Uint8Array(binary.length)
+    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i) ^ key[i % key.length]!
+    return new TextDecoder().decode(bytes)
+  } catch {
+    return null
   }
 }
 

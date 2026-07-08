@@ -11,8 +11,8 @@ It bundles the pieces needed to build a browser-native editor UI on top of WebGP
 - **`dock_system` / `window_system`** — ready-to-use workspace systems built on `dock`/`window`: a docked split workspace and a floating desktop-style window manager, both part of core so third-party projects can build directly on them. See [Workspace systems](#workspace-systems).
 - **`theme`** — palette/CSS-variable theming with `load_theme`, `apply_theme`, `theme_color`, `theme_rgba`, `pack_color`, and `hex_to_normalized_rgba`.
 - **`app_registry`** — installable apps described by a JSON manifest: install/uninstall, persistence, and update checks against each app's `shipping_path`. See [`dashboard`](#dashboard--full-screen-app-launcher).
-- **`plugins`** — opt-in, higher-level drop-in components (`file_browser`, `graph`, `node_graph`, `im_dialog`, `code_editor`, `dashboard`, `asset_hub` cloud drive viewer, `avatar_generator`, `material_audit`, `webtix` WebGPU path tracer) packaged so other projects can reuse them piecemeal. See [Plugins](#plugins).
-- **`storage`** — a browser-only cloud storage abstraction (`cloud_storage_provider`) with a Google Drive backend, used by the Asset Hub viewer. See [Asset Hub](#asset_hub--cloud-drive-viewer-google-drive).
+- **`plugins`** — opt-in, higher-level drop-in components (`file_browser`, `graph`, `node_graph`, `im_dialog`, `code_editor`, `dashboard`, `asset_hub` cloud drive browser/uploader, `avatar_generator`, `material_audit`, `webtix` WebGPU path tracer) packaged so other projects can reuse them piecemeal. See [Plugins](#plugins).
+- **`storage`** — a browser-only cloud storage abstraction (`cloud_storage_provider`) with a Google Drive backend, used by the Asset Hub browser/uploader. See [Asset Hub](#asset_hub--cloud-drive-browser--uploader-google-drive).
 
 ## Live preview
 
@@ -35,7 +35,7 @@ npm run build    # production build → dist/ (GitHub Pages base = /ui/)
 The **Asset Hub** window (View ▸ Apps ▸ Asset Hub) is a Google Drive viewer
 and needs a Google OAuth client id: copy `.env.example` to `.env.local` and
 set `VITE_GOOGLE_CLIENT_ID` (setup steps in
-[Asset Hub](#asset_hub--cloud-drive-viewer-google-drive)). Without it the
+[Asset Hub](#asset_hub--cloud-drive-browser--uploader-google-drive)). Without it the
 panel shows a configuration message — everything else works as before.
 
 ### GitHub Pages
@@ -467,13 +467,14 @@ The wheel-zoom / two-finger pan + pinch handling lives in core as
 `pan_zoom_apply` / `pan_zoom_drag` (`@liamlangli/ui` → `ui_pan_zoom`); the
 `graph` and `node_graph` canvases run on the same module.
 
-### `asset_hub` — cloud drive viewer (Google Drive)
+### `asset_hub` — cloud drive browser + uploader (Google Drive)
 
-A read-only static asset browser over the user's **own cloud drive** — a
-Google Drive viewer, not a storage backend. The site stays a pure static
-frontend: the user clicks *Connect Google Drive*, authorizes in the browser
-through the Google Identity Services access-token flow (no client secret, no
-server round-trip), then picks their asset folder — conventionally named
+A static asset browser (and light uploader) over the user's **own cloud
+drive** — a Google Drive integration, not a storage backend. The site stays a
+pure static frontend: the user clicks *Connect Google Drive*, authorizes in
+the browser through the Google Identity Services access-token flow (no client
+secret, no server round-trip), then picks their asset folder — conventionally
+named
 
 ```text
 asset_hub/
@@ -484,23 +485,31 @@ click with a `asset_hub / characters / hero` breadcrumb, images decode to
 GPU-texture thumbnails, text/JSON/shader files preview inline, and everything
 else (models, audio, video, binaries) shows a metadata card (name, MIME type,
 size, modified time) with Download / Open-in-Drive buttons. File bytes stream
-straight from Google to the page — nothing is uploaded anywhere.
+straight between Google and the page — there is no backend in the middle.
+
+An *Upload* button sends local assets the other way: a `.glb` uploads as-is,
+and a `.zip` containing a `.gltf` is unpacked in the browser (no dependency —
+see `src/storage/ui_zip_reader.ts`) and the `.gltf` plus the buffers/images it
+references upload together, in a new subfolder when there's more than one
+file so the `.gltf`'s relative URIs keep resolving. See
+[Uploading assets](#uploading-assets) below.
 
 The requested OAuth scope is `https://www.googleapis.com/auth/drive.file` — a
 **non-sensitive** scope, so the app needs **no Google verification**, shows no
 "unverified app" warning, and is open to any Google account. Under it the app
 can only ever see what the user explicitly grants: selecting the folder in the
-Picker *is* the grant, and it persists on the user's Google account. The
-picked folder id is remembered in `localStorage`, so later visits reopen it
-directly; a *Change Folder* button re-opens the Picker at any time (also the
-escape hatch if files added to the folder outside the app don't surface).
-The viewer never creates or writes anything.
+Picker *is* the grant (plus anything the app itself later uploads there), and
+it persists on the user's Google account. The picked folder id is remembered
+in `localStorage`, so later visits reopen it directly; a *Change Folder*
+button re-opens the Picker at any time (also the escape hatch if files added
+to the folder from outside the app don't surface).
 
 The UI depends only on the `cloud_storage_provider` interface
 (`src/storage/ui_cloud_storage_provider.ts`); every Google Drive API call
 lives in `google_drive_provider` (`src/storage/ui_google_drive_provider.ts`),
-so a Dropbox / iCloud / local-folder backend can implement the same seven
-methods and reuse the panel unchanged.
+so a Dropbox / iCloud / local-folder backend can implement the same interface
+and reuse the panel unchanged (`upload_file` / `create_folder` are optional —
+a provider without them just doesn't get an Upload button).
 
 ```ts
 import {
@@ -554,13 +563,47 @@ OAuth token alone, but Google rejects the dialog with a developer-key error
 in some configurations — the key fixes that.
 
 Notes on session handling: the access token lives in memory and is mirrored
-to per-tab `sessionStorage` so a reload doesn't re-prompt; it expires after
-about an hour, and any expired/revoked token flips the panel into a
-*Sign In Again* state instead of failing silently. The picked folder grant
-persists on the Google account (revocable at
+to `localStorage` — lightly obfuscated (XOR + base64, not encryption — there's
+no secret to keep it safe from someone reading this source, it just isn't a
+plain bearer token sitting in devtools) — so a new tab or a full browser
+restart resumes the session too, instead of reprompting on every visit. It
+still expires after about an hour regardless of where it's stored, and any
+expired/revoked token flips the panel into a *Sign In Again* state instead of
+failing silently. The picked folder grant persists on the Google account
+(revocable at
 [myaccount.google.com/permissions](https://myaccount.google.com/permissions)).
 There is no client secret anywhere in the app, and signing out revokes the
-token.
+token and clears local storage.
+
+A freshly-picked folder that's still empty is a normal state, not an error:
+under `drive.file`, Google only grants access to files that existed in the
+folder *at pick time*, so an empty folder's (nonexistent) children come back
+as an HTTP 403 rather than an empty list. `google_drive_provider.list_folder`
+treats that specific case as "no files here" so the panel just shows *This
+folder is empty* — upload something with the button below and it opens fine.
+
+#### Uploading assets
+
+The *Upload* button (next to *Change Folder*, shown once a folder is open)
+accepts:
+
+- **`.glb`** — uploaded to the current folder as-is.
+- **`.zip`** containing exactly one **`.gltf`** — unpacked in the browser
+  (`src/storage/ui_zip_reader.ts`, a dependency-free ZIP reader: central
+  directory parsing by hand, `DecompressionStream('deflate-raw')` for
+  inflation). The `.gltf`'s `buffers`/`images` URIs are resolved against the
+  archive's other entries and uploaded alongside it — into a new subfolder
+  named after the zip when there's more than one file, so relative URIs keep
+  resolving; directly into the current folder when the `.gltf` is
+  self-contained (embedded `data:` buffers). A referenced file missing from
+  the archive fails that upload with a clear message rather than landing a
+  broken scene.
+
+`src/plugins/asset_hub/ui_asset_hub_upload.ts` holds the planning logic
+(pure, provider-agnostic); `asset_hub_drive_dom_target(canvas, state)` wires
+the hidden file input and the same mobile gesture-relay pattern used by
+`asset_audit_dom_target` (a file dialog only opens from a trusted pointer
+event, not one raised from inside the render loop).
 
 ### `webtix` — WebGPU path tracer
 

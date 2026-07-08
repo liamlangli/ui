@@ -25,6 +25,7 @@ export type cloud_error_kind =
   | 'network' // the request never reached the provider
   | 'api' // the provider API returned an error
   | 'not_found'
+  | 'forbidden' // the provider denied access to this specific item (HTTP 403)
 
 /** Error thrown by storage providers; `kind` drives the UI state machine. */
 export class cloud_error extends Error {

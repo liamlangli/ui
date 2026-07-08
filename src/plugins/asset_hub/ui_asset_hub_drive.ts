@@ -20,6 +20,7 @@ import { FONT_MONO, ui_renderer } from '../../core/ui_renderer'
 import type { ui_input_snapshot, ui_scroll_state } from '../../core/ui_widgets'
 import { as_cloud_error, cloud_file_kind_of, type cloud_file, type cloud_file_kind } from '../../storage/ui_cloud_types'
 import type { cloud_storage_provider } from '../../storage/ui_cloud_storage_provider'
+import { is_uploadable_asset_name, upload_local_files } from './ui_asset_hub_upload'
 
 export type asset_hub_drive_status =
   | 'config_error' // no provider — the OAuth client id is not configured
@@ -70,11 +71,17 @@ export interface asset_hub_drive_state {
   _seq: number
   /** Internal: true while the provider's folder picker dialog is open. */
   _picking: boolean
+  /** True while local files picked/dropped for upload are being sent to the provider. */
+  uploading: boolean
   _thumbnails: Map<string, hub_thumbnail>
   _text_previews: Map<string, hub_text_preview>
   /** Internal: texture ids queued for destruction on the next frame. */
   _dispose_textures: number[]
   _press_consumed: boolean
+  // wired by asset_hub_drive_dom_target
+  open_upload_picker: (() => void) | null
+  /** Preferred upload trigger: relays the click into the next trusted pointerup (mobile file dialogs need a real gesture). */
+  request_upload_picker: (() => void) | null
 }
 
 export interface asset_hub_drive_options {
@@ -93,6 +100,7 @@ export interface asset_hub_drive_event {
   selected?: cloud_file
   download_requested?: cloud_file
   open_requested?: cloud_file
+  upload_requested?: boolean
 }
 
 const THUMBNAIL_MAX_DIM = 256
@@ -118,10 +126,13 @@ export function create_asset_hub_drive_state(
     on_change: options?.on_change ?? null,
     _seq: 0,
     _picking: false,
+    uploading: false,
     _thumbnails: new Map(),
     _text_previews: new Map(),
     _dispose_textures: [],
     _press_consumed: false,
+    open_upload_picker: null,
+    request_upload_picker: null,
   }
 }
 
@@ -276,6 +287,30 @@ async function action_sign_out(state: asset_hub_drive_state): Promise<void> {
   await provider.sign_out()
 }
 
+/** Open the upload picker via the DOM bridge's gesture relay (mobile-safe), or directly. */
+function trigger_upload_picker(state: asset_hub_drive_state): void {
+  if (state.request_upload_picker) state.request_upload_picker()
+  else state.open_upload_picker?.()
+}
+
+/** Upload local files into the currently open folder, then refresh the listing. */
+async function action_upload_files(state: asset_hub_drive_state, files: File[]): Promise<void> {
+  const provider = state.provider
+  const folder = state.breadcrumb[state.breadcrumb.length - 1]
+  if (!provider?.upload_file || !folder || state.uploading || files.length === 0) return
+  state.uploading = true
+  state.notice = ''
+  notify(state)
+  const { uploaded, errors } = await upload_local_files(provider, folder.id, files, (label) => {
+    state.notice = label
+    notify(state)
+  })
+  state.uploading = false
+  state.notice = errors.length > 0 ? errors.join(' ') : uploaded.length > 0 ? `Uploaded ${uploaded.length} file${uploaded.length === 1 ? '' : 's'}.` : ''
+  if (uploaded.length > 0) await action_load_folder(state)
+  else notify(state)
+}
+
 function trigger_download(state: asset_hub_drive_state, file: cloud_file): void {
   const provider = state.provider
   if (!provider) return
@@ -403,6 +438,89 @@ function ensure_thumbnail_texture(ui: ui_renderer, thumb: hub_thumbnail): number
   return thumb.texture_id
 }
 
+// --- upload DOM bridge -----------------------------------------------------------
+
+export interface asset_hub_drive_dom_options {
+  on_change?: () => void
+}
+
+/**
+ * Wire a hidden `.glb` / `.zip` file input onto a host element so the panel's
+ * Upload button (and any host-added drag/drop target) can hand files to
+ * `action_upload_files`. Mirrors `asset_audit_dom_target`'s gesture relay:
+ * mobile browsers only honor a file-dialog request inside a trusted pointer
+ * event, not one raised from inside a render loop, so the button queues a
+ * request and this bridge fulfills it on the next real pointerup.
+ */
+export function asset_hub_drive_dom_target(target: HTMLElement, state: asset_hub_drive_state, options?: asset_hub_drive_dom_options): () => void {
+  state.on_change = options?.on_change ?? state.on_change
+
+  const input = document.createElement('input')
+  input.type = 'file'
+  input.multiple = true
+  const ua = navigator.userAgent
+  const is_ios = /iPad|iPhone|iPod/.test(ua) || (/Mac/.test(ua) && navigator.maxTouchPoints > 1)
+  // iOS treats unknown extensions in `accept` as "nothing selectable" — skip it there.
+  if (!is_ios) input.accept = '.glb,.zip'
+  input.style.position = 'fixed'
+  input.style.left = '0'
+  input.style.top = '0'
+  input.style.width = '1px'
+  input.style.height = '1px'
+  input.style.opacity = '0'
+  input.style.pointerEvents = 'none'
+  input.tabIndex = -1
+  input.setAttribute('aria-hidden', 'true')
+  input.addEventListener('change', () => {
+    const files = [...(input.files ?? [])].filter((file) => is_uploadable_asset_name(file.name))
+    input.value = ''
+    if (files.length > 0) void action_upload_files(state, files)
+  })
+  document.body.appendChild(input)
+  state.open_upload_picker = () => input.click()
+
+  let pending = false
+  let pointer_held = false
+  const PICKER_REQUEST_TTL_MS = 3000
+  let requested_at = 0
+  const fulfill = (): void => {
+    if (!pending || performance.now() - requested_at > PICKER_REQUEST_TTL_MS) {
+      pending = false
+      return
+    }
+    pending = false
+    input.click()
+  }
+  state.request_upload_picker = () => {
+    pending = true
+    requested_at = performance.now()
+    if (!pointer_held) fulfill()
+  }
+  const pointer_down = (): void => {
+    pointer_held = true
+  }
+  const pointer_up = (): void => {
+    pointer_held = false
+    fulfill()
+  }
+  const pointer_cancel = (): void => {
+    pointer_held = false
+    pending = false // a cancelled gesture (e.g. scroll) shouldn't pop the dialog
+  }
+  target.addEventListener('pointerdown', pointer_down)
+  window.addEventListener('pointerup', pointer_up)
+  window.addEventListener('pointercancel', pointer_cancel)
+
+  return () => {
+    target.removeEventListener('pointerdown', pointer_down)
+    window.removeEventListener('pointerup', pointer_up)
+    window.removeEventListener('pointercancel', pointer_cancel)
+    input.remove()
+    state.open_upload_picker = null
+    state.request_upload_picker = null
+  }
+}
+
 // --- panel ----------------------------------------------------------------------
 
 export function asset_hub_drive(
@@ -514,6 +632,15 @@ function draw_header(
       state._press_consumed = true
       event.refreshed = true
       action_refresh(state)
+    }
+    if (provider?.upload_file && state.breadcrumb.length > 0) {
+      const label = state.uploading ? 'Uploading…' : 'Upload'
+      const upload = place(label)
+      if (button(ui, input, upload.bx, button_y, upload.bw, button_h, label, false, font_px, scale, col, state.uploading) && !state._press_consumed) {
+        state._press_consumed = true
+        event.upload_requested = true
+        trigger_upload_picker(state)
+      }
     }
     if (provider?.pick_asset_hub_root && state.breadcrumb.length > 0) {
       const change = place('Change Folder')

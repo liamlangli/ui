@@ -919,6 +919,10 @@ function init_plugins(mod: plugin_module): void {
     on_error: (message) => append_console(message, '#d9534f'),
   })
 
+  // Asset Hub uploads: wires the hidden `.glb` / `.zip` file input behind the
+  // panel's Upload button (on_change is already set by create_asset_hub_drive_state above).
+  mod.asset_hub_drive_dom_target(canvas, plugins.asset_hub_drive_state)
+
   // Drag-to-install: dropping an app description .json (or a manifest URL)
   // anywhere on the canvas installs it; the dashboard opens as the drop zone.
   mod.dashboard_drop_target(canvas, registry, plugins.dashboard_state, {

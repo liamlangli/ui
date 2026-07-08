@@ -1,7 +1,9 @@
 // cloud_storage_provider — the storage abstraction the asset hub UI depends
 // on. UI components take this interface (never a concrete provider), so a
-// Dropbox / iCloud / local-folder backend only has to implement these seven
-// methods to plug into the same browser.
+// Dropbox / iCloud / local-folder backend only has to implement these
+// methods to plug into the same browser. `upload_file` / `create_folder` are
+// optional — a provider (or grant scope) that can't write leaves them unset
+// and the UI simply hides the Upload button.
 //
 // Everything runs in the browser: providers authenticate with a client-side
 // OAuth flow (no client secret, no backend) and stream file bytes directly
@@ -55,4 +57,14 @@ export interface cloud_storage_provider {
 
   /** Download the file's raw bytes. */
   get_file_content(file: cloud_file): Promise<Blob>
+
+  /**
+   * Upload `data` as a new file named `name` inside `folder_id`. `mime_type`
+   * defaults to `data.type`, then `application/octet-stream`. Optional: only
+   * providers that can write into the granted folder implement this.
+   */
+  upload_file?(folder_id: string, name: string, data: Blob, mime_type?: string): Promise<cloud_file>
+
+  /** Create a subfolder named `name` inside `folder_id`. Optional, see `upload_file`. */
+  create_folder?(folder_id: string, name: string): Promise<cloud_file>
 }
