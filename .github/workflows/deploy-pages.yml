@@ -37,6 +37,10 @@ jobs:
         env:
           # Served from https://<user>.github.io/<repo>/
           BASE_PATH: /${{ github.event.repository.name }}/
+          # Google OAuth client id for the Asset Hub drive viewer. A client id
+          # is a public identifier (no secret involved); a repository variable
+          # overrides the committed default, e.g. for forks.
+          VITE_GOOGLE_CLIENT_ID: ${{ vars.VITE_GOOGLE_CLIENT_ID || '861910820836-koodg1rko4nd179pj8ti1hgkjqkl0no1.apps.googleusercontent.com' }}
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
