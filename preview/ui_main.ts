@@ -75,10 +75,7 @@ import type {
   node_graph_connection,
   node_graph_template,
   terrain_graph,
-  scene_market_item,
-  scene_geometry,
-  draco_worker,
-  asset_detail_part_input,
+  asset_hub_item,
 } from '../src/plugins'
 import theme_url from './theme.json?url'
 
@@ -241,184 +238,141 @@ const node_graph_templates: node_graph_template[] = [
   { type: 'Output', inputs: [{ label: 'Albedo', type: 'color' }, { label: 'Normal', type: 'vec3' }] },
 ]
 
-// --- Scene Market catalogue --------------------------------------------------
-// The storefront sells whole scenes as .glb only. Each listing is backed by a
-// procedurally built mesh; on boot the Draco worker compresses that geometry off
-// the main thread so the cards show a real raw-glb → Draco saving — and the
-// round-trip (encode here, decode on card click) proves the worker pipeline.
-
-interface scene_recipe {
-  item: scene_market_item
-  /** Named sub-meshes: the Asset Detail viewer selects and reports per part. */
-  parts: () => asset_detail_part_input[]
-  /** Built parts, cached so market boot and detail view share one build. */
-  cached_parts?: asset_detail_part_input[]
-  /** The Draco container, cached after the boot-time compression pass. */
-  encoded?: Uint8Array
-}
-
-function recipe_parts(recipe: scene_recipe): asset_detail_part_input[] {
-  recipe.cached_parts ??= recipe.parts()
-  return recipe.cached_parts
-}
-
-function build_uv_sphere(rings: number, segments: number, radius: number): scene_geometry {
-  const positions: number[] = [], normals: number[] = [], uvs: number[] = [], indices: number[] = []
-  for (let y = 0; y <= rings; y += 1) {
-    const v = y / rings, phi = v * Math.PI
-    for (let x = 0; x <= segments; x += 1) {
-      const u = x / segments, theta = u * Math.PI * 2
-      const nx = Math.sin(phi) * Math.cos(theta), ny = Math.cos(phi), nz = Math.sin(phi) * Math.sin(theta)
-      positions.push(nx * radius, ny * radius, nz * radius)
-      normals.push(nx, ny, nz)
-      uvs.push(u, v)
-    }
-  }
-  const stride = segments + 1
-  for (let y = 0; y < rings; y += 1) for (let x = 0; x < segments; x += 1) {
-    const a = y * stride + x, b = a + 1, c = a + stride, d = c + 1
-    indices.push(a, c, b, b, c, d)
-  }
-  return { positions: new Float32Array(positions), normals: new Float32Array(normals), uvs: new Float32Array(uvs), indices: new Uint32Array(indices) }
-}
-
-function build_torus(radius: number, tube: number, radial: number, tubular: number): scene_geometry {
-  const positions: number[] = [], normals: number[] = [], uvs: number[] = [], indices: number[] = []
-  for (let j = 0; j <= radial; j += 1) {
-    const v = j / radial, phi = v * Math.PI * 2
-    for (let i = 0; i <= tubular; i += 1) {
-      const u = i / tubular, theta = u * Math.PI * 2
-      const cx = Math.cos(theta), cz = Math.sin(theta)
-      positions.push((radius + tube * Math.cos(phi)) * cx, tube * Math.sin(phi), (radius + tube * Math.cos(phi)) * cz)
-      normals.push(Math.cos(phi) * cx, Math.sin(phi), Math.cos(phi) * cz)
-      uvs.push(u, v)
-    }
-  }
-  const stride = tubular + 1
-  for (let j = 0; j < radial; j += 1) for (let i = 0; i < tubular; i += 1) {
-    const a = j * stride + i, b = a + 1, c = a + stride, d = c + 1
-    indices.push(a, c, b, b, c, d)
-  }
-  return { positions: new Float32Array(positions), normals: new Float32Array(normals), uvs: new Float32Array(uvs), indices: new Uint32Array(indices) }
-}
-
-function translate_geometry(geo: scene_geometry, dx: number, dy: number, dz: number): scene_geometry {
-  for (let i = 0; i < geo.positions.length; i += 3) {
-    geo.positions[i] += dx; geo.positions[i + 1] += dy; geo.positions[i + 2] += dz
-  }
-  return geo
-}
-
-function merge_geometry(parts: scene_geometry[]): scene_geometry {
-  let vtx = 0, idx = 0
-  for (const p of parts) { vtx += p.positions.length / 3; idx += p.indices.length }
-  const positions = new Float32Array(vtx * 3), normals = new Float32Array(vtx * 3), uvs = new Float32Array(vtx * 2), indices = new Uint32Array(idx)
-  let vo = 0, io = 0
-  for (const p of parts) {
-    positions.set(p.positions, vo * 3)
-    if (p.normals) normals.set(p.normals, vo * 3)
-    if (p.uvs) uvs.set(p.uvs, vo * 2)
-    for (let i = 0; i < p.indices.length; i += 1) indices[io + i] = p.indices[i]! + vo
-    vo += p.positions.length / 3; io += p.indices.length
-  }
-  return { positions, normals, uvs, indices }
-}
-
-/** Rough uncompressed glb geometry footprint (attributes + indices). */
-function geometry_raw_bytes(geo: scene_geometry): number {
-  return geo.positions.byteLength + (geo.normals?.byteLength ?? 0) + (geo.uvs?.byteLength ?? 0) + geo.indices.byteLength
-}
-
-// Named part helpers: face_count is the parametric quad count (rings×segments
-// for a UV sphere, radial×tubular for a torus) so the detail view reports the
-// authored polygon faces instead of falling back to per-triangle counting.
-function sphere_part(name: string, rings: number, segments: number, radius: number, dx = 0, dy = 0, dz = 0): asset_detail_part_input {
-  return { name, geometry: translate_geometry(build_uv_sphere(rings, segments, radius), dx, dy, dz), face_count: rings * segments }
-}
-
-function torus_part(name: string, radius: number, tube: number, radial: number, tubular: number, dx = 0, dy = 0, dz = 0): asset_detail_part_input {
-  return { name, geometry: translate_geometry(build_torus(radius, tube, radial, tubular), dx, dy, dz), face_count: radial * tubular }
-}
-
-const scene_recipes: scene_recipe[] = [
+const asset_hub_assets: asset_hub_item[] = [
   {
-    item: { id: 'scene-observatory', name: 'Observatory Dome', author: 'Northlight', format: 'glb', triangle_count: 0, raw_bytes: 0, draco_bytes: 0, price_cents: 2400, subtitle: 'Dome + orbital ring', thumbnail_color: pack_color('#4c8bf5') },
-    parts: () => [sphere_part('Dome', 48, 72, 1), torus_part('Orbital Ring', 1.35, 0.06, 64, 20)],
+    id: 'scene-orbital-hangar',
+    name: 'Orbital Hangar Scene',
+    type_label: 'SCENE',
+    category: 'Scene',
+    summary: 'Lighting, props and camera anchors for a compact sci-fi hangar.',
+    author: 'Mina Park',
+    license: 'CC-BY 4.0',
+    source: 'Internal scene jam',
+    storage_uri: 'hub://scenes/orbital-hangar.glb',
+    tags: ['hangar', 'lighting', 'camera-ready'],
+    audit_status: 'passed',
+    updated_at: '2026-06-18',
+    size_bytes: 48_200_000,
+    scene_count: 1,
+    preview_color: pack_color('#4c8bf5'),
   },
   {
-    item: { id: 'scene-foundry', name: 'Foundry Hall', author: 'Ironworks', format: 'glb', triangle_count: 0, raw_bytes: 0, draco_bytes: 0, price_cents: 3200, subtitle: 'Twin reactor rings', thumbnail_color: pack_color('#d8a24a') },
-    parts: () => [torus_part('Main Ring', 1, 0.34, 96, 40), torus_part('Upper Ring', 1, 0.2, 72, 28, 0, 0.7, 0)],
+    id: 'scene-rainy-rooftop',
+    name: 'Rainy Rooftop Blockout',
+    type_label: 'SCENE',
+    category: 'Scene',
+    summary: 'Night rooftop layout with wet materials and skyline proxies.',
+    author: 'Noah Chen',
+    license: 'Studio-share',
+    source: 'Environment team',
+    storage_uri: 'hub://scenes/rainy-rooftop.glb',
+    tags: ['urban', 'rain', 'blockout'],
+    audit_status: 'warning',
+    updated_at: '2026-06-24',
+    size_bytes: 36_840_000,
+    scene_count: 1,
+    preview_color: pack_color('#49a6a6'),
   },
   {
-    item: { id: 'scene-garden', name: 'Atrium Garden', author: 'Verdant', format: 'glb', triangle_count: 0, raw_bytes: 0, draco_bytes: 0, price_cents: 1800, subtitle: 'Scatter of spheres', thumbnail_color: pack_color('#5fb878') },
-    parts: () => Array.from({ length: 9 }, (_, i) => sphere_part(`Planter ${String.fromCharCode(65 + Math.floor(i / 3))}${(i % 3) + 1}`, 24, 32, 0.4, (i % 3 - 1) * 1.2, 0, (Math.floor(i / 3) - 1) * 1.2)),
+    id: 'kit-warehouse-props',
+    name: 'Warehouse Props Kit',
+    type_label: 'KIT',
+    category: 'Scene Kit',
+    summary: 'Reusable crates, rails, pallet stacks and scanner props.',
+    author: 'Liam Studio',
+    license: 'MIT',
+    source: 'Asset audit import',
+    storage_uri: 'hub://kits/warehouse-props/',
+    tags: ['modular', 'props', 'industrial'],
+    audit_status: 'passed',
+    updated_at: '2026-05-30',
+    size_bytes: 22_400_000,
+    scene_count: 18,
+    preview_color: pack_color('#c08a2e'),
   },
   {
-    item: { id: 'scene-atrium', name: 'Grand Atrium', author: 'Northlight', format: 'glb', triangle_count: 0, raw_bytes: 0, draco_bytes: 0, price_cents: 4200, subtitle: 'High-density shell', thumbnail_color: pack_color('#bd93f9') },
-    parts: () => [sphere_part('Shell', 96, 128, 1.5)],
+    id: 'hdr-studio-a',
+    name: 'Studio HDR Rig',
+    type_label: 'HDRI',
+    category: 'Lighting',
+    summary: 'Neutral product-lighting setup with softbox references.',
+    author: 'Ada Morris',
+    license: 'CC0',
+    source: 'Lighting library',
+    storage_uri: 'hub://lighting/studio-hdr-rig.hdr',
+    tags: ['lighting', 'studio', 'neutral'],
+    audit_status: 'passed',
+    updated_at: '2026-06-10',
+    size_bytes: 14_600_000,
+    preview_color: pack_color('#8f96a3'),
   },
   {
-    item: { id: 'scene-reactor', name: 'Reactor Core', author: 'Ironworks', format: 'glb', triangle_count: 0, raw_bytes: 0, draco_bytes: 0, price_cents: 0, subtitle: 'Core + halo', thumbnail_color: pack_color('#e0698b') },
-    parts: () => [sphere_part('Core', 40, 56, 0.6), torus_part('Halo Ring', 1.1, 0.05, 80, 16)],
+    id: 'scene-market-plaza',
+    name: 'Market Plaza Layout',
+    type_label: 'SCENE',
+    category: 'Scene',
+    summary: 'Open plaza composition for crowd, stall and navigation testing.',
+    author: 'Sofia Ito',
+    license: 'CC-BY-SA 4.0',
+    source: 'Community exchange',
+    storage_uri: 'hub://scenes/market-plaza.glb',
+    tags: ['plaza', 'layout', 'community'],
+    audit_status: 'passed',
+    updated_at: '2026-06-02',
+    size_bytes: 41_900_000,
+    scene_count: 1,
+    preview_color: pack_color('#5fb878'),
   },
   {
-    item: { id: 'scene-promenade', name: 'Promenade Kit', author: 'Verdant', format: 'glb', triangle_count: 0, raw_bytes: 0, draco_bytes: 0, price_cents: 2600, subtitle: 'Modular sphere grid', thumbnail_color: pack_color('#49a6a6') },
-    parts: () => Array.from({ length: 16 }, (_, i) => sphere_part(`Module ${i + 1}`, 28, 40, 0.35, (i % 4 - 1.5) * 1, 0, (Math.floor(i / 4) - 1.5) * 1)),
+    id: 'mat-brushed-steel',
+    name: 'Brushed Steel Material',
+    type_label: 'MAT',
+    category: 'Material',
+    summary: 'Audited PBR material for rails, tools and hard-surface props.',
+    author: 'Ken Alvarez',
+    license: 'Apache-2.0',
+    source: 'Material audit',
+    storage_uri: 'hub://materials/brushed-steel/',
+    tags: ['pbr', 'metal', 'surface'],
+    audit_status: 'passed',
+    updated_at: '2026-05-21',
+    size_bytes: 8_300_000,
+    preview_color: pack_color('#8f72d8'),
+  },
+  {
+    id: 'scene-training-yard',
+    name: 'Training Yard Scene',
+    type_label: 'SCENE',
+    category: 'Scene',
+    summary: 'Outdoor combat-training yard with lanes and cover markers.',
+    author: 'Jules Wang',
+    license: 'Studio-share',
+    source: 'Design prototype',
+    storage_uri: 'hub://scenes/training-yard.glb',
+    tags: ['gameplay', 'cover', 'outdoor'],
+    audit_status: 'pending',
+    updated_at: '2026-06-27',
+    size_bytes: 29_760_000,
+    scene_count: 1,
+    preview_color: pack_color('#d8a24a'),
+  },
+  {
+    id: 'shader-hologram',
+    name: 'Hologram Shader',
+    type_label: 'SHDR',
+    category: 'Shader',
+    summary: 'WGSL material node for scene markers and diegetic UI panels.',
+    author: 'Iris Novak',
+    license: 'BSD-3-Clause',
+    source: 'Rendering lab',
+    storage_uri: 'hub://shaders/hologram.wgsl',
+    tags: ['wgsl', 'hologram', 'material'],
+    audit_status: 'passed',
+    updated_at: '2026-06-06',
+    size_bytes: 92_000,
+    preview_color: pack_color('#88c0d0'),
   },
 ]
-
-const scene_catalog: scene_market_item[] = scene_recipes.map((recipe) => recipe.item)
-
-// The Draco worker, started lazily once the plugin chunk lands.
-let draco_worker_client: draco_worker | null = null
-
-// Compress every catalogue scene off the main thread so the storefront shows a
-// real raw-glb → Draco saving. Stores the container for the click-to-decompress
-// round-trip below.
-function compress_scene_catalog(mod: plugin_module): void {
-  if (!draco_worker_client) draco_worker_client = mod.create_draco_worker()
-  const worker = draco_worker_client
-  for (const recipe of scene_recipes) {
-    const geo = merge_geometry(recipe_parts(recipe).map((part) => part.geometry))
-    recipe.item.triangle_count = geo.indices.length / 3
-    recipe.item.raw_bytes = geometry_raw_bytes(geo)
-    worker
-      .encode(geo)
-      .then((bytes) => {
-        recipe.encoded = bytes
-        recipe.item.draco_bytes = bytes.byteLength
-        const saved = Math.round((1 - bytes.byteLength / Math.max(1, recipe.item.raw_bytes)) * 100)
-        append_console(`draco: ${recipe.item.name} ${mod.format_asset_bytes(recipe.item.raw_bytes)} → ${mod.format_asset_bytes(bytes.byteLength)} (-${saved}%)`, '#5fb878')
-        windows.invalidate('asset_market')
-        active_renderer?.request_render()
-      })
-      .catch((err: unknown) => append_console(`draco encode failed: ${err instanceof Error ? err.message : String(err)}`, '#d9534f'))
-  }
-}
-
-// Click a card → load the scene's parts into the Asset Detail viewer.
-function open_asset_detail(scene: scene_market_item): void {
-  if (!plugins) return
-  const recipe = scene_recipes.find((r) => r.item.id === scene.id)
-  if (!recipe) return
-  plugins.mod.asset_detail_set_scene(plugins.detail_state, scene, recipe_parts(recipe))
-  // Deferred spawn: the market click lands mid-frame inside windows.frame().
-  window.setTimeout(() => {
-    open_view_tab('asset_detail', 'Asset Detail')
-    windows.invalidate('asset_detail')
-    active_renderer?.request_render()
-  }, 0)
-}
-
-// Click a card → decompress its scene on the worker and report the round-trip.
-function verify_scene_decompress(scene: scene_market_item): void {
-  const recipe = scene_recipes.find((r) => r.item.id === scene.id)
-  if (!recipe?.encoded || !draco_worker_client) return
-  draco_worker_client
-    .decode(recipe.encoded)
-    .then((geo) => append_console(`scene ${scene.name}: worker decompressed ${geo.indices.length / 3} tris`, '#4c8bf5'))
-    .catch((err: unknown) => append_console(`draco decode failed: ${err instanceof Error ? err.message : String(err)}`, '#d9534f'))
-}
 
 // The desktop: the Demo Editor app window (hosting the dock layout above)
 // next to a floating Chat window. Other apps spawn from the View menu.
@@ -505,8 +459,7 @@ const BUILTIN_APPS: { id: string; name: string; icon: string; accent?: string; d
   { id: 'profiler', name: 'Profiler', icon: 'search', description: 'Frame profiler and memory registry.' },
   { id: 'gamepad', name: 'Controller Test', icon: 'circle', description: 'Game controller visualiser.' },
   { id: 'asset_audit', name: 'Asset Audit', icon: 'file', accent: '#6b3d5a', description: 'Drop or upload .glb/.fbx assets: 3D preview, stats, optimize, re-export.' },
-  { id: 'asset_market', name: 'Scene Market', icon: 'image', accent: '#6b5a3d', description: 'Buy whole .glb scenes; geometry is Draco-compressed on a worker.' },
-  { id: 'asset_detail', name: 'Asset Detail', icon: 'search', accent: '#3d5a6b', description: 'Inspect a market scene: orbit/free camera, shaded/wireframe/normal/UV/raytrace, per-part statistics.' },
+  { id: 'asset_hub', name: 'Asset Hub', icon: 'image', accent: '#3d5f6b', description: 'Manage and preview shared scene assets with author, license and storage metadata.' },
   { id: 'avatar', name: 'Avatar Generator', icon: 'circle', accent: '#3d5a6b', description: 'Procedural human mesh from a parametric skeleton: SDF volumes → surface nets → GLB.' },
   { id: 'material_audit', name: 'Material Audit', icon: 'image', accent: '#5a6b3d', description: 'Upload base color / normal maps and validate them on a repeat grid, UV sphere or rounded cube.' },
   { id: 'about', name: 'About', icon: 'home', description: 'About this demo.' },
@@ -541,8 +494,7 @@ interface demo_plugins {
   dashboard_state: ReturnType<plugin_module['create_dashboard_state']>
   file_state: ReturnType<plugin_module['create_file_browser_state']>
   audit_state: ReturnType<plugin_module['create_asset_audit_state']>
-  market_state: ReturnType<plugin_module['create_asset_market_state']>
-  detail_state: ReturnType<plugin_module['create_asset_detail_state']>
+  asset_hub_state: ReturnType<plugin_module['create_asset_hub_state']>
   avatar_state: ReturnType<plugin_module['create_avatar_generator_state']>
   material_audit_state: ReturnType<plugin_module['create_material_audit_state']>
   chat_state: ReturnType<plugin_module['create_im_dialog_state']>
@@ -716,8 +668,7 @@ const VIEW_TABS: { id: string; title: string; win?: window_new_options }[] = [
   { id: 'profiler', title: 'Profiler', win: { w: 760, h: 460 } },
   { id: 'gamepad', title: 'Controller Test', win: { w: 620, h: 540 } },
   { id: 'asset_audit', title: 'Asset Audit', win: { w: 900, h: 560 } },
-  { id: 'asset_market', title: 'Scene Market', win: { w: 920, h: 560 } },
-  { id: 'asset_detail', title: 'Asset Detail', win: { w: 960, h: 620 } },
+  { id: 'asset_hub', title: 'Asset Hub', win: { w: 920, h: 560 } },
   { id: 'avatar', title: 'Avatar Generator', win: { w: 920, h: 600 } },
   { id: 'material_audit', title: 'Material Audit', win: { w: 760, h: 560 } },
   { id: 'webtix', title: 'Path Tracer', win: { w: 900, h: 600 } },
@@ -784,10 +735,6 @@ function append_console(text: string, color?: string): void {
   console_state.scroll_to_line = console_lines.length - 1
   windows.invalidate('demo-editor') // the Console lives inside the Demo Editor window
   active_renderer?.request_render()
-}
-
-function format_market_total(cents: number): string {
-  return cents ? `$${(cents / 100).toFixed(2)}` : 'Free'
 }
 
 // Cancel any pending (debounced) compile and reset a queued status to idle.
@@ -872,8 +819,7 @@ function build_main_menu(mod: plugin_module): ui_main_menu {
           { id: 'profiler', label: 'Profiler' },
           { id: 'gamepad', label: 'Controller Test' },
           { id: 'asset_audit', label: 'Asset Audit' },
-          { id: 'asset_market', label: 'Scene Market' },
-          { id: 'asset_detail', label: 'Asset Detail' },
+          { id: 'asset_hub', label: 'Asset Hub' },
           { id: 'avatar', label: 'Avatar Generator' },
           { id: 'material_audit', label: 'Material Audit' },
           { id: 'webtix', label: 'Path Tracer' },
@@ -1026,8 +972,7 @@ function init_plugins(mod: plugin_module): void {
     dashboard_state: mod.create_dashboard_state(),
     file_state: mod.create_file_browser_state(),
     audit_state: mod.create_asset_audit_state(),
-    market_state: mod.create_asset_market_state(),
-    detail_state: mod.create_asset_detail_state(),
+    asset_hub_state: mod.create_asset_hub_state(),
     avatar_state: mod.create_avatar_generator_state(),
     material_audit_state: mod.create_material_audit_state(),
     chat_state: mod.create_im_dialog_state(),
@@ -1110,10 +1055,6 @@ function init_plugins(mod: plugin_module): void {
       active_renderer?.request_render()
     },
   })
-
-  // Compress the Scene Market catalogue on the Draco worker so the storefront
-  // shows real raw-glb → Draco savings once the numbers land.
-  compress_scene_catalog(mod)
 
   // Cached window bodies rendered the loading hint — re-render them live.
   windows.invalidate()
@@ -1426,38 +1367,18 @@ async function main(): Promise<void> {
         case 'asset_audit':
           live.mod.asset_audit(renderer, widgets, theme, snapshot, px, py, pw, ph, live.audit_state, { scale })
           break
-        case 'asset_market': {
-          const ev = live.mod.asset_market(renderer, theme, snapshot, px, py, pw, ph, scene_catalog, live.market_state)
-          if (ev.checkout) {
-            append_console(`scene market checkout: ${ev.checkout.scenes.length} scenes (${format_market_total(ev.checkout.total_cents)})`, '#5fb878')
-            live.market_state.cart.clear()
-            windows.invalidate('asset_market')
-          } else if (ev.added) {
-            append_console(`scene market add: ${ev.added.name}`, '#4c8bf5')
-            windows.invalidate('asset_market')
-          } else if (ev.removed) {
-            append_console(`scene market remove: ${ev.removed.name}`, '#d8a24a')
-            windows.invalidate('asset_market')
+        case 'asset_hub': {
+          const ev = live.mod.asset_hub(renderer, theme, snapshot, px, py, pw, ph, asset_hub_assets, live.asset_hub_state)
+          if (ev.preview_requested) {
+            append_console(`asset hub preview: ${ev.preview_requested.name}`, '#4c8bf5')
+            windows.invalidate('asset_hub')
+          } else if (ev.share_requested) {
+            append_console(`asset hub share: ${ev.share_requested.name} (${ev.share_requested.license ?? 'unlicensed'})`, '#5fb878')
+            windows.invalidate('asset_hub')
           } else if (ev.selected) {
-            verify_scene_decompress(ev.selected)
-            open_asset_detail(ev.selected)
+            append_console(`asset hub selected: ${ev.selected.name}`, '#9aa3b0')
+            windows.invalidate('asset_hub')
           }
-          break
-        }
-        case 'asset_detail': {
-          // Opened from the menu/dashboard before any card was clicked: default
-          // to the first catalogue scene so the viewer has something to show.
-          if (!live.detail_state.item && scene_recipes.length > 0) {
-            const recipe = scene_recipes[0]!
-            live.mod.asset_detail_set_scene(live.detail_state, recipe.item, recipe_parts(recipe))
-          }
-          const ev = live.mod.asset_market_detail(renderer, widgets, theme, snapshot, px, py, pw, ph, live.detail_state, { scale })
-          if (ev.selection_changed) {
-            append_console(`asset detail: inspect ${ev.selection_changed.part_name ?? 'whole scene'}`, '#4c8bf5')
-            windows.invalidate('asset_detail')
-          }
-          if (ev.view_mode_changed) append_console(`asset detail: ${ev.view_mode_changed} view`, '#9aa3b0')
-          if (ev.camera_mode_changed) append_console(`asset detail: ${ev.camera_mode_changed} camera`, '#9aa3b0')
           break
         }
         case 'avatar': {

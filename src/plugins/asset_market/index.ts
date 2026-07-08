@@ -1,7 +1,11 @@
-export * from './ui_asset_market'
-export * from './ui_asset_market_detail'
-export * from './ui_asset_market_detail_view'
-export * from './ui_asset_market_scene'
-export * from './ui_asset_market_draco'
-// ui_asset_market_worker is intentionally not re-exported: it is a worker entry
-// referenced by URL only, so importing the plugin never registers a handler.
+export {
+  asset_hub as asset_market,
+  create_asset_hub_state as create_asset_market_state,
+} from '../asset_hub'
+export type {
+  asset_audit_status,
+  asset_hub_item as asset_market_item,
+  asset_hub_options as asset_market_options,
+  asset_hub_event as asset_market_event,
+  asset_hub_state as asset_market_state,
+} from '../asset_hub'

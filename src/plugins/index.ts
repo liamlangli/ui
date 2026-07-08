@@ -6,7 +6,7 @@
 
 export * from './apps'
 export * from './asset_audit'
-export * from './asset_market'
+export * from './asset_hub'
 export * from './avatar'
 export * from './editor'
 export * from './graphs'
