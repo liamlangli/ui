@@ -576,11 +576,11 @@ There is no client secret anywhere in the app, and signing out revokes the
 token and clears local storage.
 
 A freshly-picked folder that's still empty is a normal state, not an error:
-under `drive.file`, Google only grants access to files that existed in the
-folder *at pick time*, so an empty folder's (nonexistent) children come back
-as an HTTP 403 rather than an empty list. `google_drive_provider.list_folder`
-treats that specific case as "no files here" so the panel just shows *This
-folder is empty* — upload something with the button below and it opens fine.
+under `drive.file`, a parent-ID search can return HTTP 403 when the app cannot
+see any children yet. `google_drive_provider.list_folder` instead lists the
+files visible to the app and filters their `parents` metadata locally. This
+keeps the request within the narrow scope and returns a normal empty result,
+so the panel just shows *This folder is empty*.
 
 #### Uploading assets
 

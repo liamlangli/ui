@@ -36,7 +36,7 @@ const DRIVE_API = 'https://www.googleapis.com/drive/v3'
 const DRIVE_UPLOAD_API = 'https://www.googleapis.com/upload/drive/v3'
 const DRIVE_FILE_SCOPE = 'https://www.googleapis.com/auth/drive.file'
 const DRIVE_FOLDER_MIME = 'application/vnd.google-apps.folder'
-const FILE_FIELDS = 'id,name,mimeType,size,modifiedTime,webViewLink'
+const FILE_FIELDS = 'id,name,mimeType,size,modifiedTime,webViewLink,parents'
 const TOKEN_STORAGE_KEY = 'ui.cloud.gdrive.token.v2'
 const ROOT_STORAGE_KEY = 'ui.cloud.gdrive.root'
 /**
@@ -116,6 +116,7 @@ interface drive_file_resource {
   size?: string
   modifiedTime?: string
   webViewLink?: string
+  parents?: string[]
 }
 
 export interface google_drive_provider_options {
@@ -261,32 +262,29 @@ export class google_drive_provider implements cloud_storage_provider {
   // --- files -----------------------------------------------------------------
 
   async list_folder(folder_id: string): Promise<cloud_file[]> {
-    const id = folder_id.replace(/\\/g, '\\\\').replace(/'/g, "\\'")
     const files: cloud_file[] = []
     let page_token: string | undefined
     do {
+      // With the narrow drive.file scope, a parent-id query can return 403 for
+      // a newly picked folder when the app cannot see any children yet. Listing
+      // the app-visible files is supported by drive.file even in that case.
+      // Request `parents` and apply the folder filter locally so an empty folder
+      // produces a normal 200 response with an empty result.
       const params = new URLSearchParams({
-        q: `'${id}' in parents and trashed = false`,
+        q: 'trashed = false',
         fields: `nextPageToken,files(${FILE_FIELDS})`,
         orderBy: 'folder,name',
         pageSize: '200',
         spaces: 'drive',
       })
       if (page_token) params.set('pageToken', page_token)
-      let body: { nextPageToken?: string; files?: drive_file_resource[] }
-      try {
-        body = (await this.api_json(`${DRIVE_API}/files?${params}`)) as typeof body
-      } catch (err) {
-        // A drive.file grant on a folder picked through pick_asset_hub_root only
-        // covers files that existed in it at pick time (and anything this app
-        // has uploaded since) — a folder with none yet reports 403 on this
-        // query instead of an empty result. Treat that the same as "no files
-        // here" on the first page rather than surfacing a hard error, so a
-        // freshly granted, still-empty folder opens cleanly.
-        if (files.length === 0 && err instanceof cloud_error && err.kind === 'forbidden') return []
-        throw err
+      const body = (await this.api_json(`${DRIVE_API}/files?${params}`)) as {
+        nextPageToken?: string
+        files?: drive_file_resource[]
       }
-      for (const raw of body.files ?? []) files.push(to_cloud_file(raw))
+      for (const raw of body.files ?? []) {
+        if (raw.parents?.includes(folder_id)) files.push(to_cloud_file(raw))
+      }
       page_token = body.nextPageToken
     } while (page_token)
     return files
