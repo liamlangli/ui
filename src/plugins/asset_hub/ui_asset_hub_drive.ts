@@ -13,6 +13,9 @@
 // Image previews are decoded to RGBA in the browser and uploaded to renderer
 // textures (the GPU equivalent of an <img> object URL); textures and download
 // object URLs are released when the folder changes or the user signs out.
+// `.glb` scenes get an interactive 3D preview: the file is decoded (with the
+// Draco lib under public/lib/draco/ when compressed) and CPU-rasterized into
+// a texture that re-renders as the user drags to orbit (see ui_asset_hub_glb).
 
 import { theme_color } from '../../core/ui_theme'
 import type { theme_definition, theme_slot } from '../../core/ui_types'
@@ -22,6 +25,7 @@ import { create_ui_task_queue_state, ui_task_queue_send, type ui_task_queue_stat
 import { as_cloud_error, cloud_file_kind_of, type cloud_file, type cloud_file_kind } from '../../storage/ui_cloud_types'
 import type { cloud_storage_provider } from '../../storage/ui_cloud_storage_provider'
 import { is_uploadable_asset_name, upload_local_files } from './ui_asset_hub_upload'
+import { decode_glb_preview_mesh, render_glb_preview, type glb_preview_mesh } from './ui_asset_hub_glb'
 
 export type asset_hub_drive_status =
   | 'config_error' // no provider — the OAuth client id is not configured
@@ -52,6 +56,24 @@ interface hub_text_preview {
   error?: string
 }
 
+/** Decoded `.glb` scene plus the orbit-view texture rendered from it. */
+interface hub_glb_preview {
+  status: 'loading' | 'ready' | 'failed'
+  error?: string
+  mesh: glb_preview_mesh | null
+  texture_id: number
+  tex_w: number
+  tex_h: number
+  yaw: number
+  pitch: number
+  /** True when the texture no longer matches yaw/pitch/size and must re-render. */
+  dirty: boolean
+  /** Internal: an orbit drag that started inside the viewport is in progress. */
+  drag: boolean
+  last_mx: number
+  last_my: number
+}
+
 export interface asset_hub_drive_state {
   provider: cloud_storage_provider | null
   root_folder_name: string
@@ -74,6 +96,7 @@ export interface asset_hub_drive_state {
   task_queue: ui_task_queue_state
   _thumbnails: Map<string, hub_thumbnail>
   _text_previews: Map<string, hub_text_preview>
+  _glb_previews: Map<string, hub_glb_preview>
   /** Internal: texture ids queued for destruction on the next frame. */
   _dispose_textures: number[]
   _press_consumed: boolean
@@ -106,6 +129,9 @@ const THUMBNAIL_MAX_DIM = 256
 const TEXT_PREVIEW_MAX_BYTES = 512 * 1024
 const TEXT_PREVIEW_MAX_LINES = 500
 const TEXT_PREVIEW_MAX_COLS = 400
+const GLB_PREVIEW_MAX_BYTES = 48 * 1024 * 1024
+/** Cap the CPU-rasterized viewport so orbit re-renders stay interactive. */
+const GLB_PREVIEW_MAX_TEX_DIM = 640
 
 export function create_asset_hub_drive_state(
   provider: cloud_storage_provider | null,
@@ -127,6 +153,7 @@ export function create_asset_hub_drive_state(
     task_queue: options?.task_queue ?? create_ui_task_queue_state(options?.on_change),
     _thumbnails: new Map(),
     _text_previews: new Map(),
+    _glb_previews: new Map(),
     _dispose_textures: [],
     _press_consumed: false,
     open_upload_picker: null,
@@ -418,6 +445,67 @@ function request_text_preview(state: asset_hub_drive_state, file: cloud_file): v
     .finally(() => notify(state))
 }
 
+/** True for a file the panel can decode into a 3D orbit preview. */
+function is_glb_file(file: cloud_file): boolean {
+  return !file.is_folder && file.name.toLowerCase().endsWith('.glb')
+}
+
+function request_glb_preview(state: asset_hub_drive_state, file: cloud_file): void {
+  const provider = state.provider
+  if (!provider || state._glb_previews.has(file.id)) return
+  const entry: hub_glb_preview = {
+    status: 'loading',
+    mesh: null,
+    texture_id: -1,
+    tex_w: 0,
+    tex_h: 0,
+    yaw: 0.6,
+    pitch: 0.42,
+    dirty: false,
+    drag: false,
+    last_mx: 0,
+    last_my: 0,
+  }
+  state._glb_previews.set(file.id, entry)
+  if ((file.size_bytes ?? 0) > GLB_PREVIEW_MAX_BYTES) {
+    entry.status = 'failed'
+    entry.error = `Too large for inline preview (${format_bytes(file.size_bytes ?? 0)}) — download instead.`
+    return
+  }
+  void provider
+    .get_file_content(file)
+    .then((blob) => blob.arrayBuffer())
+    .then((data) => decode_glb_preview_mesh(data))
+    .then((mesh) => {
+      entry.mesh = mesh
+      entry.status = 'ready'
+      entry.dirty = true
+    })
+    .catch((err) => {
+      entry.status = 'failed'
+      const e = as_cloud_error(err)
+      entry.error = e?.message ?? (err instanceof Error ? err.message : 'Failed to decode the GLB scene.')
+      if (e?.kind === 'auth_expired') set_status(state, 'auth_expired', e.message)
+    })
+    .finally(() => notify(state))
+}
+
+/** Re-rasterize the orbit view into the entry's texture when it is stale. */
+function ensure_glb_texture(ui: ui_renderer, entry: hub_glb_preview, view_w: number, view_h: number): number {
+  if (entry.status !== 'ready' || !entry.mesh || view_w < 2 || view_h < 2) return -1
+  const fit = Math.min(1, GLB_PREVIEW_MAX_TEX_DIM / Math.max(view_w, view_h))
+  const tex_w = Math.max(2, Math.round(view_w * fit))
+  const tex_h = Math.max(2, Math.round(view_h * fit))
+  if (!entry.dirty && entry.texture_id >= 0 && tex_w === entry.tex_w && tex_h === entry.tex_h) return entry.texture_id
+  const pixels = render_glb_preview(entry.mesh, tex_w, tex_h, entry.yaw, entry.pitch)
+  if (entry.texture_id < 0) entry.texture_id = ui.create_texture(tex_w, tex_h)
+  ui.update_texture(entry.texture_id, pixels, { width: tex_w, height: tex_h })
+  entry.tex_w = tex_w
+  entry.tex_h = tex_h
+  entry.dirty = false
+  return entry.texture_id
+}
+
 async function decode_image_blob(blob: Blob, max_dim: number): Promise<ImageData> {
   const bitmap = await createImageBitmap(blob)
   const fit = Math.min(1, max_dim / Math.max(bitmap.width, bitmap.height, 1))
@@ -445,14 +533,23 @@ function prune_caches(state: asset_hub_drive_state): void {
   for (const id of state._text_previews.keys()) {
     if (!keep.has(id)) state._text_previews.delete(id)
   }
+  for (const [id, glb] of state._glb_previews) {
+    if (keep.has(id)) continue
+    if (glb.texture_id >= 0) state._dispose_textures.push(glb.texture_id)
+    state._glb_previews.delete(id)
+  }
 }
 
 function clear_caches(state: asset_hub_drive_state): void {
   for (const thumb of state._thumbnails.values()) {
     if (thumb.texture_id >= 0) state._dispose_textures.push(thumb.texture_id)
   }
+  for (const glb of state._glb_previews.values()) {
+    if (glb.texture_id >= 0) state._dispose_textures.push(glb.texture_id)
+  }
   state._thumbnails.clear()
   state._text_previews.clear()
+  state._glb_previews.clear()
 }
 
 /** Upload a decoded thumbnail to the GPU on first use, then drop the RGBA copy. */
@@ -1047,8 +1144,10 @@ function draw_details(
   }
 
   // Kick preview loads for the selected file before measuring content.
+  const glb_capable = file !== null && is_glb_file(file)
   if (file && kind === 'text') request_text_preview(state, file)
   if (file && kind === 'image') request_thumbnail(state, file)
+  if (file && glb_capable) request_glb_preview(state, file)
 
   const px = rect.x + pad
   const pw = rect.w - pad * 2
@@ -1057,6 +1156,7 @@ function draw_details(
   let preview_h = 90 * scale
   const thumb = file ? state._thumbnails.get(file.id) : undefined
   const text = file ? state._text_previews.get(file.id) : undefined
+  const glb = file && glb_capable ? state._glb_previews.get(file.id) : undefined
   if (file && kind === 'image') {
     preview_h = thumb && thumb.status === 'ready' && thumb.width > 0
       ? Math.min(170 * scale, (pw * thumb.height) / thumb.width)
@@ -1065,6 +1165,15 @@ function draw_details(
     preview_h = text && text.status === 'ready'
       ? Math.min(4000 * scale, (text.lines.length + (text.truncated ? 1 : 0)) * mono_line_h + 12 * scale)
       : 40 * scale
+  } else if (file && glb_capable) {
+    preview_h = Math.min(240 * scale, Math.max(150 * scale, pw * 0.68))
+  }
+  if (glb?.status === 'ready' && glb.mesh) {
+    rows.push(
+      { label: 'TRIS', value: format_count(glb.mesh.triangle_count) },
+      { label: 'VERTS', value: format_count(glb.mesh.vertex_count) },
+    )
+    if (glb.mesh.draco_used) rows.push({ label: 'CODEC', value: 'Draco compressed' })
   }
   const content_h = file ? preview_h + 36 * scale + rows.length * 21 * scale + pad * 2 : 40 * scale
   const max_off = Math.max(0, content_h - list_h)
@@ -1103,6 +1212,8 @@ function draw_details(
         if (text.truncated) ui.draw_text(px + 6 * scale, ly, `… truncated at ${TEXT_PREVIEW_MAX_LINES} lines`, 10.5 * scale, col('text_dim'), FONT_MONO)
         ui.pop_clip()
       }
+    } else if (glb_capable) {
+      draw_glb_viewport(ui, input, file, state, px, cy, pw, preview_h, scale, col)
     } else {
       draw_preview_block(ui, file, kind, state, px, cy, pw, preview_h, scale, col)
       if (kind !== 'image') {
@@ -1143,6 +1254,77 @@ function draw_details(
     event.open_requested = file
     window.open(file.web_view_url, '_blank', 'noopener')
   }
+}
+
+/**
+ * Interactive 3D viewport for a decoded `.glb`: the scene is CPU-rasterized
+ * into a texture and re-rendered only when the orbit camera moves (drag) or
+ * the viewport resizes, so idle frames just redraw the cached texture.
+ */
+function draw_glb_viewport(
+  ui: ui_renderer,
+  input: ui_input_snapshot,
+  file: cloud_file,
+  state: asset_hub_drive_state,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  scale: number,
+  col: (slot: theme_slot) => number,
+): void {
+  const entry = state._glb_previews.get(file.id)
+  ui.fill_round_rect(x, y, w, h, 4 * scale, col('track'))
+
+  if (!entry || entry.status === 'loading') {
+    const hint = 'Loading 3D preview…'
+    const hint_w = ui.text_width(hint, 10.5 * scale, FONT_MONO)
+    ui.draw_text(x + (w - hint_w) * 0.5, y + h * 0.5 - 5 * scale, hint, 10.5 * scale, col('text_dim'), FONT_MONO)
+    return
+  }
+  if (entry.status === 'failed' || !entry.mesh) {
+    const message = entry.error ?? '3D preview failed.'
+    const message_w = ui.text_width(message, 10 * scale, FONT_MONO)
+    ui.push_clip(x + 6 * scale, y, Math.max(0, w - 12 * scale), h)
+    ui.draw_text(x + Math.max(6 * scale, (w - message_w) * 0.5), y + h * 0.5 - 5 * scale, message, 10 * scale, pack('#d9534f'), FONT_MONO)
+    ui.pop_clip()
+    return
+  }
+
+  // Orbit drag: a press inside the viewport grabs the camera until release.
+  if (point_in(input, x, y, w, h) && input.mouse_pressed && !state._press_consumed) {
+    state._press_consumed = true
+    entry.drag = true
+    entry.last_mx = input.mouse_x
+    entry.last_my = input.mouse_y
+  }
+  if (!input.mouse_down) entry.drag = false
+  if (entry.drag) {
+    const dx = input.mouse_x - entry.last_mx
+    const dy = input.mouse_y - entry.last_my
+    if (dx !== 0 || dy !== 0) {
+      entry.yaw += (dx / scale) * 0.01
+      entry.pitch = clamp(entry.pitch - (dy / scale) * 0.01, -1.45, 1.45)
+      entry.last_mx = input.mouse_x
+      entry.last_my = input.mouse_y
+      entry.dirty = true
+    }
+  }
+
+  const texture_id = ensure_glb_texture(ui, entry, w, h)
+  if (texture_id >= 0) {
+    ui.draw_texture_round_rect(texture_id, x, y, w, h, 4 * scale)
+  }
+  ui.stroke_round_rect(x, y, w, h, 4 * scale, 1, with_alpha(col('border_strong'), 0.72))
+
+  const hint = 'drag to orbit'
+  ui.draw_text(x + 8 * scale, y + h - 16 * scale, hint, 9.5 * scale, with_alpha(col('text_dim'), 0.85), FONT_MONO)
+}
+
+function format_count(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1)}M`
+  if (value >= 10_000) return `${(value / 1000).toFixed(value >= 100_000 ? 0 : 1)}K`
+  return `${value}`
 }
 
 function detail_rows(file: cloud_file, kind: cloud_file_kind): { label: string; value: string }[] {
