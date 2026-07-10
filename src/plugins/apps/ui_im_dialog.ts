@@ -60,6 +60,10 @@ export interface im_dialog_options {
   placeholder?: string
   /** Optional header title bar. */
   title?: string
+  /** Optional action button rendered at the top-right of the header. */
+  header_action_label?: string
+  /** Disable the optional header action button. */
+  header_action_disabled?: boolean
   /** Shows a header typing status and a temporary incoming typing bubble. */
   is_typing?: boolean
   /** Display name / avatar seed for the temporary typing bubble. */
@@ -75,6 +79,8 @@ export interface im_dialog_options {
 export interface im_dialog_event {
   /** Non-empty text submitted via Enter or the Send button this frame. */
   sent?: string
+  /** True when the optional header action button was pressed. */
+  header_action?: boolean
 }
 
 export function create_im_dialog_state(): im_dialog_state {
@@ -153,6 +159,7 @@ export function im_dialog(
   const font_px = (options?.font_px ?? 13.5) * scale
   const show_input = options?.show_input ?? true
   const title = options?.title
+  const header_action_label = options?.header_action_label
   const is_typing = options?.is_typing ?? false
   const bubble_max_frac = options?.bubble_max_frac ?? 0.72
   const col = (slot: Parameters<typeof theme_color>[1]) => pack(theme_color(theme, slot))
@@ -167,16 +174,35 @@ export function im_dialog(
 
   // --- Regions -----------------------------------------------------------
   let cy = y
-  if (title || is_typing) {
+  if (title || is_typing || header_action_label) {
     const title_h = 30 * scale
     ui.fill_rect(x, y, w, title_h, col('panel_alt'))
     ui.fill_rect(x, y + title_h - 1 * scale, w, 1 * scale, col('border'))
-    if (title) ui.draw_text(x + pad, ui.text_v_center_y(y, title_h, 13 * scale), title, 13 * scale, col('text'))
+    let right_edge = x + w - pad
+    if (header_action_label) {
+      const disabled = options?.header_action_disabled === true
+      const btn_font = 10.5 * scale
+      const btn_w = Math.max(48 * scale, ui.text_width(header_action_label, btn_font, FONT_MAIN) + 18 * scale)
+      const btn_h = 22 * scale
+      const btn_x = right_edge - btn_w
+      const btn_y = y + (title_h - btn_h) * 0.5
+      if (widgets.button('im_dialog_header_action', btn_x, btn_y, btn_w, btn_h, header_action_label, { active: !disabled }) && !disabled) {
+        event.header_action = true
+      }
+      right_edge = btn_x - 8 * scale
+    }
     if (is_typing) {
       const label = 'typing…'
       const label_font = 11.5 * scale
       const label_w = ui.text_width(label, label_font, FONT_MAIN)
-      ui.draw_text(x + w - pad - label_w, ui.text_v_center_y(y, title_h, label_font), label, label_font, col('text_dim'))
+      ui.draw_text(right_edge - label_w, ui.text_v_center_y(y, title_h, label_font), label, label_font, col('text_dim'))
+      right_edge -= label_w + 8 * scale
+    }
+    if (title) {
+      const title_x = x + pad
+      ui.push_clip(title_x, y, Math.max(0, right_edge - title_x), title_h)
+      ui.draw_text(title_x, ui.text_v_center_y(y, title_h, 13 * scale), title, 13 * scale, col('text'))
+      ui.pop_clip()
     }
     cy += title_h
   }

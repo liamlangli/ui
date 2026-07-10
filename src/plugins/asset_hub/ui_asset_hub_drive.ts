@@ -2,8 +2,8 @@
 // drive, rendered entirely with the immediate-mode GPU toolkit.
 //
 // The panel shows the contents of the user's `asset_hub/` folder (Google
-// Drive first; granted through the provider's folder picker under the
-// non-sensitive drive.file scope, so the app can only ever see that folder).
+// Drive first; the folder is chosen through the provider's picker, with
+// read-only Drive access plus per-file write access for uploads).
 // It only talks to the `cloud_storage_provider` abstraction — no provider API
 // call lives in this file — so Dropbox / iCloud / local-folder backends slot
 // in without touching the UI. All work (OAuth, listing, previews) happens in
@@ -18,6 +18,7 @@ import { theme_color } from '../../core/ui_theme'
 import type { theme_definition, theme_slot } from '../../core/ui_types'
 import { FONT_MONO, ui_renderer } from '../../core/ui_renderer'
 import type { ui_input_snapshot, ui_scroll_state } from '../../core/ui_widgets'
+import { create_ui_task_queue_state, ui_task_queue_send, type ui_task_queue_state } from '../../core/ui_task_queue'
 import { as_cloud_error, cloud_file_kind_of, type cloud_file, type cloud_file_kind } from '../../storage/ui_cloud_types'
 import type { cloud_storage_provider } from '../../storage/ui_cloud_storage_provider'
 import { is_uploadable_asset_name, upload_local_files } from './ui_asset_hub_upload'
@@ -57,8 +58,6 @@ export interface asset_hub_drive_state {
   status: asset_hub_drive_status
   /** Human-readable detail for error statuses (drawn under the status title). */
   status_detail: string
-  /** Transient non-fatal note (e.g. a failed download), drawn in the header. */
-  notice: string
   /** Folder trail from the asset hub root down to the open folder. */
   breadcrumb: cloud_file[]
   files: cloud_file[]
@@ -71,8 +70,8 @@ export interface asset_hub_drive_state {
   _seq: number
   /** Internal: true while the provider's folder picker dialog is open. */
   _picking: boolean
-  /** True while local files picked/dropped for upload are being sent to the provider. */
-  uploading: boolean
+  /** Global, host-rendered upload/download queue. */
+  task_queue: ui_task_queue_state
   _thumbnails: Map<string, hub_thumbnail>
   _text_previews: Map<string, hub_text_preview>
   /** Internal: texture ids queued for destruction on the next frame. */
@@ -110,14 +109,13 @@ const TEXT_PREVIEW_MAX_COLS = 400
 
 export function create_asset_hub_drive_state(
   provider: cloud_storage_provider | null,
-  options?: { root_folder_name?: string; on_change?: () => void },
+  options?: { root_folder_name?: string; on_change?: () => void; task_queue?: ui_task_queue_state },
 ): asset_hub_drive_state {
   return {
     provider,
     root_folder_name: options?.root_folder_name ?? 'asset_hub',
     status: provider ? 'disconnected' : 'config_error',
     status_detail: '',
-    notice: '',
     breadcrumb: [],
     files: [],
     selected_id: null,
@@ -126,7 +124,7 @@ export function create_asset_hub_drive_state(
     on_change: options?.on_change ?? null,
     _seq: 0,
     _picking: false,
-    uploading: false,
+    task_queue: options?.task_queue ?? create_ui_task_queue_state(options?.on_change),
     _thumbnails: new Map(),
     _text_previews: new Map(),
     _dispose_textures: [],
@@ -149,7 +147,8 @@ function set_status(state: asset_hub_drive_state, status: asset_hub_drive_status
   state.status_detail = detail
 }
 
-function fail_action(state: asset_hub_drive_state, err: unknown): void {
+function fail_action(state: asset_hub_drive_state, operation: string, err: unknown): void {
+  console.error(`[Asset Hub] ${operation} failed`, err)
   const e = as_cloud_error(err)
   if (e?.kind === 'auth_expired') set_status(state, 'auth_expired', e.message)
   else if (e?.kind === 'auth') set_status(state, 'auth_error', e.message)
@@ -160,13 +159,12 @@ function fail_action(state: asset_hub_drive_state, err: unknown): void {
 async function action_connect(state: asset_hub_drive_state): Promise<void> {
   const provider = state.provider
   if (!provider || state.status === 'authorizing') return
-  state.notice = ''
   const seq = ++state._seq
   set_status(state, 'authorizing')
   try {
     await provider.sign_in()
   } catch (err) {
-    if (seq === state._seq) fail_action(state, err)
+    if (seq === state._seq) fail_action(state, 'Connect', err)
     notify(state)
     return
   }
@@ -185,15 +183,15 @@ async function action_locate_root(state: asset_hub_drive_state): Promise<void> {
     root = await provider.find_asset_hub_root()
   } catch (err) {
     if (seq === state._seq) {
-      fail_action(state, err)
+      fail_action(state, 'Locate root folder', err)
       notify(state)
     }
     return
   }
   if (seq !== state._seq) return
   if (!root) {
-    // Under a picker-based grant (drive.file) the user selects the folder;
-    // pickerless providers can only report that the folder doesn't exist.
+    // With a picker-based provider the user selects the folder; pickerless
+    // providers can only report that the folder doesn't exist.
     set_status(state, provider.pick_asset_hub_root ? 'root_needed' : 'root_missing')
     notify(state)
     return
@@ -207,13 +205,12 @@ async function action_pick_root(state: asset_hub_drive_state): Promise<void> {
   const provider = state.provider
   if (!provider?.pick_asset_hub_root || state._picking) return
   state._picking = true
-  state.notice = ''
   let root: cloud_file | null = null
   try {
     root = await provider.pick_asset_hub_root()
   } catch (err) {
     state._picking = false
-    fail_action(state, err)
+    fail_action(state, 'Pick root folder', err)
     notify(state)
     return
   }
@@ -239,7 +236,7 @@ async function action_load_folder(state: asset_hub_drive_state): Promise<void> {
     files = await provider.list_folder(folder.id)
   } catch (err) {
     if (seq === state._seq) {
-      fail_action(state, err)
+      fail_action(state, `Load folder "${folder.name}"`, err)
       notify(state)
     }
     return
@@ -267,7 +264,6 @@ function action_breadcrumb_to(state: asset_hub_drive_state, index: number): void
 
 /** Re-pull the current directory, dropping every cached preview for it. */
 function action_refresh(state: asset_hub_drive_state): void {
-  state.notice = ''
   clear_caches(state)
   if (state.breadcrumb.length > 0) void action_load_folder(state)
   else void action_locate_root(state)
@@ -277,11 +273,11 @@ async function action_sign_out(state: asset_hub_drive_state): Promise<void> {
   const provider = state.provider
   if (!provider) return
   state._seq += 1 // cancel anything in flight
+  ui_task_queue_send(state.task_queue, { type: 'clear', source: 'asset_hub' })
   clear_caches(state)
   state.breadcrumb = []
   state.files = []
   state.selected_id = null
-  state.notice = ''
   set_status(state, 'disconnected')
   notify(state)
   await provider.sign_out()
@@ -294,42 +290,72 @@ function trigger_upload_picker(state: asset_hub_drive_state): void {
 }
 
 /** Upload local files into the currently open folder, then refresh the listing. */
-async function action_upload_files(state: asset_hub_drive_state, files: File[]): Promise<void> {
+function action_upload_files(state: asset_hub_drive_state, files: File[]): void {
   const provider = state.provider
   const folder = state.breadcrumb[state.breadcrumb.length - 1]
-  if (!provider?.upload_file || !folder || state.uploading || files.length === 0) return
-  state.uploading = true
-  state.notice = ''
-  notify(state)
-  const { uploaded, errors } = await upload_local_files(provider, folder.id, files, (label) => {
-    state.notice = label
-    notify(state)
-  })
-  state.uploading = false
-  state.notice = errors.length > 0 ? errors.join(' ') : uploaded.length > 0 ? `Uploaded ${uploaded.length} file${uploaded.length === 1 ? '' : 's'}.` : ''
-  if (uploaded.length > 0) await action_load_folder(state)
-  else notify(state)
+  if (!provider?.upload_file || !folder || files.length === 0) return
+  for (const file of files) {
+    ui_task_queue_send(state.task_queue, {
+      type: 'enqueue',
+      source: 'asset_hub',
+      title: `UPLOAD · ${file.name}`,
+      detail: 'Waiting to upload',
+      running_detail: 'Uploading…',
+      accent: '#5fb878',
+      run: async (signal, update) => {
+        try {
+          const { uploaded, errors } = await upload_local_files(provider, folder.id, [file], update, signal)
+          if (errors.length > 0) throw new Error(errors.join(' '))
+          if (uploaded.length > 0) await action_load_folder(state)
+        } catch (err) {
+          reflect_transfer_error(state, err)
+          throw err
+        }
+      },
+    })
+  }
 }
 
 function trigger_download(state: asset_hub_drive_state, file: cloud_file): void {
   const provider = state.provider
   if (!provider) return
-  void provider
-    .get_file_download_url(file)
-    .then((url) => {
-      const anchor = document.createElement('a')
-      anchor.href = url
-      anchor.download = file.name
-      anchor.click()
-      // Give the browser time to pick up the blob, then release the object URL.
-      window.setTimeout(() => URL.revokeObjectURL(url), 30_000)
-    })
-    .catch((err) => {
-      const e = as_cloud_error(err)
-      if (e?.kind === 'auth_expired') set_status(state, 'auth_expired', e.message)
-      else state.notice = `Download failed: ${e?.message ?? 'unexpected error'}`
-      notify(state)
-    })
+  ui_task_queue_send(state.task_queue, {
+    type: 'enqueue',
+    source: 'asset_hub',
+    title: `DOWNLOAD · ${file.name}`,
+    detail: 'Waiting to download',
+    running_detail: 'Downloading…',
+    run: async (signal) => {
+      try {
+        const url = await provider.get_file_download_url(file, signal)
+        if (signal.aborted) {
+          URL.revokeObjectURL(url)
+          throw new DOMException('Transfer cancelled.', 'AbortError')
+        }
+        const anchor = document.createElement('a')
+        anchor.href = url
+        anchor.download = file.name
+        anchor.click()
+        // Give the browser time to pick up the blob, then release the object URL.
+        window.setTimeout(() => URL.revokeObjectURL(url), 30_000)
+      } catch (err) {
+        if (is_abort_error(err)) throw err
+        console.error(`[Asset Hub] Download "${file.name}" failed`, err)
+        reflect_transfer_error(state, err)
+        throw err
+      }
+    },
+  })
+}
+
+function reflect_transfer_error(state: asset_hub_drive_state, err: unknown): void {
+  const e = as_cloud_error(err)
+  if (e?.kind === 'auth_expired') set_status(state, 'auth_expired', e.message)
+  notify(state)
+}
+
+function is_abort_error(err: unknown): boolean {
+  return err instanceof Error && err.name === 'AbortError'
 }
 
 // --- preview caches -------------------------------------------------------------
@@ -349,6 +375,7 @@ function request_thumbnail(state: asset_hub_drive_state, file: cloud_file): void
       entry.status = 'ready'
     })
     .catch((err) => {
+      console.error(`[Asset Hub] Thumbnail "${file.name}" failed`, err)
       entry.status = 'failed'
       const e = as_cloud_error(err)
       if (e?.kind === 'auth_expired') set_status(state, 'auth_expired', e.message)
@@ -382,6 +409,7 @@ function request_text_preview(state: asset_hub_drive_state, file: cloud_file): v
       entry.status = 'ready'
     })
     .catch((err) => {
+      console.error(`[Asset Hub] Text preview "${file.name}" failed`, err)
       entry.status = 'failed'
       const e = as_cloud_error(err)
       entry.error = e?.message ?? 'Failed to load file content.'
@@ -634,9 +662,9 @@ function draw_header(
       action_refresh(state)
     }
     if (provider?.upload_file && state.breadcrumb.length > 0) {
-      const label = state.uploading ? 'Uploading…' : 'Upload'
+      const label = 'Upload'
       const upload = place(label)
-      if (button(ui, input, upload.bx, button_y, upload.bw, button_h, label, false, font_px, scale, col, state.uploading) && !state._press_consumed) {
+      if (button(ui, input, upload.bx, button_y, upload.bw, button_h, label, false, font_px, scale, col) && !state._press_consumed) {
         state._press_consumed = true
         event.upload_requested = true
         trigger_upload_picker(state)
@@ -660,13 +688,6 @@ function draw_header(
     }
   }
 
-  if (state.notice) {
-    const notice_w = ui.text_width(state.notice, 10.5 * scale, FONT_MONO)
-    const notice_x = Math.max(x + title_w + 90 * scale, right - notice_w)
-    ui.push_clip(x + title_w + 90 * scale, y, Math.max(0, right - x - title_w - 90 * scale), h)
-    ui.draw_text(notice_x, ui.text_v_center_y(y, h, 10.5 * scale), state.notice, 10.5 * scale, pack('#d9534f'), FONT_MONO)
-    ui.pop_clip()
-  }
 }
 
 function draw_breadcrumb(

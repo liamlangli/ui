@@ -57,6 +57,10 @@ import {
   create_gamepad_cursor_state,
   ui_has_metal_gpu_capture_bridge,
   ui_queue_metal_frame_capture,
+  ui_task_queue_bounds,
+  ui_task_queue_blocks_point,
+  ui_task_queue_render,
+  create_ui_task_queue_state,
 } from '../src/core'
 // Plugin types only — `import type` is erased at build time, so this does not
 // pull the plugin modules into the startup chunk.
@@ -74,7 +78,6 @@ import type {
   node_graph_node,
   node_graph_connection,
   node_graph_template,
-  terrain_graph,
 } from '../src/plugins'
 import theme_url from './theme.json?url'
 
@@ -156,9 +159,6 @@ const about_lines: ui_text_view_line[] = [
   { text: '  • asset_audit   — View ▸ Apps ▸ Asset Audit: drop a .glb/.gltf/.fbx', color: '#9aa3b0' },
   { text: '                    (or a folder) to preview it in a WebGPU viewport,', color: '#9aa3b0' },
   { text: '                    audit its stats, optimize and download a fixed GLB.', color: '#9aa3b0' },
-  { text: '  • avatar        — View ▸ Apps ▸ Avatar Generator: a procedural human', color: '#9aa3b0' },
-  { text: '                    mesh built from a parametric skeleton (SDF volumes →', color: '#9aa3b0' },
-  { text: '                    surface nets), tuned live and exportable as GLB.', color: '#9aa3b0' },
   { text: '  • material_audit — View ▸ Apps ▸ Material Audit: drop base color /', color: '#9aa3b0' },
   { text: '                    normal maps and validate them on a repeat grid, a UV', color: '#9aa3b0' },
   { text: '                    sphere or a rounded cube — auto mipmaps, pan & pinch.', color: '#9aa3b0' },
@@ -183,22 +183,23 @@ const console_lines: ui_text_view_line[] = [
   { text: 'This console is a GPU text_view — select & copy works.', color: '#4c8bf5' },
 ]
 
-const chat_messages: im_message[] = [
-  { author: 'Ada', side: 'left', text: 'Hey! Did the WebGPU renderer land?', timestamp: Date.now() - 1000 * 60 * 8 },
-  { author: 'Me', side: 'right', text: 'Yep — batched rects, SDF text and images all in one pass.', timestamp: Date.now() - 1000 * 60 * 7 },
-  { author: 'Ada', side: 'left', text: 'And the docking system?', timestamp: Date.now() - 1000 * 60 * 6 },
-  { author: 'Me', side: 'right', text: 'Packaged as a plugin now. Drag a tab to split panels 👌', timestamp: Date.now() - 1000 * 60 * 5 },
-  { author: 'Ada', side: 'left', text: '太棒了！中文也能渲染吗？', timestamp: Date.now() - 1000 * 60 * 4 },
-  { author: 'Me', side: 'right', text: '当然，PingFang SC 图集异步加载即可。', timestamp: Date.now() - 1000 * 60 * 3 },
-]
+const CHAT_AGENT_NAME = 'Adam'
+const CHAT_MODEL = 'qwen2.5:7b-instruct'
+const CHAT_COMPLETIONS_URL = 'http://localhost:11434/v1/chat/completions'
+const CHAT_CONTEXT_TOKEN_BUDGET = 7000
+const CHAT_COMPRESSION_CHUNK_TOKEN_BUDGET = 5200
+const CHAT_SUMMARY_TARGET_TOKENS = 900
 
-const auto_replies = [
-  'Nice one 👍',
-  'Got it, thanks!',
-  '收到～',
-  'That makes sense.',
-  'Let me try that.',
-]
+function create_chat_greeting(): im_message {
+  return {
+    author: CHAT_AGENT_NAME,
+    side: 'left',
+    text: 'Hi, I am Adam. Ask me about this WebGPU UI repo, the preview, or any installed plugin.',
+    timestamp: Date.now() - 1000 * 60,
+  }
+}
+
+const chat_messages: im_message[] = [create_chat_greeting()]
 
 // --- graph plugin demo ------------------------------------------------------
 interface demo_graph_node extends graph_node_base {
@@ -294,6 +295,9 @@ let icon_set: ui_icons | null = null
 // Set once the renderer is live (see main()); lets async helpers (console
 // appends, deferred compiles) wake the adaptive renderer outside a frame.
 let active_renderer: ui_renderer | null = null
+// One application-level queue shared by every producer. Any subsystem can
+// call ui_task_queue_send(desktop_task_queue, message) to surface work here.
+const desktop_task_queue = create_ui_task_queue_state(() => active_renderer?.request_render())
 
 // --- Installed apps + Dashboard ---------------------------------------------
 // Every desktop app is an entry in the core `app_registry`. The built-in views
@@ -321,13 +325,11 @@ const BUILTIN_APPS: { id: string; name: string; icon: string; accent?: string; d
   { id: 'icons', name: 'Icons', icon: 'image', description: 'Built-in vector icon atlas.' },
   { id: 'graph', name: 'Graph', icon: 'star', description: 'Generic node-graph canvas.' },
   { id: 'node_graph', name: 'Node Graph', icon: 'dot', description: 'Dotted node editor with typed slots.' },
-  { id: 'terrain_graph', name: 'Terrain Graph', icon: 'circle', accent: '#4f6b3d', description: 'Node-based base terrain generator.' },
   { id: 'chat', name: 'Chat', icon: 'file_text', accent: '#3d6b4f', description: 'IM dialog plugin.' },
   { id: 'profiler', name: 'Profiler', icon: 'search', description: 'Frame profiler and memory registry.' },
   { id: 'gamepad', name: 'Controller Test', icon: 'circle', description: 'Game controller visualiser.' },
   { id: 'asset_audit', name: 'Asset Audit', icon: 'file', accent: '#6b3d5a', description: 'Drop or upload .glb/.fbx assets: 3D preview, stats, optimize, re-export.' },
   { id: 'asset_hub', name: 'Asset Hub', icon: 'image', accent: '#3d5f6b', description: 'Browse the asset_hub folder of your Google Drive — read-only, entirely in the browser.' },
-  { id: 'avatar', name: 'Avatar Generator', icon: 'circle', accent: '#3d5a6b', description: 'Procedural human mesh from a parametric skeleton: SDF volumes → surface nets → GLB.' },
   { id: 'material_audit', name: 'Material Audit', icon: 'image', accent: '#5a6b3d', description: 'Upload base color / normal maps and validate them on a repeat grid, UV sphere or rounded cube.' },
   { id: 'about', name: 'About', icon: 'home', description: 'About this demo.' },
 ]
@@ -362,7 +364,6 @@ interface demo_plugins {
   file_state: ReturnType<plugin_module['create_file_browser_state']>
   audit_state: ReturnType<plugin_module['create_asset_audit_state']>
   asset_hub_drive_state: ReturnType<plugin_module['create_asset_hub_drive_state']>
-  avatar_state: ReturnType<plugin_module['create_avatar_generator_state']>
   material_audit_state: ReturnType<plugin_module['create_material_audit_state']>
   chat_state: ReturnType<plugin_module['create_im_dialog_state']>
   profiler_state: ReturnType<plugin_module['create_profiler_panel_state']>
@@ -372,8 +373,6 @@ interface demo_plugins {
   graph_state: ReturnType<plugin_module['create_graph_state']>
   node_graph_state: ReturnType<plugin_module['create_node_graph_state']>
   node_graph_nodes: node_graph_node[]
-  terrain_graph_state: ReturnType<plugin_module['create_terrain_graph_state']>
-  terrain_graph: terrain_graph
   webtix_state: ReturnType<plugin_module['create_webtix_state']>
 }
 let plugins: demo_plugins | null = null
@@ -529,14 +528,12 @@ const VIEW_TABS: { id: string; title: string; win?: window_new_options }[] = [
   { id: 'icons', title: 'Icons', win: { w: 560, h: 420 } },
   { id: 'graph', title: 'Graph', win: { w: 640, h: 420 } },
   { id: 'node_graph', title: 'Node Graph', win: { w: 640, h: 420 } },
-  { id: 'terrain_graph', title: 'Terrain Graph', win: { w: 920, h: 600 } },
   { id: 'about', title: 'About', win: { w: 540, h: 340 } },
   { id: 'chat', title: 'Chat', win: { w: 300, h: 400 } },
   { id: 'profiler', title: 'Profiler', win: { w: 760, h: 460 } },
   { id: 'gamepad', title: 'Controller Test', win: { w: 620, h: 540 } },
   { id: 'asset_audit', title: 'Asset Audit', win: { w: 900, h: 560 } },
   { id: 'asset_hub', title: 'Asset Hub', win: { w: 920, h: 560 } },
-  { id: 'avatar', title: 'Avatar Generator', win: { w: 920, h: 600 } },
   { id: 'material_audit', title: 'Material Audit', win: { w: 760, h: 560 } },
   { id: 'webtix', title: 'Path Tracer', win: { w: 900, h: 600 } },
 ]
@@ -679,7 +676,6 @@ function build_main_menu(mod: plugin_module): ui_main_menu {
           { id: 'dashboard', label: 'Dashboard' },
           { id: 'graph', label: 'Graph' },
           { id: 'node_graph', label: 'Node Graph' },
-          { id: 'terrain_graph', label: 'Terrain Graph' },
           { id: 'gallery', label: 'Widgets' },
           { id: 'icons', label: 'Icons' },
           { id: 'chat', label: 'Chat' },
@@ -687,7 +683,6 @@ function build_main_menu(mod: plugin_module): ui_main_menu {
           { id: 'gamepad', label: 'Controller Test' },
           { id: 'asset_audit', label: 'Asset Audit' },
           { id: 'asset_hub', label: 'Asset Hub' },
-          { id: 'avatar', label: 'Avatar Generator' },
           { id: 'material_audit', label: 'Material Audit' },
           { id: 'webtix', label: 'Path Tracer' },
           { id: 'about', label: 'About' },
@@ -801,8 +796,245 @@ function handle_menu(node: ui_menu_node): void {
 }
 
 let chat_is_typing = false
+let chat_pending_replies = 0
+let chat_history_summary = ''
+let chat_history_summary_through = 0
+let chat_generation = 0
 const console_state = create_text_view_state()
 const about_state = create_text_view_state()
+
+type chat_role = 'system' | 'user' | 'assistant'
+
+interface chat_completion_message {
+  role: chat_role
+  content: string
+}
+
+interface chat_completion_response {
+  choices?: { message?: { content?: string } }[]
+  error?: { message?: string } | string
+}
+
+function estimate_chat_tokens(text: string): number {
+  return Math.ceil(text.length / 4)
+}
+
+const REPOSITORY_CHAT_CONTEXT = [
+  '@liamlangli/ui is a browser-native immediate-mode WebGPU UI toolkit.',
+  'The core package provides the renderer, widgets, theme system, text views, docking layout, floating window system, app registry, input, gamepad cursor, profiler, memory registry, GPU capture helpers, and shared layout/math utilities.',
+  'The preview is a Vite-powered desktop-style playground. It lazy-loads plugins, opens each view in windows, persists the app registry and window layout in localStorage, and demonstrates UI components directly on a WebGPU canvas.',
+  'Plugins are optional reusable UI building blocks exported from @liamlangli/ui/plugins. Current source plugins include apps/dashboard/file browser/chat/main menu, code editor, generic graph, typed node graph, controller test, asset audit, asset hub, material audit, layout split view, profiler/material inspection tools, and the WebTIX path tracer.',
+  'Avatar Generator and Terrain Graph have been removed from this workspace.',
+].join('\n')
+
+function installed_plugin_context(): string {
+  if (registry.apps.length === 0) return 'No preview apps/plugins are currently installed.'
+  return registry.apps.map((app) => {
+    const m = app.manifest
+    const source = app.builtin ? 'builtin' : app.shipping_path ? `installed from ${app.shipping_path}` : 'installed'
+    const update = app.update_available ? `; update available ${app.update_available.version}` : ''
+    const description = m.description ? ` — ${m.description}` : ''
+    return `- ${m.name} (${m.id}) v${m.version}, ${source}${update}${description}`
+  }).join('\n')
+}
+
+function build_adam_system_prompt(): string {
+  return [
+    `You are ${CHAT_AGENT_NAME}, a helpful local assistant embedded in the @liamlangli/ui preview.`,
+    `You are running through Ollama's OpenAI-compatible endpoint with model ${CHAT_MODEL}.`,
+    'Reply in the same language the user used unless they ask otherwise. Be concise, practical, and specific to this repository.',
+    'Use the repository and installed-plugin context below when answering. If the user asks about code details that are not in this context, say what you can infer and suggest where to inspect next instead of inventing facts.',
+    '',
+    'Repository context:',
+    REPOSITORY_CHAT_CONTEXT,
+    '',
+    'Installed preview apps/plugins:',
+    installed_plugin_context(),
+  ].join('\n')
+}
+
+function model_chat_history(history: im_message[]): chat_completion_message[] {
+  const out: chat_completion_message[] = []
+  if (chat_history_summary) {
+    out.push({
+      role: 'system',
+      content: `Compressed earlier chat history:\n${chat_history_summary}`,
+    })
+  }
+  const start = chat_history_summary ? Math.min(chat_history_summary_through, history.length) : 0
+  return out.concat(history
+    .slice(start)
+    .map((msg) => ({
+      role: msg.side === 'right' ? 'user' : 'assistant',
+      content: `${msg.author ?? (msg.side === 'right' ? 'Me' : CHAT_AGENT_NAME)}: ${msg.text}`,
+    })))
+}
+
+function build_adam_messages(history: im_message[]): chat_completion_message[] {
+  return [
+    { role: 'system', content: build_adam_system_prompt() },
+    ...model_chat_history(history),
+  ]
+}
+
+function estimate_messages_tokens(messages: chat_completion_message[]): number {
+  return messages.reduce((sum, msg) => sum + estimate_chat_tokens(msg.role) + estimate_chat_tokens(msg.content) + 4, 0)
+}
+
+function format_chat_transcript(messages: im_message[]): string {
+  return messages.map((msg) => {
+    const author = msg.author ?? (msg.side === 'right' ? 'Me' : CHAT_AGENT_NAME)
+    return `${author}: ${msg.text}`
+  }).join('\n\n')
+}
+
+async function post_chat_completion(messages: chat_completion_message[], temperature = 0.35, max_tokens?: number): Promise<string> {
+  const body: {
+    model: string
+    stream: false
+    temperature: number
+    messages: chat_completion_message[]
+    max_tokens?: number
+  } = {
+    model: CHAT_MODEL,
+    stream: false,
+    temperature,
+    messages,
+  }
+  if (max_tokens) body.max_tokens = max_tokens
+  const res = await fetch(CHAT_COMPLETIONS_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  const data = await res.json().catch(() => ({})) as chat_completion_response
+  if (!res.ok) {
+    const detail = typeof data.error === 'string' ? data.error : data.error?.message
+    throw new Error(detail ? `HTTP ${res.status}: ${detail}` : `HTTP ${res.status}`)
+  }
+  const content = data.choices?.[0]?.message?.content?.trim()
+  if (!content) throw new Error('Ollama returned an empty response')
+  return content
+}
+
+async function compress_history_chunk(existing_summary: string, chunk: im_message[]): Promise<string> {
+  const summary = existing_summary || 'No previous summary.'
+  const transcript = format_chat_transcript(chunk)
+  return post_chat_completion([
+    {
+      role: 'system',
+      content: [
+        `You are ${CHAT_AGENT_NAME}. Compress chat history for future continuation.`,
+        `Target about ${CHAT_SUMMARY_TARGET_TOKENS} tokens or less.`,
+        'Preserve user goals, decisions, constraints, unresolved questions, repo/plugin facts, and any promises made by the assistant.',
+        'Do not answer the user. Return only the compressed history summary.',
+      ].join('\n'),
+    },
+    {
+      role: 'user',
+      content: `Existing compressed summary:\n${summary}\n\nMessages to incorporate:\n${transcript}`,
+    },
+  ], 0.15, CHAT_SUMMARY_TARGET_TOKENS)
+}
+
+async function compress_messages_into_summary(existing_summary: string, messages: im_message[]): Promise<string> {
+  let summary = existing_summary
+  let chunk: im_message[] = []
+  for (const msg of messages) {
+    const candidate = chunk.concat(msg)
+    const estimated = estimate_chat_tokens(summary) + estimate_chat_tokens(format_chat_transcript(candidate))
+    if (chunk.length > 0 && estimated > CHAT_COMPRESSION_CHUNK_TOKEN_BUDGET) {
+      summary = await compress_history_chunk(summary, chunk)
+      chunk = [msg]
+    } else {
+      chunk = candidate
+    }
+  }
+  if (chunk.length > 0) summary = await compress_history_chunk(summary, chunk)
+  return summary
+}
+
+async function prepare_adam_messages(history: im_message[], generation: number): Promise<chat_completion_message[]> {
+  let messages = build_adam_messages(history)
+  if (estimate_messages_tokens(messages) <= CHAT_CONTEXT_TOKEN_BUDGET) return messages
+
+  const latest_index = Math.max(0, history.length - 1)
+  const start = chat_history_summary ? Math.min(chat_history_summary_through, latest_index) : 0
+  const to_compress = history.slice(start, latest_index)
+  if (to_compress.length > 0) {
+    const next_summary = await compress_messages_into_summary(chat_history_summary, to_compress)
+    if (generation !== chat_generation) throw new Error('chat request was superseded')
+    chat_history_summary = next_summary
+    chat_history_summary_through = latest_index
+    append_console(`chat: compressed ${to_compress.length} earlier messages for Adam context`, '#d8a24a')
+  }
+
+  messages = build_adam_messages(history)
+  if (estimate_messages_tokens(messages) > CHAT_CONTEXT_TOKEN_BUDGET) {
+    append_console('chat: Adam context is still large after compression; sending compacted request', '#d8a24a')
+  }
+  return messages
+}
+
+function set_chat_typing(delta: number): void {
+  chat_pending_replies = Math.max(0, chat_pending_replies + delta)
+  chat_is_typing = chat_pending_replies > 0
+  windows.invalidate('chat')
+  active_renderer?.request_render()
+}
+
+function error_message(err: unknown): string {
+  if (err instanceof Error) return err.message
+  return `${err}`
+}
+
+async function fetch_adam_reply(history: im_message[], generation: number): Promise<string> {
+  return post_chat_completion(await prepare_adam_messages(history, generation))
+}
+
+function ask_adam(): void {
+  const generation = chat_generation
+  const history = chat_messages.slice()
+  set_chat_typing(1)
+  void fetch_adam_reply(history, generation)
+    .then((reply) => {
+      if (generation !== chat_generation) return
+      chat_messages.push({ author: CHAT_AGENT_NAME, side: 'left', text: reply, timestamp: Date.now() })
+    })
+    .catch((err) => {
+      if (generation !== chat_generation) return
+      chat_messages.push({
+        author: CHAT_AGENT_NAME,
+        side: 'left',
+        text: `I could not reach local Ollama at ${CHAT_COMPLETIONS_URL} with model ${CHAT_MODEL}.\n\n${error_message(err)}\n\nMake sure Ollama is running and the model is available.`,
+        timestamp: Date.now(),
+      })
+      append_console(`chat: Ollama request failed — ${error_message(err)}`, '#d9534f')
+    })
+    .finally(() => {
+      if (generation === chat_generation) set_chat_typing(-1)
+    })
+}
+
+function clear_chat_history(): void {
+  chat_generation += 1
+  chat_pending_replies = 0
+  chat_is_typing = false
+  chat_history_summary = ''
+  chat_history_summary_through = 0
+  chat_messages.splice(0, chat_messages.length, create_chat_greeting())
+  if (plugins) {
+    plugins.chat_state.scroll.offset_y = 0
+    plugins.chat_state.draft = ''
+    plugins.chat_state.input_state.cursor = 0
+    plugins.chat_state.input_state.sel_anchor = 0
+    plugins.chat_state.input_state.sel_head = 0
+    plugins.chat_state.stick_to_bottom = true
+    plugins.chat_state.last_count = 0
+  }
+  windows.invalidate('chat')
+  active_renderer?.request_render()
+}
 
 // --- game controller demo ---------------------------------------------------
 // Polls connected game controllers every frame. While one is connected a
@@ -848,12 +1080,12 @@ function init_plugins(mod: plugin_module): void {
     audit_state: mod.create_asset_audit_state(),
     asset_hub_drive_state: mod.create_asset_hub_drive_state(drive_provider, {
       root_folder_name: cloud_cfg.default_root_folder_name,
+      task_queue: desktop_task_queue,
       on_change: () => {
         windows.invalidate('asset_hub')
         active_renderer?.request_render()
       },
     }),
-    avatar_state: mod.create_avatar_generator_state(),
     material_audit_state: mod.create_material_audit_state(),
     chat_state: mod.create_im_dialog_state(),
     profiler_state: mod.create_profiler_panel_state(),
@@ -862,8 +1094,6 @@ function init_plugins(mod: plugin_module): void {
     editor_state: mod.create_code_editor_state(),
     graph_state: mod.create_graph_state(),
     node_graph_state: mod.create_node_graph_state(),
-    terrain_graph_state: mod.create_terrain_graph_state(),
-    terrain_graph: mod.create_default_terrain_graph(),
     webtix_state: mod.create_webtix_state(),
     node_graph_nodes: [
       mod.add_node('Input', 20, 40, { id: 'in', outputs: [{ label: 'Position', type: 'vec3' }, { label: 'UV', type: 'vec2' }] }),
@@ -1098,7 +1328,7 @@ async function main(): Promise<void> {
       key_home: false, key_end: false, key_page_up: false, key_page_down: false,
       key_f12: false, key_a: false, key_c: false,
     }
-    const desktop_snapshot = dashboard_open ? blank_input : snapshot
+    const base_desktop_snapshot = dashboard_open ? blank_input : snapshot
     if (snapshot.key_f12) {
       if (ui_queue_metal_frame_capture({ directory: '.', scope: 'frame', label: 'ui.preview.frame' })) {
         append_console('Metal GPU frame capture requested: ./ui-frame-*.gputrace', '#5fb878')
@@ -1116,6 +1346,14 @@ async function main(): Promise<void> {
     const safe = renderer.safe_rect()
     const scale = window.devicePixelRatio || 1
     const m = 8 * scale
+    const transfer_queue_bounds = ui_task_queue_bounds(desktop_task_queue, safe.x, safe.y, safe.w, safe.h, scale)
+    const transfer_queue_blocks_input = ui_task_queue_blocks_point(
+      desktop_task_queue,
+      snapshot.mouse_x,
+      snapshot.mouse_y,
+      transfer_queue_bounds,
+    )
+    const desktop_snapshot = transfer_queue_blocks_input ? blank_input : base_desktop_snapshot
 
     // Poll game controllers and drive the transparent circle cursor. Gamepads
     // never fire DOM events, so keep the adaptive renderer awake (and the
@@ -1234,11 +1472,6 @@ async function main(): Promise<void> {
           }
           break
         }
-        case 'terrain_graph': {
-          const ev = live.mod.terrain_graph_generator(renderer, widgets, theme, snapshot, px, py, pw, ph, live.terrain_graph, live.terrain_graph_state, { scale })
-          if (ev.changed) windows.invalidate('terrain_graph')
-          break
-        }
         case 'chat':
           render_chat(renderer, widgets, theme, snapshot, px, py, pw, ph)
           break
@@ -1261,11 +1494,6 @@ async function main(): Promise<void> {
           if (ev.download_requested) append_console(`asset hub: downloading ${ev.download_requested.name}`, '#5fb878')
           if (ev.open_requested) append_console(`asset hub: opened ${ev.open_requested.name} in Drive`, '#9aa3b0')
           if (Object.keys(ev).length > 0) windows.invalidate('asset_hub')
-          break
-        }
-        case 'avatar': {
-          const ev = live.mod.avatar_generator(renderer, widgets, theme, snapshot, px, py, pw, ph, live.avatar_state, { scale })
-          if (ev.exported_bytes) append_console(`avatar.glb exported (${live.mod.format_asset_bytes(ev.exported_bytes)})`, '#5fb878')
           break
         }
         case 'material_audit': {
@@ -1313,7 +1541,8 @@ async function main(): Promise<void> {
     // registry, drawn above the desktop and the menu bar.
     if (dashboard_open && plugins) {
       profiler.begin('dashboard')
-      const ev = plugins.mod.dashboard(renderer, theme, dashboard_open_at_frame_start ? snapshot : blank_input, safe.x, safe.y, safe.w, safe.h, registry.apps, plugins.dashboard_state, { icons: icon_set ?? undefined })
+      const dashboard_input = transfer_queue_blocks_input ? blank_input : dashboard_open_at_frame_start ? snapshot : blank_input
+      const ev = plugins.mod.dashboard(renderer, theme, dashboard_input, safe.x, safe.y, safe.w, safe.h, registry.apps, plugins.dashboard_state, { icons: icon_set ?? undefined })
       profiler.end()
       if (ev.launched) launch_app(ev.launched)
       if (ev.dismissed) dashboard_open = false
@@ -1328,7 +1557,9 @@ async function main(): Promise<void> {
     }
 
     widgets.end_frame()
-    render_toasts(renderer, theme, safe.x, safe.y, safe.w, safe.h, scale)
+    const transfer_queue_offset = transfer_queue_bounds ? transfer_queue_bounds.h + 8 * scale : 0
+    render_toasts(renderer, theme, safe.x, safe.y, safe.w, safe.h, scale, transfer_queue_offset)
+    ui_task_queue_render(renderer, theme, snapshot, desktop_task_queue, transfer_queue_bounds, scale)
     // Controller cursor rides above every window, menu and popup.
     gamepad_cursor_draw(renderer, theme, gamepad.active, gamepad_cursor)
     profiler.begin('flush')
@@ -1378,6 +1609,7 @@ function render_toasts(
   safe_w: number,
   safe_h: number,
   scale: number,
+  bottom_offset = 0,
 ): void {
   const now = performance.now()
   for (let i = toast_messages.length - 1; i >= 0; i -= 1) {
@@ -1393,7 +1625,7 @@ function render_toasts(
   const title_font = 12 * scale
   const body_font = 10.5 * scale
   const line_w = Math.max(20 * scale, toast_w - pad * 2 - 6 * scale)
-  let y = safe_y + safe_h - 10 * scale
+  let y = safe_y + safe_h - 10 * scale - bottom_offset
 
   for (let i = toast_messages.length - 1; i >= 0; i -= 1) {
     const toast = toast_messages[i]!
@@ -1524,23 +1756,21 @@ function render_chat(
 ): void {
   if (!plugins) return
   const ev = plugins.mod.im_dialog(renderer, widgets, theme, snapshot, x, y, w, h, chat_messages, plugins.chat_state, {
-    title: 'Ada · online',
-    placeholder: 'Message Ada…',
+    title: `${CHAT_AGENT_NAME} · ${CHAT_MODEL}`,
+    header_action_label: 'Clear',
+    placeholder: `Message ${CHAT_AGENT_NAME}…`,
     is_typing: chat_is_typing,
-    typing_author: 'Ada',
+    typing_author: CHAT_AGENT_NAME,
   })
+  if (ev.header_action) {
+    clear_chat_history()
+    return
+  }
   if (ev.sent) {
     chat_messages.push({ author: 'Me', side: 'right', text: ev.sent, timestamp: Date.now() })
-    chat_is_typing = true
     windows.invalidate('chat') // refresh the Chat window even if it's inactive
     renderer.request_render()
-    const reply = auto_replies[Math.floor(Math.random() * auto_replies.length)]
-    window.setTimeout(() => {
-      chat_is_typing = false
-      chat_messages.push({ author: 'Ada', side: 'left', text: reply, timestamp: Date.now() })
-      windows.invalidate('chat')
-      renderer.request_render()
-    }, 600 + Math.random() * 700)
+    ask_adam()
   }
 }
 

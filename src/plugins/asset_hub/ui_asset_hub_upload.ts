@@ -41,44 +41,61 @@ export async function upload_local_files(
   parent_id: string,
   files: File[],
   on_progress?: (label: string) => void,
+  signal?: AbortSignal,
 ): Promise<upload_outcome> {
   const uploaded: cloud_file[] = []
   const errors: string[] = []
   if (!provider.upload_file) {
     return { uploaded, errors: [`${provider.label} doesn't support uploading files.`] }
   }
-  const upload_file = provider.upload_file
+  // Provider methods may use instance state (Google Drive calls
+  // `this.api_json`). Preserve the receiver when reusing the method below.
+  const upload_file = provider.upload_file.bind(provider)
 
   for (const file of files) {
+    throw_if_aborted(signal)
     const ext = extension_of(file.name)
     try {
       if (ext === 'glb') {
         on_progress?.(`Uploading ${file.name}…`)
-        uploaded.push(await upload_file(parent_id, file.name, file, GLB_MIME))
+        uploaded.push(await upload_file(parent_id, file.name, file, GLB_MIME, signal))
       } else if (ext === 'zip') {
         on_progress?.(`Unpacking ${file.name}…`)
         const plan = await plan_zip_upload(file)
+        throw_if_aborted(signal)
         let target_id = parent_id
         if (plan.length > 1) {
           if (!provider.create_folder) {
             throw new Error(`${provider.label} can't create the folder this scene needs — zip a self-contained .glb instead.`)
           }
-          const folder = await provider.create_folder(parent_id, file.name.replace(/\.zip$/i, ''))
+          const folder = await provider.create_folder(parent_id, file.name.replace(/\.zip$/i, ''), signal)
           target_id = folder.id
         }
         for (const part of plan) {
+          throw_if_aborted(signal)
           on_progress?.(`Uploading ${part.name}…`)
-          uploaded.push(await upload_file(target_id, part.name, part.data))
+          uploaded.push(await upload_file(target_id, part.name, part.data, undefined, signal))
         }
       } else {
         errors.push(`"${file.name}" isn't a .glb or .zip — skipped.`)
       }
     } catch (err) {
+      if (is_abort_error(err)) throw err
       const e = as_cloud_error(err)
+      if (e?.kind === 'auth_expired') throw err
+      console.error(`[Asset Hub] Upload "${file.name}" failed`, err)
       errors.push(e?.message ?? (err instanceof Error ? err.message : `Failed to upload "${file.name}".`))
     }
   }
   return { uploaded, errors }
+}
+
+function throw_if_aborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new DOMException('Transfer cancelled.', 'AbortError')
+}
+
+function is_abort_error(err: unknown): boolean {
+  return err instanceof Error && err.name === 'AbortError'
 }
 
 /** Unpack a zip and resolve exactly which of its entries the single `.gltf` inside it needs. */

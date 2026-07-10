@@ -7,7 +7,6 @@
 export * from './apps'
 export * from './asset_audit'
 export * from './asset_hub'
-export * from './avatar'
 export * from './editor'
 export * from './graphs'
 export * from './input'

@@ -11,7 +11,7 @@ It bundles the pieces needed to build a browser-native editor UI on top of WebGP
 - **`dock_system` / `window_system`** — ready-to-use workspace systems built on `dock`/`window`: a docked split workspace and a floating desktop-style window manager, both part of core so third-party projects can build directly on them. See [Workspace systems](#workspace-systems).
 - **`theme`** — palette/CSS-variable theming with `load_theme`, `apply_theme`, `theme_color`, `theme_rgba`, `pack_color`, and `hex_to_normalized_rgba`.
 - **`app_registry`** — installable apps described by a JSON manifest: install/uninstall, persistence, and update checks against each app's `shipping_path`. See [`dashboard`](#dashboard--full-screen-app-launcher).
-- **`plugins`** — opt-in, higher-level drop-in components (`file_browser`, `graph`, `node_graph`, `im_dialog`, `code_editor`, `dashboard`, `asset_hub` cloud drive browser/uploader, `avatar_generator`, `material_audit`, `webtix` WebGPU path tracer) packaged so other projects can reuse them piecemeal. See [Plugins](#plugins).
+- **`plugins`** — opt-in, higher-level drop-in components (`file_browser`, `graph`, `node_graph`, `im_dialog`, `code_editor`, `dashboard`, `asset_hub` cloud drive browser/uploader, `material_audit`, `webtix` WebGPU path tracer) packaged so other projects can reuse them piecemeal. See [Plugins](#plugins).
 - **`storage`** — a browser-only cloud storage abstraction (`cloud_storage_provider`) with a Google Drive backend, used by the Asset Hub browser/uploader. See [Asset Hub](#asset_hub--cloud-drive-browser--uploader-google-drive).
 
 ## Live preview
@@ -110,6 +110,39 @@ each frame; inactive windows have their geometry cached and replayed (see
 windows costs roughly one live panel plus cheap buffer copies. Call
 `windows.invalidate(id)` when an inactive window's content changes (the preview
 does this for the Chat window when a message arrives).
+
+### `ui_task_queue` — application-wide task messages
+
+Core provides a generic bottom-right task queue that is independent of Asset
+Hub. The application owns one `ui_task_queue_state`; any subsystem with that
+reference can send `enqueue`, `update`, `complete`, `fail`, `cancel`, or
+source-scoped `clear` messages. Enqueued messages with a `run` callback execute
+sequentially and receive an `AbortSignal`; messages without `run` represent
+externally-managed work.
+
+```ts
+const tasks = create_ui_task_queue_state(() => renderer.request_render())
+
+ui_task_queue_send(tasks, {
+  type: 'enqueue',
+  source: 'exporter',
+  title: 'EXPORT · scene.glb',
+  detail: 'Waiting to export',
+  running_detail: 'Exporting…',
+  run: async (signal, update) => {
+    update('Writing geometry…')
+    await export_scene({ signal })
+  },
+})
+
+// Render once above the desktop; producers do not render their own progress.
+const bounds = ui_task_queue_bounds(tasks, safe.x, safe.y, safe.w, safe.h, scale)
+ui_task_queue_render(renderer, theme, input, tasks, bounds, scale)
+```
+
+The row's *Close* button sends `cancel`, aborting managed work or invoking an
+external task's optional `on_cancel`. Successful managed tasks disappear;
+failed tasks remain until dismissed.
 
 ## Plugins
 
@@ -327,18 +360,25 @@ It returns submitted text so you can append it to your own message array.
 ```ts
 const chat = create_im_dialog_state()
 const messages: im_message[] = [
-  { author: 'Ada', side: 'left', text: 'Hi!', timestamp: Date.now() },
+  { author: 'Adam', side: 'left', text: 'Hi!', timestamp: Date.now() },
 ]
 
 // widgets.begin_frame() must have run this frame (im_dialog uses the composer):
 const ev = im_dialog(renderer, widgets, theme, input, x, y, w, h, messages, chat, {
-  title: 'Ada · online',
-  placeholder: 'Message Ada…',
-  is_typing: adaIsTyping,
-  typing_author: 'Ada',
+  title: 'Adam · online',
+  header_action_label: 'Clear',
+  placeholder: 'Message Adam…',
+  is_typing: adamIsTyping,
+  typing_author: 'Adam',
 })
+if (ev.header_action) messages.length = 0
 if (ev.sent) messages.push({ author: 'Me', side: 'right', text: ev.sent, timestamp: Date.now() })
 ```
+
+The preview's Chat window wires this UI to a local Ollama
+`/v1/chat/completions` endpoint (`qwen2.5:7b-instruct`) and includes repo plus
+installed-plugin context in each request. Long conversations are summarized
+before sending once they exceed the configured context budget.
 
 CJK works once the Chinese atlas has loaded (see [Chinese font loading](#chinese-font-loading)).
 
@@ -383,49 +423,6 @@ characters arrive on `typed_text` and editing/navigation keys on the
 for the full list). Token `kind`s are `keyword`, `type`, `number`, `string`,
 `comment`, `operator`, `identifier`, `punctuation`, `function`, `whitespace`,
 `plain`.
-
-### `avatar_generator` — procedural human mesh from a skeleton
-
-A bones-first body generator with **no template mesh anywhere**: body
-parameters place a parametric humanoid skeleton (joint positions + hierarchy,
-down to per-finger and per-toe chains and breast anchor bones), lean anatomical
-SDF volumes sweep every bone (rounded cones for limbs and digits, ellipsoids
-for head/torso), a **muscle layer** grows the frame and lays named bellies over
-it (deltoids, traps, pecs, biceps, quads, glutes, calves), a **fat layer** adds
-the adipose masses (belly, love handles, glute pads, bust, chin) and swells
-every soft part subcutaneously, the volumes fuse through a smooth union, and
-surface nets polygonize the combined field into a triangle mesh with
-SDF-gradient normals. Because a skeleton alone doesn't determine a body, the
-muscle and fat passes run as explicit pipeline steps between the bone frame and
-polygonization — each frame part annotates how strongly it responds to either
-layer, so the same bones can carry a sprinter or a powerlifter.
-
-The panel shows the result in a WebGPU orbit viewport (it reuses the asset-audit
-viewer): sliders regenerate the mesh live (drafted at a coarse grid while
-dragging, refined on release), presets cover common body types, an armature
-overlay draws the generating skeleton, and Export writes a self-contained GLB
-via the asset-audit encoder.
-
-The skeleton is also directly editable in the viewport: a **Bones** overlay
-draws a circle at every joint with lines along the bones, and dragging a circle
-moves that joint (plus its whole subtree, forward-kinematics style) in the
-camera plane — the mirrored side follows automatically and the body mesh
-regenerates around the edited skeleton. Edits persist as per-joint offsets on
-top of the parametric skeleton (`avatar_joint_offsets`), survive slider
-changes, and reset from the sidebar.
-
-```ts
-import { avatar_generator, create_avatar_generator_state, generate_avatar } from '@liamlangli/ui/plugins'
-
-const av = create_avatar_generator_state()
-
-// each frame, between renderer.begin_frame() and renderer.flush():
-const ev = avatar_generator(renderer, widgets, theme, input, x, y, w, h, av)
-if (ev.exported_bytes) console.log(`wrote avatar.glb (${ev.exported_bytes} bytes)`)
-
-// or run the pipeline headless — skeleton → frame → muscle → fat → mesh:
-const { mesh, skeleton } = generate_avatar({ ...create_avatar_params(), muscle: 0.8 })
-```
 
 ### `material_audit` — material / tiling inspector
 
@@ -494,15 +491,21 @@ references upload together, in a new subfolder when there's more than one
 file so the `.gltf`'s relative URIs keep resolving. See
 [Uploading assets](#uploading-assets) below.
 
-The requested OAuth scope is `https://www.googleapis.com/auth/drive.file` — a
-**non-sensitive** scope, so the app needs **no Google verification**, shows no
-"unverified app" warning, and is open to any Google account. Under it the app
-can only ever see what the user explicitly grants: selecting the folder in the
-Picker *is* the grant (plus anything the app itself later uploads there), and
-it persists on the user's Google account. The picked folder id is remembered
-in `localStorage`, so later visits reopen it directly; a *Change Folder*
-button re-opens the Picker at any time (also the escape hatch if files added
-to the folder from outside the app don't surface).
+Uploads and downloads send messages to Core's application-level task queue in
+the bottom-right corner rather than showing progress inside the Asset Hub panel.
+Each row has a *Close* action that removes queued work or aborts an in-flight
+Drive request; successful rows disappear automatically and failed rows remain
+until dismissed.
+
+The app requests `https://www.googleapis.com/auth/drive.readonly` to read
+existing assets and `https://www.googleapis.com/auth/drive.file` to upload
+files created through the app. Google grants `drive.file` per item: selecting
+a folder does not recursively grant its existing children, so it cannot power
+a folder browser on its own. `drive.readonly` is therefore required and is a
+restricted scope; public deployments must complete Google's OAuth verification.
+The UI still limits browsing to the folder selected in the Picker. Its id is
+remembered in `localStorage`, so later visits reopen it directly, and a
+*Change Folder* button re-opens the Picker at any time.
 
 The UI depends only on the `cloud_storage_provider` interface
 (`src/storage/ui_cloud_storage_provider.ts`); every Google Drive API call
@@ -534,8 +537,10 @@ if (ev.folder_opened) console.log('entered', ev.folder_opened.name)
 
 #### Google OAuth setup
 
-The OAuth client id is **not** hardcoded — it comes from the Vite build
-environment. Copy `.env.example` to `.env.local` and set:
+The OAuth client id comes from the Vite build environment. This repository's
+preview app includes a public development client in `.env.development`, so
+`npm run dev` works without local setup. To test with another Google Cloud
+project, copy `.env.example` to `.env.local` and set:
 
 ```bash
 VITE_GOOGLE_CLIENT_ID=1234567890-abcdef.apps.googleusercontent.com
@@ -552,10 +557,10 @@ To create the client id:
    `https://<user>.github.io` for the deployed static site. (The token flow
    needs no redirect URI.)
 4. Enable the **Google Drive API** under **APIs & Services → Library**.
-5. Configure the **OAuth consent screen** (app name, support email). The only
-   scope used is `.../auth/drive.file`, which is non-sensitive — publish the
-   app to production and it works for every Google account with no
-   verification review and no test-user list.
+5. Configure the **OAuth consent screen** (app name, support email), add
+   `.../auth/drive.readonly` and `.../auth/drive.file`, and add your account as
+   a test user for local development. `drive.readonly` is restricted, so a
+   public production app must complete Google's OAuth verification process.
 
 Optionally set `VITE_GOOGLE_API_KEY` with an API key (restricted to the
 Google Picker API and your origins): the folder picker usually works with the
@@ -575,12 +580,10 @@ failing silently. The picked folder grant persists on the Google account
 There is no client secret anywhere in the app, and signing out revokes the
 token and clears local storage.
 
-A freshly-picked folder that's still empty is a normal state, not an error:
-under `drive.file`, a parent-ID search can return HTTP 403 when the app cannot
-see any children yet. `google_drive_provider.list_folder` instead lists the
-files visible to the app and filters their `parents` metadata locally. This
-keeps the request within the narrow scope and returns a normal empty result,
-so the panel just shows *This folder is empty*.
+After a scope change, the stored token is discarded automatically. Connect
+again and approve the updated permissions. Empty folders then return a normal
+empty listing, while Drive API failures include their HTTP status and Google
+reason in the browser console without logging bearer tokens or upload bodies.
 
 #### Uploading assets
 

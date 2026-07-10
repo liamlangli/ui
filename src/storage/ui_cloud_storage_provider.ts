@@ -53,18 +53,18 @@ export interface cloud_storage_provider {
    * Download the file and return a browser-local object URL for its bytes.
    * The caller owns the URL and must release it with `URL.revokeObjectURL`.
    */
-  get_file_download_url(file: cloud_file): Promise<string>
+  get_file_download_url(file: cloud_file, signal?: AbortSignal): Promise<string>
 
   /** Download the file's raw bytes. */
-  get_file_content(file: cloud_file): Promise<Blob>
+  get_file_content(file: cloud_file, signal?: AbortSignal): Promise<Blob>
 
   /**
    * Upload `data` as a new file named `name` inside `folder_id`. `mime_type`
    * defaults to `data.type`, then `application/octet-stream`. Optional: only
    * providers that can write into the granted folder implement this.
    */
-  upload_file?(folder_id: string, name: string, data: Blob, mime_type?: string): Promise<cloud_file>
+  upload_file?(folder_id: string, name: string, data: Blob, mime_type?: string, signal?: AbortSignal): Promise<cloud_file>
 
   /** Create a subfolder named `name` inside `folder_id`. Optional, see `upload_file`. */
-  create_folder?(folder_id: string, name: string): Promise<cloud_file>
+  create_folder?(folder_id: string, name: string, signal?: AbortSignal): Promise<cloud_file>
 }
