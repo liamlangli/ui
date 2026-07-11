@@ -255,6 +255,7 @@ const white_texture_id = 1
 const cjk_font_texture_id = 2
 const first_external_texture_id = 3
 const initial_round_rect_point_capacity = 32
+const round_rect_corner_unit_points = new Map<number, Float32Array>()
 const cjk_punctuation_aliases: [number, number][] = [
   [0x3001, 0x2c],
   [0x3002, 0x2e],
@@ -526,16 +527,39 @@ function round_rect_corner_segments(radius: number): number {
 
 function round_rect_point_capacity(w: number, h: number, rtl: number, rtr: number, rbl: number, rbr: number): number {
   const max_r = Math.min(w, h) * 0.5
-  const point_count = (radius: number) => round_rect_corner_segments(clamp(radius, 0, max_r)) + 1
-  return point_count(rtl) + point_count(rtr) + point_count(rbl) + point_count(rbr)
+  return (
+    round_rect_corner_segments(clamp(rtl, 0, max_r)) +
+    round_rect_corner_segments(clamp(rtr, 0, max_r)) +
+    round_rect_corner_segments(clamp(rbl, 0, max_r)) +
+    round_rect_corner_segments(clamp(rbr, 0, max_r)) +
+    4
+  )
+}
+
+function round_rect_corner_samples(segments: number): Float32Array {
+  const cached = round_rect_corner_unit_points.get(segments)
+  if (cached) return cached
+
+  const points = new Float32Array((segments + 1) * 2)
+  for (let i = 0; i <= segments; i += 1) {
+    const angle = (i / segments) * Math.PI * 0.5
+    points[i * 2 + 0] = Math.cos(angle)
+    points[i * 2 + 1] = Math.sin(angle)
+  }
+  round_rect_corner_unit_points.set(segments, points)
+  return points
 }
 
 function write_round_rect_corner(out: Float32Array, count: number, cx: number, cy: number, radius: number, start_angle: number): number {
   const segments = round_rect_corner_segments(radius)
+  const samples = round_rect_corner_samples(segments)
+  const start_cos = Math.cos(start_angle)
+  const start_sin = Math.sin(start_angle)
   for (let i = 0; i <= segments; i += 1) {
-    const angle = start_angle + (i / segments) * Math.PI * 0.5
-    out[count * 2 + 0] = cx + Math.cos(angle) * radius
-    out[count * 2 + 1] = cy + Math.sin(angle) * radius
+    const unit_x = samples[i * 2 + 0]!
+    const unit_y = samples[i * 2 + 1]!
+    out[count * 2 + 0] = cx + (unit_x * start_cos - unit_y * start_sin) * radius
+    out[count * 2 + 1] = cy + (unit_x * start_sin + unit_y * start_cos) * radius
     count += 1
   }
   return count
