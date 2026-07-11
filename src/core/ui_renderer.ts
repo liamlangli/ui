@@ -246,13 +246,15 @@ const default_round_rect_feather = 1
 const circle_min_sector_count = 12
 const circle_max_sector_count = 96
 const circle_curve_error_px = 0.125
+// Rounded-rectangle geometry is authored in physical screen pixels. Keeping
+// each quarter-arc segment below this length makes facets visually sub-pixel
+// while allowing small radii to use proportionally fewer vertices.
+const round_rect_max_segment_px = 4
 const latin_mono_font_texture_id = 0
 const white_texture_id = 1
 const cjk_font_texture_id = 2
 const first_external_texture_id = 3
-const rr_corner_points = 4
-const rr_points = 8 + 4 * rr_corner_points
-const rr_cos = [0.9510565162951535, 0.8090169943749475, 0.5877852522924732, 0.3090169943749474]
+const initial_round_rect_point_capacity = 32
 const cjk_punctuation_aliases: [number, number][] = [
   [0x3001, 0x2c],
   [0x3002, 0x2e],
@@ -508,43 +510,32 @@ function build_round_rect_points(
   const br_x = x + w - rbr
   const br_y = y + h - rbr
 
-  count = write_round_rect_corner(out, count, tl_x, tl_y, -rtl, 0, 0, -rtl)
-  out[count * 2 + 0] = tl_x
-  out[count * 2 + 1] = y
-  count += 1
-  out[count * 2 + 0] = tr_x
-  out[count * 2 + 1] = y
-  count += 1
-  count = write_round_rect_corner(out, count, tr_x, tr_y, 0, -rtr, rtr, 0)
-  out[count * 2 + 0] = x + w
-  out[count * 2 + 1] = tr_y
-  count += 1
-  out[count * 2 + 0] = x + w
-  out[count * 2 + 1] = br_y
-  count += 1
-  count = write_round_rect_corner(out, count, br_x, br_y, rbr, 0, 0, rbr)
-  out[count * 2 + 0] = br_x
-  out[count * 2 + 1] = y + h
-  count += 1
-  out[count * 2 + 0] = bl_x
-  out[count * 2 + 1] = y + h
-  count += 1
-  count = write_round_rect_corner(out, count, bl_x, bl_y, 0, rbl, -rbl, 0)
-  out[count * 2 + 0] = x
-  out[count * 2 + 1] = bl_y
-  count += 1
-  out[count * 2 + 0] = x
-  out[count * 2 + 1] = tl_y
-  count += 1
+  count = write_round_rect_corner(out, count, tl_x, tl_y, rtl, Math.PI)
+  count = write_round_rect_corner(out, count, tr_x, tr_y, rtr, -Math.PI * 0.5)
+  count = write_round_rect_corner(out, count, br_x, br_y, rbr, 0)
+  count = write_round_rect_corner(out, count, bl_x, bl_y, rbl, Math.PI * 0.5)
   return count
 }
 
-function write_round_rect_corner(out: Float32Array, count: number, cx: number, cy: number, cos_x: number, cos_y: number, sin_x: number, sin_y: number): number {
-  for (let i = 0; i < rr_corner_points; i += 1) {
-    const c = rr_cos[i] ?? 0
-    const s = rr_cos[rr_corner_points - 1 - i] ?? 0
-    out[count * 2 + 0] = cx + cos_x * c + sin_x * s
-    out[count * 2 + 1] = cy + cos_y * c + sin_y * s
+function round_rect_corner_segments(radius: number): number {
+  const quarter_arc_length = Math.PI * Math.max(0, radius) * 0.5
+  // floor + 1 keeps the arc length per segment strictly below the threshold,
+  // including when the arc is an exact multiple of it.
+  return Math.max(1, Math.floor(quarter_arc_length / round_rect_max_segment_px) + 1)
+}
+
+function round_rect_point_capacity(w: number, h: number, rtl: number, rtr: number, rbl: number, rbr: number): number {
+  const max_r = Math.min(w, h) * 0.5
+  const point_count = (radius: number) => round_rect_corner_segments(clamp(radius, 0, max_r)) + 1
+  return point_count(rtl) + point_count(rtr) + point_count(rbl) + point_count(rbr)
+}
+
+function write_round_rect_corner(out: Float32Array, count: number, cx: number, cy: number, radius: number, start_angle: number): number {
+  const segments = round_rect_corner_segments(radius)
+  for (let i = 0; i <= segments; i += 1) {
+    const angle = start_angle + (i / segments) * Math.PI * 0.5
+    out[count * 2 + 0] = cx + Math.cos(angle) * radius
+    out[count * 2 + 1] = cy + Math.sin(angle) * radius
     count += 1
   }
   return count
@@ -651,17 +642,30 @@ export class ui_renderer {
   private color_panel_uniform: GPUBuffer | null = null
   private color_square_texture: color_panel_texture | null = null
   private color_value_texture: color_panel_texture | null = null
-  private readonly round_rect_points = new Float32Array(rr_points * 2)
-  private readonly round_rect_outer = new Float32Array(rr_points * 2)
-  private readonly round_rect_inner = new Float32Array(rr_points * 2)
-  private readonly round_rect_feather_outer = new Float32Array(rr_points * 2)
-  private readonly round_rect_feather_inner = new Float32Array(rr_points * 2)
+  private round_rect_points = new Float32Array(initial_round_rect_point_capacity * 2)
+  private round_rect_outer = new Float32Array(initial_round_rect_point_capacity * 2)
+  private round_rect_inner = new Float32Array(initial_round_rect_point_capacity * 2)
+  private round_rect_feather_outer = new Float32Array(initial_round_rect_point_capacity * 2)
+  private round_rect_feather_inner = new Float32Array(initial_round_rect_point_capacity * 2)
   private last_frame_stats: ui_renderer_stats | null = null
   private render_mode_: ui_renderer_render_mode = 'adaptive'
   private pending_render_frames = 0
 
   constructor(private readonly canvas: HTMLCanvasElement) {
     memory.track('ui.primitive_buffer', 'geometry', 'cpu', this.vertex_data.byteLength, 'frame vertex staging')
+  }
+
+  private prepare_round_rect_points(w: number, h: number, rtl: number, rtr: number, rbl: number, rbr: number): Float32Array {
+    const required_floats = round_rect_point_capacity(w, h, rtl, rtr, rbl, rbr) * 2
+    if (required_floats <= this.round_rect_points.length) return this.round_rect_points
+
+    const capacity = 2 ** Math.ceil(Math.log2(required_floats))
+    this.round_rect_points = new Float32Array(capacity)
+    this.round_rect_outer = new Float32Array(capacity)
+    this.round_rect_inner = new Float32Array(capacity)
+    this.round_rect_feather_outer = new Float32Array(capacity)
+    this.round_rect_feather_inner = new Float32Array(capacity)
+    return this.round_rect_points
   }
 
   async init(options?: ui_renderer_init_options): Promise<void> {
@@ -1173,8 +1177,8 @@ export class ui_renderer {
         this.extra_bind_groups.set(texture_id, this.create_data_texture_bind_group(texture_id, entry.texture, entry.filter))
       }
     }
-    const pts = this.round_rect_points
     const r = Math.min(Math.max(0, radius), Math.min(w, h) * 0.5)
+    const pts = this.prepare_round_rect_points(w, h, r, r, r, r)
     const n = compact_closed_polyline_points(pts, build_round_rect_points(pts, x, y, w, h, r, r, r, r))
     if (n < 3) return
 
@@ -1550,7 +1554,7 @@ export class ui_renderer {
       this.fill_rect(x, y, w, h, rgba, feather)
       return
     }
-    const pts = this.round_rect_points
+    const pts = this.prepare_round_rect_points(w, h, rtl, rtr, rbl, rbr)
     const n = compact_closed_polyline_points(pts, build_round_rect_points(pts, x, y, w, h, rtl, rtr, rbl, rbr))
     if (n < 3) return
     this.current_texture_id = white_texture_id
@@ -1575,7 +1579,7 @@ export class ui_renderer {
       this.stroke_rect(x, y, w, h, thickness, rgba, feather)
       return
     }
-    const pts = this.round_rect_points
+    const pts = this.prepare_round_rect_points(w, h, rtl, rtr, rbl, rbr)
     const n = compact_closed_polyline_points(pts, build_round_rect_points(pts, x, y, w, h, rtl, rtr, rbl, rbr))
     if (n < 2) return
     this.current_texture_id = white_texture_id
