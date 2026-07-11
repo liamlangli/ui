@@ -246,10 +246,10 @@ const default_round_rect_feather = 1
 const circle_min_sector_count = 12
 const circle_max_sector_count = 96
 const circle_curve_error_px = 0.125
-// Rounded-rectangle geometry is authored in physical screen pixels. Keeping
-// each quarter-arc segment below this length makes facets visually sub-pixel
-// while allowing small radii to use proportionally fewer vertices.
-const round_rect_max_segment_px = 4
+// Curved UI geometry is authored in physical screen pixels. Keeping each arc
+// segment below this length makes facets visually sub-pixel while allowing
+// small radii and short spans to use proportionally fewer vertices.
+const curve_max_segment_px = 4
 const latin_mono_font_texture_id = 0
 const white_texture_id = 1
 const cjk_font_texture_id = 2
@@ -518,11 +518,15 @@ function build_round_rect_points(
   return count
 }
 
-function round_rect_corner_segments(radius: number): number {
-  const quarter_arc_length = Math.PI * Math.max(0, radius) * 0.5
+function arc_segment_count(radius: number, angle_span: number): number {
+  const arc_length = Math.max(0, radius) * Math.abs(angle_span)
   // floor + 1 keeps the arc length per segment strictly below the threshold,
   // including when the arc is an exact multiple of it.
-  return Math.max(1, Math.floor(quarter_arc_length / round_rect_max_segment_px) + 1)
+  return Math.max(1, Math.floor(arc_length / curve_max_segment_px) + 1)
+}
+
+function round_rect_corner_segments(radius: number): number {
+  return arc_segment_count(radius, Math.PI * 0.5)
 }
 
 function round_rect_point_capacity(w: number, h: number, rtl: number, rtr: number, rbl: number, rbr: number): number {
@@ -1665,6 +1669,79 @@ export class ui_renderer {
       outer_prev_x = outer_x
       outer_prev_y = outer_y
     }
+  }
+
+  /** Fill an annular sector between `inner_radius` and `outer_radius`. Angles are in radians. */
+  fill_sector(cx: number, cy: number, inner_radius: number, outer_radius: number, start_angle: number, end_angle: number, rgba: number): void {
+    const inner_r = Math.max(0, Math.min(inner_radius, outer_radius))
+    const outer_r = Math.max(0, inner_radius, outer_radius)
+    const span = end_angle - start_angle
+    if (outer_r <= 0 || Math.abs(span) <= 0.000001) return
+
+    const steps = arc_segment_count(outer_r, span)
+    this.current_texture_id = white_texture_id
+    const u = this.white_u()
+    const v = this.white_v()
+    const prev_cos = Math.cos(start_angle)
+    const prev_sin = Math.sin(start_angle)
+    let prev_inner_x = cx + prev_cos * inner_r
+    let prev_inner_y = cy + prev_sin * inner_r
+    let prev_outer_x = cx + prev_cos * outer_r
+    let prev_outer_y = cy + prev_sin * outer_r
+    for (let i = 1; i <= steps; i += 1) {
+      const angle = start_angle + (span * i) / steps
+      const cos = Math.cos(angle)
+      const sin = Math.sin(angle)
+      const inner_x = cx + cos * inner_r
+      const inner_y = cy + sin * inner_r
+      const outer_x = cx + cos * outer_r
+      const outer_y = cy + sin * outer_r
+      this.push_quad_points_colored(
+        prev_inner_x, prev_inner_y,
+        prev_outer_x, prev_outer_y,
+        outer_x, outer_y,
+        inner_x, inner_y,
+        u, v,
+        rgba, rgba, rgba, rgba,
+      )
+      prev_inner_x = inner_x
+      prev_inner_y = inner_y
+      prev_outer_x = outer_x
+      prev_outer_y = outer_y
+    }
+  }
+
+  /** Stroke both arcs and the two radial edges of an annular sector. Angles are in radians. */
+  stroke_sector(cx: number, cy: number, inner_radius: number, outer_radius: number, start_angle: number, end_angle: number, thickness: number, rgba: number, feather = 0): void {
+    const inner_r = Math.max(0, Math.min(inner_radius, outer_radius))
+    const outer_r = Math.max(0, inner_radius, outer_radius)
+    const span = end_angle - start_angle
+    if (outer_r <= 0 || thickness <= 0 || Math.abs(span) <= 0.000001) return
+
+    const steps = arc_segment_count(outer_r + Math.max(0, feather), span)
+    const prev_cos = Math.cos(start_angle)
+    const prev_sin = Math.sin(start_angle)
+    let prev_inner_x = cx + prev_cos * inner_r
+    let prev_inner_y = cy + prev_sin * inner_r
+    let prev_outer_x = cx + prev_cos * outer_r
+    let prev_outer_y = cy + prev_sin * outer_r
+    this.stroke_line(prev_inner_x, prev_inner_y, prev_outer_x, prev_outer_y, thickness, rgba, feather)
+    for (let i = 1; i <= steps; i += 1) {
+      const angle = start_angle + (span * i) / steps
+      const cos = Math.cos(angle)
+      const sin = Math.sin(angle)
+      const inner_x = cx + cos * inner_r
+      const inner_y = cy + sin * inner_r
+      const outer_x = cx + cos * outer_r
+      const outer_y = cy + sin * outer_r
+      if (inner_r > 0) this.stroke_line(prev_inner_x, prev_inner_y, inner_x, inner_y, thickness, rgba, feather)
+      this.stroke_line(prev_outer_x, prev_outer_y, outer_x, outer_y, thickness, rgba, feather)
+      prev_inner_x = inner_x
+      prev_inner_y = inner_y
+      prev_outer_x = outer_x
+      prev_outer_y = outer_y
+    }
+    this.stroke_line(prev_inner_x, prev_inner_y, prev_outer_x, prev_outer_y, thickness, rgba, feather)
   }
 
   stroke_circle(cx: number, cy: number, radius: number, thickness: number, rgba: number, feather = 0): void {
