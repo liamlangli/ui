@@ -82,6 +82,25 @@ export interface file_browser_state {
   _dragging_split?: boolean
   last_click_path?: string | null
   last_entry_click_ms?: number
+  /** Internal long-press tracking for touch / pen / mouse context actions. */
+  _press_path?: string | null
+  _press_started_ms?: number
+  _press_x?: number
+  _press_y?: number
+  _long_press_fired?: boolean
+  /** Internal tree-folder drag used to request a new parent. */
+  _tree_drag_path?: string | null
+  _tree_drag_name?: string
+  _tree_drag_start_x?: number
+  _tree_drag_start_y?: number
+  _tree_drag_active?: boolean
+  _tree_drop_path?: string | null
+  /** Internal content-entry drag, exposed to hosts through frame events. */
+  _entry_drag_path?: string | null
+  _entry_drag_start_x?: number
+  _entry_drag_start_y?: number
+  _entry_drag_active?: boolean
+  _entry_pending_activation_path?: string | null
 }
 
 export interface file_browser_options {
@@ -116,6 +135,10 @@ export interface file_browser_options {
   entries?: file_browser_entry[]
   /** Draw a list/grid thumbnail; return true if it drew, otherwise fallback art is shown. */
   render_preview?: (entry: file_browser_entry, x: number, y: number, w: number, h: number) => boolean
+  /** Optional host validation for dragging one tree folder onto a prospective parent. */
+  can_set_folder_parent?: (path: string, parent_path: string) => boolean
+  /** Enables dragging matching content entries out of the browser. Disabled by default. */
+  can_drag_entry?: (entry: file_browser_entry) => boolean
 }
 
 export interface file_browser_event {
@@ -138,8 +161,14 @@ export interface file_browser_event {
   view_mode_changed?: file_browser_view_mode
   /** Rich browser: search text changed. */
   search_changed?: string
-  /** Rich browser: right-click; path is the entry under the cursor or null for empty space. */
+  /** Rich browser: right-click or long-press; path is the item under the cursor or null for empty space. */
   context_requested?: { x: number; y: number; path: string | null }
+  /** Rich browser: a folder was dragged onto another folder to request a new parent. */
+  folder_parent_requested?: { path: string; parent_path: string }
+  /** Rich browser: an entry drag is active at the current pointer position. */
+  entry_dragged?: { entry: file_browser_entry; x: number; y: number }
+  /** Rich browser: an entry drag ended at the current pointer position. */
+  entry_dropped?: { entry: file_browser_entry; x: number; y: number }
 }
 
 export function create_file_browser_state(initial_folder = 'Project'): file_browser_state {
@@ -166,6 +195,22 @@ export function create_file_browser_state(initial_folder = 'Project'): file_brow
     _dragging_split: false,
     last_click_path: null,
     last_entry_click_ms: 0,
+    _press_path: null,
+    _press_started_ms: 0,
+    _press_x: 0,
+    _press_y: 0,
+    _long_press_fired: false,
+    _tree_drag_path: null,
+    _tree_drag_name: '',
+    _tree_drag_start_x: 0,
+    _tree_drag_start_y: 0,
+    _tree_drag_active: false,
+    _tree_drop_path: null,
+    _entry_drag_path: null,
+    _entry_drag_start_x: 0,
+    _entry_drag_start_y: 0,
+    _entry_drag_active: false,
+    _entry_pending_activation_path: null,
   }
 }
 
@@ -391,7 +436,19 @@ function rich_file_browser(
     // the top gutter (matching the panel-top→search inset), so the list adds no
     // extra top padding. Without search the list owns its own breathing room.
     const tree_top_pad = search_drawn ? 0 : 10 * scale
-    draw_folder_tree(ui, input, tree_list_rect, flatten_folder_tree(folders, state.collapsed ?? new Set()), state, font_px, scale, col, event, tree_top_pad)
+    draw_folder_tree(
+      ui,
+      input,
+      tree_list_rect,
+      flatten_folder_tree(folders, state.collapsed ?? new Set()),
+      state,
+      font_px,
+      scale,
+      col,
+      event,
+      tree_top_pad,
+      options?.can_set_folder_parent,
+    )
   }
 
   const search_text = (state.search_text ?? '').trim().toLowerCase()
@@ -435,10 +492,12 @@ function rich_file_browser(
     draw_search_field(ui, input, content_search_rect.x, content_search_rect.y, content_search_rect.w, content_search_rect.h, state, event, scale, col, options?.widgets)
   }
   if ((options?.view_mode ?? state.view_mode) === 'list') {
-    draw_entry_list(ui, input, entries_rect, visible_entries, state, font_px, scale, col, event)
+    draw_entry_list(ui, input, entries_rect, visible_entries, state, font_px, scale, col, options, event)
   } else {
     draw_entry_grid(ui, input, entries_rect, visible_entries, state, font_px, scale, col, options, event)
   }
+
+  draw_entry_drag_ghost(ui, input, visible_entries, state, font_px, scale, col, options, event)
 
   return event
 }
@@ -460,6 +519,22 @@ function ensure_rich_state(state: file_browser_state): void {
   state._dragging_split ??= false
   state.last_click_path ??= null
   state.last_entry_click_ms ??= 0
+  state._press_path ??= null
+  state._press_started_ms ??= 0
+  state._press_x ??= 0
+  state._press_y ??= 0
+  state._long_press_fired ??= false
+  state._tree_drag_path ??= null
+  state._tree_drag_name ??= ''
+  state._tree_drag_start_x ??= 0
+  state._tree_drag_start_y ??= 0
+  state._tree_drag_active ??= false
+  state._tree_drop_path ??= null
+  state._entry_drag_path ??= null
+  state._entry_drag_start_x ??= 0
+  state._entry_drag_start_y ??= 0
+  state._entry_drag_active ??= false
+  state._entry_pending_activation_path ??= null
 }
 
 function draw_toolbar_button(
@@ -595,6 +670,7 @@ function draw_folder_tree(
   col: (slot: theme_slot) => number,
   event: file_browser_event,
   top_pad = 10 * scale,
+  can_set_parent?: (path: string, parent_path: string) => boolean,
 ): void {
   const row_h = 22 * scale
   const bottom_pad = 12 * scale
@@ -608,13 +684,38 @@ function draw_folder_tree(
   scroll.offset_y = clamp(scroll.offset_y, 0, max_off)
   state.tree_scroll = scroll
 
+  const drag_path = state._tree_drag_path
+  if (drag_path && input.mouse_down && !state._tree_drag_active) {
+    const dx = input.mouse_x - (state._tree_drag_start_x ?? input.mouse_x)
+    const dy = input.mouse_y - (state._tree_drag_start_y ?? input.mouse_y)
+    if (dx * dx + dy * dy > (6 * scale) ** 2) {
+      state._tree_drag_active = true
+      state._press_path = null
+      state._long_press_fired = false
+    }
+  }
+  if (state._tree_drag_active) {
+    state._tree_drop_path = null
+    ui.set_cursor('move')
+    const edge = 20 * scale
+    if (input.mouse_y < rect.y + edge) scroll.offset_y = clamp(scroll.offset_y - 5 * scale, 0, max_off)
+    else if (input.mouse_y > rect.y + rect.h - edge) scroll.offset_y = clamp(scroll.offset_y + 5 * scale, 0, max_off)
+  }
+
   ui.push_clip(rect.x, rect.y, rect.w, rect.h)
   let ry = rect.y + top_pad - scroll.offset_y
   for (const row of rows) {
     if (ry + row_h >= rect.y && ry <= rect.y + rect.h) {
       const active = row.path === state.selected_folder
       const hover = point_in(input, rect.x, ry, rect.w - scrollbar_w, row_h)
-      if (active) ui.fill_rect(rect.x + 3 * scale, ry, rect.w - scrollbar_w - 6 * scale, row_h, col('selected'))
+      const current_parent = drag_path?.slice(0, drag_path.lastIndexOf('/')) ?? ''
+      const valid_drop = !!drag_path && row.path !== drag_path && row.path !== current_parent && !row.path.startsWith(`${drag_path}/`) && (can_set_parent?.(drag_path, row.path) ?? true)
+      const drop_hover = !!state._tree_drag_active && hover && valid_drop
+      if (drop_hover) {
+        state._tree_drop_path = row.path
+        ui.fill_round_rect(rect.x + 3 * scale, ry, rect.w - scrollbar_w - 6 * scale, row_h, 4 * scale, col('active'))
+        ui.stroke_round_rect(rect.x + 3 * scale, ry, rect.w - scrollbar_w - 6 * scale, row_h, 4 * scale, Math.max(1, scale), col('accent'))
+      } else if (active) ui.fill_rect(rect.x + 3 * scale, ry, rect.w - scrollbar_w - 6 * scale, row_h, col('selected'))
       else if (hover) ui.fill_rect(rect.x + 3 * scale, ry, rect.w - scrollbar_w - 6 * scale, row_h, col('hover'))
 
       const indent_x = rect.x + 7 * scale + row.depth * 14 * scale
@@ -633,7 +734,15 @@ function draw_folder_tree(
         }
       }
       ui.draw_text(label_x, ui.text_v_center_y(ry, row_h, font_px), row.name, font_px, col(active ? 'text' : 'text_dim'))
-      if (point_in(input, label_x - 2 * scale, ry, rect.x + rect.w - label_x, row_h) && input.mouse_pressed) {
+      const label_hover = point_in(input, label_x - 2 * scale, ry, rect.x + rect.w - label_x, row_h)
+      track_context_press(input, label_hover, row.path, state, event)
+      if (label_hover && input.mouse_pressed) {
+        state._tree_drag_path = row.path
+        state._tree_drag_name = row.name
+        state._tree_drag_start_x = input.mouse_x
+        state._tree_drag_start_y = input.mouse_y
+        state._tree_drag_active = false
+        state._tree_drop_path = null
         state.selected_folder = row.path
         state.selected_paths = []
         event.folder_selected = row.path
@@ -642,6 +751,33 @@ function draw_folder_tree(
     ry += row_h
   }
   ui.pop_clip()
+
+  if (state._tree_drag_active && state._tree_drag_path) {
+    const ghost_w = Math.min(150 * scale, Math.max(66 * scale, ui.text_width(state._tree_drag_name ?? '', font_px) + 24 * scale))
+    const ghost_h = 24 * scale
+    const ghost_x = input.mouse_x + 10 * scale
+    const ghost_y = input.mouse_y + 10 * scale
+    ui.fill_round_rect(ghost_x, ghost_y, ghost_w, ghost_h, 5 * scale, col('panel'))
+    ui.stroke_round_rect(ghost_x, ghost_y, ghost_w, ghost_h, 5 * scale, 1, col(state._tree_drop_path ? 'accent' : 'border_strong'))
+    ui.push_clip(ghost_x + 8 * scale, ghost_y, ghost_w - 16 * scale, ghost_h)
+    ui.draw_text(ghost_x + 8 * scale, ui.text_v_center_y(ghost_y, ghost_h, font_px), state._tree_drag_name ?? '', font_px, col('text'))
+    ui.pop_clip()
+  }
+
+  if (state._tree_drag_path && input.mouse_released) {
+    if (state._tree_drag_active && state._tree_drop_path) {
+      event.folder_parent_requested = { path: state._tree_drag_path, parent_path: state._tree_drop_path }
+    }
+    state._tree_drag_path = null
+    state._tree_drag_name = ''
+    state._tree_drag_active = false
+    state._tree_drop_path = null
+  } else if (state._tree_drag_path && !input.mouse_down && !input.mouse_pressed) {
+    state._tree_drag_path = null
+    state._tree_drag_name = ''
+    state._tree_drag_active = false
+    state._tree_drop_path = null
+  }
 }
 
 function draw_entry_grid(
@@ -660,7 +796,12 @@ function draw_entry_grid(
   const card_w = (options?.card_w ?? 64) * scale
   const card_h = (options?.card_h ?? 92) * scale
   const card_gap = 8 * scale
-  const preview_h = card_h - 28 * scale
+  // Keep the name in its own generously sized row. CJK glyphs extend farther
+  // below the nominal baseline than the compact Latin labels used here, so the
+  // old 16px clip could shave off their bottom edge.
+  const name_h = Math.max(20 * scale, font_px + 7 * scale)
+  const meta_h = 11 * scale
+  const preview_h = Math.max(0, card_h - name_h - meta_h)
   const node_r = 4 * scale
   const cols = Math.max(1, Math.floor((rect.w - pad * 2 + card_gap) / (card_w + card_gap)))
   const rows = Math.ceil(entries.length / cols)
@@ -691,15 +832,18 @@ function draw_entry_grid(
     ui.fill_round_rect(ex, ey, card_w, card_h, node_r, active ? col('selected') : hover ? col('hover') : col('panel_alt'))
     const drew = options?.render_preview?.(entry, ex, ey, card_w, preview_h) ?? false
     if (!drew) draw_internal_grid_node(ui, entry, ex, ey, card_w, preview_h, scale, col)
-    ui.push_clip(ex + 4 * scale, ey + preview_h, card_w - 8 * scale, card_h - preview_h - 12 * scale)
-    ui.draw_text(ex + 4 * scale, ey + preview_h + 2 * scale, base_name(entry.name), font_px, col('text'))
+    const name_y = ey + preview_h
+    ui.push_clip(ex + 4 * scale, name_y, card_w - 8 * scale, name_h)
+    ui.draw_text(ex + 4 * scale, ui.text_v_center_y(name_y, name_h, font_px), base_name(entry.name), font_px, col('text'))
     ui.pop_clip()
     const type_label = entry.type_label ?? (entry.kind === 'folder' ? 'Folder' : file_type_label(entry.name))
     const tw = ui.text_width(type_label, 5 * scale)
-    ui.draw_text(ex + card_w - 2 * scale - tw, ey + card_h - 9 * scale, type_label, 5 * scale, col('text_dim'))
+    const meta_y = ey + card_h - meta_h
+    ui.draw_text(ex + card_w - 2 * scale - tw, ui.text_v_center_y(meta_y, meta_h, 5 * scale), type_label, 5 * scale, col('text_dim'))
     if (entry.marked) ui.fill_circle(ex + card_w - 7 * scale, ey + 8 * scale, 2.5 * scale, col('accent'))
 
-    handle_entry_click(input, hover, entry, state, event)
+    if (hover && input.mouse_right_pressed) event.context_requested = { x: input.mouse_x, y: input.mouse_y, path: entry.path }
+    handle_entry_click(input, hover, entry, state, event, options?.can_drag_entry?.(entry) ?? false)
   }
   ui.pop_clip()
 }
@@ -734,6 +878,7 @@ function draw_entry_list(
   font_px: number,
   scale: number,
   col: (slot: theme_slot) => number,
+  options: file_browser_options | undefined,
   event: file_browser_event,
 ): void {
   const row_h = 24 * scale
@@ -787,7 +932,7 @@ function draw_entry_list(
 
     if (entry.marked) ui.fill_circle(rect.x + rect.w - 12 * scale, ry + row_h * 0.5, 2.5 * scale, col('accent'))
     if (hover && input.mouse_right_pressed) event.context_requested = { x: input.mouse_x, y: input.mouse_y, path: entry.path }
-    handle_entry_click(input, hover, entry, state, event)
+    handle_entry_click(input, hover, entry, state, event, options?.can_drag_entry?.(entry) ?? false)
   }
   ui.pop_clip()
 }
@@ -798,22 +943,132 @@ function handle_entry_click(
   entry: file_browser_entry,
   state: file_browser_state,
   event: file_browser_event,
+  draggable: boolean,
 ): void {
-  if (!hover || !input.mouse_pressed) return
   const now = performance.now()
-  const dbl = state.last_click_path === entry.path && now - (state.last_entry_click_ms ?? 0) < 320
-  state.last_click_path = entry.path
-  state.last_entry_click_ms = now
-  state.selected_paths = [entry.path]
-  event.entry_selected = entry
-  if (entry.kind === 'folder') {
-    if (dbl) {
-      state.selected_folder = entry.path
-      state.selected_paths = []
-      event.folder_selected = entry.path
+  track_context_press(input, hover, entry.path, state, event, now)
+  if (hover && input.mouse_pressed) {
+    const dbl = state.last_click_path === entry.path && now - (state.last_entry_click_ms ?? 0) < 320
+    state.last_click_path = entry.path
+    state.last_entry_click_ms = now
+    state.selected_paths = [entry.path]
+    event.entry_selected = entry
+    if (draggable && entry.kind === 'file') {
+      state._entry_drag_path = entry.path
+      state._entry_drag_start_x = input.mouse_x
+      state._entry_drag_start_y = input.mouse_y
+      state._entry_drag_active = false
+      state._entry_pending_activation_path = dbl ? entry.path : null
     }
-  } else if (dbl) {
-    event.entry_activated = entry
+    if (entry.kind === 'folder') {
+      if (dbl) {
+        state.selected_folder = entry.path
+        state.selected_paths = []
+        event.folder_selected = entry.path
+      }
+    } else if (dbl && !draggable) {
+      event.entry_activated = entry
+    }
+    return
+  }
+
+}
+
+function draw_entry_drag_ghost(
+  ui: ui_renderer,
+  input: ui_input_snapshot,
+  entries: file_browser_entry[],
+  state: file_browser_state,
+  font_px: number,
+  scale: number,
+  col: (slot: theme_slot) => number,
+  options: file_browser_options | undefined,
+  event: file_browser_event,
+): void {
+  const path = state._entry_drag_path
+  if (!path) return
+  const entry = entries.find((candidate) => candidate.path === path)
+  if (!entry) {
+    state._entry_drag_path = null
+    state._entry_drag_active = false
+    state._entry_pending_activation_path = null
+    return
+  }
+
+  if (input.mouse_down && !state._entry_drag_active) {
+    const dx = input.mouse_x - (state._entry_drag_start_x ?? input.mouse_x)
+    const dy = input.mouse_y - (state._entry_drag_start_y ?? input.mouse_y)
+    if (dx * dx + dy * dy > (6 * scale) ** 2) {
+      state._entry_drag_active = true
+      state._press_path = null
+      state._long_press_fired = false
+      state.last_click_path = null
+      state._entry_pending_activation_path = null
+    }
+  }
+
+  if (state._entry_drag_active && input.mouse_down) {
+    event.entry_dragged = { entry, x: input.mouse_x, y: input.mouse_y }
+    ui.set_cursor('move')
+    const ghost_w = 76 * scale
+    const ghost_h = 88 * scale
+    const preview_h = 62 * scale
+    const ghost_x = input.mouse_x + 12 * scale
+    const ghost_y = input.mouse_y - ghost_h * 0.5
+    ui.fill_round_rect(ghost_x, ghost_y, ghost_w, ghost_h, 6 * scale, col('panel'))
+    ui.stroke_round_rect(ghost_x, ghost_y, ghost_w, ghost_h, 6 * scale, Math.max(1, scale), col('accent'))
+    const drew = options?.render_preview?.(entry, ghost_x, ghost_y, ghost_w, preview_h) ?? false
+    if (!drew) draw_internal_grid_node(ui, entry, ghost_x, ghost_y, ghost_w, preview_h, scale, col)
+    ui.push_clip(ghost_x + 5 * scale, ghost_y + preview_h, ghost_w - 10 * scale, ghost_h - preview_h)
+    ui.draw_text(ghost_x + 5 * scale, ui.text_v_center_y(ghost_y + preview_h, ghost_h - preview_h, font_px), base_name(entry.name), font_px, col('text'))
+    ui.pop_clip()
+  }
+
+  if (input.mouse_released || (!input.mouse_down && !input.mouse_pressed)) {
+    if (state._entry_drag_active) event.entry_dropped = { entry, x: input.mouse_x, y: input.mouse_y }
+    else if (state._entry_pending_activation_path === entry.path) event.entry_activated = entry
+    state._entry_drag_path = null
+    state._entry_drag_active = false
+    state._entry_pending_activation_path = null
+  }
+}
+
+function track_context_press(
+  input: ui_input_snapshot,
+  hover: boolean,
+  path: string,
+  state: file_browser_state,
+  event: file_browser_event,
+  now = performance.now(),
+): void {
+  if (hover && input.mouse_pressed) {
+    state._press_path = path
+    state._press_started_ms = now
+    state._press_x = input.mouse_x
+    state._press_y = input.mouse_y
+    state._long_press_fired = false
+    return
+  }
+  if (state._press_path !== path) return
+  if (!input.mouse_down || input.mouse_released) {
+    state._press_path = null
+    state._long_press_fired = false
+    return
+  }
+  const dx = input.mouse_x - (state._press_x ?? input.mouse_x)
+  const dy = input.mouse_y - (state._press_y ?? input.mouse_y)
+  const moved = dx * dx + dy * dy > (8 * (window.devicePixelRatio || 1)) ** 2
+  if (moved) {
+    state._press_path = null
+    return
+  }
+  // A folder can be rendered in both the tree and the entry grid. A non-hovered
+  // copy must not cancel the press before the hovered copy is processed.
+  if (!hover) return
+  if (!state._long_press_fired && now - (state._press_started_ms ?? now) >= 550) {
+    state._long_press_fired = true
+    state.last_click_path = null
+    event.context_requested = { x: input.mouse_x, y: input.mouse_y, path }
   }
 }
 
