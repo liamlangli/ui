@@ -153,8 +153,8 @@ export interface ui_renderer_init_options {
   language_font?: ui_font_source
   /**
    * Override the default Latin/main/monospace font bundle with a custom one.
-   * The JSON must be a bundle document containing `FONT_MAIN` and `FONT_MONO`
-   * faces plus the atlas image URL.
+   * The JSON may be a bundle containing `FONT_MAIN` and `FONT_MONO`, or a
+   * single BMFont-style face that is used for both slots.
    */
   latin_font?: ui_font_source
   /**
@@ -181,7 +181,11 @@ type font_bundle_doc = {
   pages?: string[]
   width: number
   height: number
-  fonts: Record<typeof FONT_MAIN | typeof FONT_MONO, font_face_doc>
+  /** Bundled faces. Optional when the document itself is a single face. */
+  fonts?: Record<typeof FONT_MAIN | typeof FONT_MONO, font_face_doc>
+  chars?: number[][]
+  line_height?: number
+  size?: number
 }
 
 // A scissor rect plus an optional rounded-corner region (physical px). The
@@ -408,9 +412,12 @@ function font_image_url(doc: font_doc | font_bundle_doc, label: string): string 
 }
 
 function font_face(doc: font_bundle_doc, font_type: typeof FONT_MAIN | typeof FONT_MONO): font_face_doc {
-  const face = doc.fonts[font_type]
-  if (!face) throw new Error(`font bundle missing ${font_type}`)
-  return face
+  const bundled_face = doc.fonts?.[font_type]
+  if (bundled_face) return bundled_face
+  if (doc.chars && doc.line_height != null && doc.size != null) {
+    return { chars: doc.chars, line_height: doc.line_height, size: doc.size }
+  }
+  throw new Error(`font bundle missing ${font_type}`)
 }
 
 const baseline_reference_codepoints = [72, 77, 78, 73, 76, 69, 88, 84]
@@ -660,6 +667,7 @@ export class ui_renderer {
   private latin_font_name: string | null = null
   private canvas_width = 1
   private canvas_height = 1
+  private global_opacity = 1
   private bind_group_layout: GPUBindGroupLayout | null = null
   private color_panel_bind_group_layout: GPUBindGroupLayout | null = null
   private sampler: GPUSampler | null = null
@@ -1439,6 +1447,11 @@ export class ui_renderer {
 
   set_cursor(cursor: string | null): void {
     this.canvas.style.cursor = cursor ?? ''
+  }
+
+  /** Multiplies the alpha of every UI primitive emitted after this call. */
+  set_global_opacity(opacity: number): void {
+    this.global_opacity = clamp(opacity, 0, 1)
   }
 
   /**
@@ -2661,7 +2674,9 @@ export class ui_renderer {
     this.view.setFloat32(offset + 4, y, true)
     this.view.setFloat32(offset + 8, u, true)
     this.view.setFloat32(offset + 12, v, true)
-    this.view.setUint32(offset + 16, color, true)
+    const source_alpha = color >>> 24
+    const alpha = Math.max(0, Math.min(255, Math.round(source_alpha * this.global_opacity)))
+    this.view.setUint32(offset + 16, ((color & 0x00ffffff) | (alpha << 24)) >>> 0, true)
     this.view.setFloat32(offset + 20, p0, true)
     this.view.setFloat32(offset + 24, p1, true)
     this.view.setFloat32(offset + 28, p2, true)

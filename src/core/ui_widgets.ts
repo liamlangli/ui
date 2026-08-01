@@ -295,6 +295,12 @@ type popup_placement = {
   h: number
 }
 
+type segmented_animation_state = {
+  from: number
+  target: number
+  started_at: number
+}
+
 export class ui_widgets {
   private theme!: theme_definition
   private input: ui_input_snapshot = create_empty_ui_input()
@@ -311,6 +317,7 @@ export class ui_widgets {
   private open_color_picker_popup_rect: { id: string; x: number; y: number; w: number; h: number } | null = null
   private readonly color_picker_values = new Map<string, ui_color_rgba>()
   private readonly color_picker_number_inputs = new Map<string, ui_number_input_state>()
+  private readonly segmented_animations = new Map<string, segmented_animation_state>()
   private is_inside_popup_rendering = false
   private readonly pending_stack_debug_wireframes: Array<{ x: number; y: number; w: number; h: number }> = []
 
@@ -372,6 +379,55 @@ export class ui_widgets {
     const text_w = this.ui.text_width(label, font_px)
     this.ui.draw_text(x + Math.max(0, (w - text_w) * 0.5), this.ui.text_v_center_y(y, h, font_px), label, font_px, this.color('text'))
     return hover && this.input.mouse_pressed
+  }
+
+  segmented_control(id: string, x: number, y: number, w: number, h: number, items: string[], selected: number): number {
+    if (items.length === 0 || this.ui.rect_clipped(x, y, w, h)) return selected
+    const scale = window.devicePixelRatio || 1
+    const radius = h * 0.25
+    const segment_w = w / items.length
+    const hovered = this.point_in(x, y, w, h)
+      ? Math.max(0, Math.min(items.length - 1, Math.floor((this.input.mouse_x - x) / segment_w)))
+      : -1
+    if (hovered >= 0 && this.input.mouse_pressed) {
+      this.active_id = `${id}:${hovered}`
+      selected = hovered
+    }
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now()
+    const duration = 180
+    let animation = this.segmented_animations.get(id)
+    if (!animation) {
+      animation = { from: selected, target: selected, started_at: now }
+      this.segmented_animations.set(id, animation)
+    }
+    const position_at = (value: segmented_animation_state): number => {
+      const progress = Math.max(0, Math.min(1, (now - value.started_at) / duration))
+      const eased = 1 - Math.pow(1 - progress, 3)
+      return value.from + (value.target - value.from) * eased
+    }
+    if (animation.target !== selected) {
+      animation = { from: position_at(animation), target: selected, started_at: now }
+      this.segmented_animations.set(id, animation)
+    }
+    const indicator_position = position_at(animation)
+    const inner_radius = Math.max(2 * scale, (h - 4 * scale) * 0.25)
+    this.ui.fill_round_rect(x, y, w, h, radius, this.color('panel_alt'))
+    for (let index = 1; index < items.length; index += 1) {
+      const separator_x = x + index * segment_w
+      this.ui.fill_rect(separator_x, y + 7 * scale, 1, Math.max(1, h - 14 * scale), this.color('border'))
+    }
+    if (hovered >= 0 && hovered !== selected) {
+      this.ui.fill_round_rect(x + hovered * segment_w + 2 * scale, y + 2 * scale, segment_w - 4 * scale, h - 4 * scale, inner_radius, this.color('hover'))
+    }
+    this.ui.fill_round_rect(x + indicator_position * segment_w + 2 * scale, y + 2 * scale, segment_w - 4 * scale, h - 4 * scale, inner_radius, this.color('active'))
+    this.ui.stroke_round_rect(x, y, w, h, radius, 1, this.color('border_strong'))
+    const font_px = w_font_px * scale
+    for (let index = 0; index < items.length; index += 1) {
+      const label = items[index] ?? ''
+      const text_w = this.ui.text_width(label, font_px)
+      this.ui.draw_text(x + index * segment_w + Math.max(0, (segment_w - text_w) * 0.5), this.ui.text_v_center_y(y, h, font_px), label, font_px, index === selected ? this.color('text') : this.color('text_dim'))
+    }
+    return selected
   }
 
   toggle(_id: string, x: number, y: number, value: boolean, label?: string): boolean {
