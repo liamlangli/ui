@@ -13,6 +13,8 @@ export interface ui_input_snapshot {
   pointer_is_touch?: boolean
   /** True while a two-finger touch transform gesture is active. */
   gesture_active?: boolean
+  /** One-frame edge emitted after a stationary two-finger tap. */
+  two_finger_tap?: boolean
   /** Middle mouse button held (level). Optional; used by the graph plugin to pan. */
   mouse_middle_down?: boolean
   /** Right mouse button pressed this frame (edge). Optional; used by the graph plugin to open a create menu. */
@@ -240,6 +242,7 @@ export function create_empty_ui_input(): ui_input_snapshot {
     mouse_released: false,
     pointer_is_touch: false,
     gesture_active: false,
+    two_finger_tap: false,
     mouse_middle_down: false,
     mouse_right_pressed: false,
     mouse_right_down: false,

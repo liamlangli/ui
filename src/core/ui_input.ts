@@ -19,12 +19,19 @@ export class input_collector {
   private pan_dy = 0
   private pinch = 1
   private twist = 0
+  private two_finger_tap = false
   // Live gesture reference (centroid + finger distance/angle), persists across frames.
   private gesturing = false
   private gesture_cx = 0
   private gesture_cy = 0
   private gesture_dist = 0
   private gesture_angle = 0
+  private gesture_started_at = 0
+  private gesture_start_cx = 0
+  private gesture_start_cy = 0
+  private gesture_start_dist = 0
+  private gesture_start_angle = 0
+  private gesture_tap_candidate = false
   // one-shot key edges, consumed each frame
   private keys = new Set<string>()
   // held modifiers, persist across frames until keyup
@@ -168,6 +175,10 @@ export class input_collector {
       'touchstart',
       (e) => {
         if (e.touches.length < 2) return
+        if (e.touches.length > 2) {
+          this.gesture_tap_candidate = false
+          return
+        }
         const { cx, cy, dist, angle } = touch_metrics(e)
         this.gesturing = true
         this.state.mouse_down = false
@@ -177,6 +188,12 @@ export class input_collector {
         this.gesture_cy = cy
         this.gesture_dist = dist
         this.gesture_angle = angle
+        this.gesture_started_at = performance.now()
+        this.gesture_start_cx = cx
+        this.gesture_start_cy = cy
+        this.gesture_start_dist = dist
+        this.gesture_start_angle = angle
+        this.gesture_tap_candidate = true
         this.state.mouse_x = cx
         this.state.mouse_y = cy
         e.preventDefault()
@@ -196,13 +213,24 @@ export class input_collector {
           this.pressed = false
           this.released = false
         } else {
-          this.pan_dx += cx - this.gesture_cx
-          this.pan_dy += cy - this.gesture_cy
-          this.pinch *= dist / this.gesture_dist
           let angle_delta = angle - this.gesture_angle
           if (angle_delta > Math.PI) angle_delta -= Math.PI * 2
           else if (angle_delta < -Math.PI) angle_delta += Math.PI * 2
-          this.twist += angle_delta
+          let total_angle = angle - this.gesture_start_angle
+          if (total_angle > Math.PI) total_angle -= Math.PI * 2
+          else if (total_angle < -Math.PI) total_angle += Math.PI * 2
+          const tap_slop = 10 * dpr()
+          if (
+            Math.hypot(cx - this.gesture_start_cx, cy - this.gesture_start_cy) > tap_slop ||
+            Math.abs(Math.log(dist / this.gesture_start_dist)) > 0.04 ||
+            Math.abs(total_angle) > 0.07
+          ) this.gesture_tap_candidate = false
+          if (!this.gesture_tap_candidate) {
+            this.pan_dx += cx - this.gesture_cx
+            this.pan_dy += cy - this.gesture_cy
+            this.pinch *= dist / this.gesture_dist
+            this.twist += angle_delta
+          }
         }
         this.gesture_cx = cx
         this.gesture_cy = cy
@@ -216,7 +244,16 @@ export class input_collector {
       { passive: false },
     )
     const end_touch = (e: TouchEvent) => {
-      if (e.touches.length < 2) this.gesturing = false
+      if (e.touches.length < 2) {
+        if (
+          this.gesturing &&
+          this.gesture_tap_candidate &&
+          performance.now() - this.gesture_started_at <= 350
+        ) this.two_finger_tap = true
+        this.gesturing = false
+        this.gesture_tap_candidate = false
+        wake()
+      }
     }
     canvas.addEventListener('touchend', end_touch, { passive: true })
     canvas.addEventListener('touchcancel', end_touch, { passive: true })
@@ -296,6 +333,7 @@ export class input_collector {
     s.mouse_released = this.released
     s.pointer_is_touch = this.is_touch
     s.gesture_active = this.gesturing
+    s.two_finger_tap = this.two_finger_tap
     s.mouse_middle_down = this.middle_down
     s.mouse_right_pressed = this.right_pressed
     s.mouse_right_down = this.right_down
@@ -339,6 +377,7 @@ export class input_collector {
     this.pan_dy = 0
     this.pinch = 1
     this.twist = 0
+    this.two_finger_tap = false
     this.wheel = 0
     this.typed = ''
     this.keys.clear()
