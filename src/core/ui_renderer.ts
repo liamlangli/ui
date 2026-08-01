@@ -1057,6 +1057,11 @@ export class ui_renderer {
   }
 
   begin_frame(): void {
+    // Cursor ownership is immediate-mode as well: every frame starts from the
+    // browser default, then the currently hovered/dragged widget may claim it.
+    // Without this reset, transient cursors such as a file-browser splitter's
+    // `col-resize` remain stuck after the pointer leaves their hit region.
+    this.set_cursor(null)
     this.vertex_count = 0
     this.commands = []
     this.clip_stack = [make_clip(0, 0, this.canvas_width, this.canvas_height)]
