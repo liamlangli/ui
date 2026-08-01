@@ -14,15 +14,17 @@ export class input_collector {
   private right_pressed = false
   private right_down = false
   private is_touch = false
-  // Two-finger touch gesture: accumulated pan (physical px) and pinch factor for the frame.
+  // Two-finger touch gesture: accumulated pan, pinch and twist for the frame.
   private pan_dx = 0
   private pan_dy = 0
   private pinch = 1
-  // Live gesture reference (centroid + finger distance), persists across frames.
+  private twist = 0
+  // Live gesture reference (centroid + finger distance/angle), persists across frames.
   private gesturing = false
   private gesture_cx = 0
   private gesture_cy = 0
   private gesture_dist = 0
+  private gesture_angle = 0
   // one-shot key edges, consumed each frame
   private keys = new Set<string>()
   // held modifiers, persist across frames until keyup
@@ -145,7 +147,7 @@ export class input_collector {
       { passive: false },
     )
 
-    // Two-finger touch: pan by the centroid's motion, scale by the pinch ratio.
+    // Two-finger touch: pan by centroid motion, scale by pinch and rotate by twist.
     const touch_metrics = (e: TouchEvent) => {
       const rect = canvas.getBoundingClientRect()
       const d = dpr()
@@ -155,13 +157,38 @@ export class input_collector {
       const ay = (a.clientY - rect.top) * d
       const bx = (b.clientX - rect.left) * d
       const by = (b.clientY - rect.top) * d
-      return { cx: (ax + bx) / 2, cy: (ay + by) / 2, dist: Math.hypot(bx - ax, by - ay) || 1 }
+      return {
+        cx: (ax + bx) / 2,
+        cy: (ay + by) / 2,
+        dist: Math.hypot(bx - ax, by - ay) || 1,
+        angle: Math.atan2(by - ay, bx - ax),
+      }
     }
+    canvas.addEventListener(
+      'touchstart',
+      (e) => {
+        if (e.touches.length < 2) return
+        const { cx, cy, dist, angle } = touch_metrics(e)
+        this.gesturing = true
+        this.state.mouse_down = false
+        this.pressed = false
+        this.released = false
+        this.gesture_cx = cx
+        this.gesture_cy = cy
+        this.gesture_dist = dist
+        this.gesture_angle = angle
+        this.state.mouse_x = cx
+        this.state.mouse_y = cy
+        e.preventDefault()
+        wake()
+      },
+      { passive: false },
+    )
     canvas.addEventListener(
       'touchmove',
       (e) => {
         if (e.touches.length < 2) return
-        const { cx, cy, dist } = touch_metrics(e)
+        const { cx, cy, dist, angle } = touch_metrics(e)
         if (!this.gesturing) {
           // Entering a gesture: cancel any single-finger press so it can't drag.
           this.gesturing = true
@@ -172,10 +199,15 @@ export class input_collector {
           this.pan_dx += cx - this.gesture_cx
           this.pan_dy += cy - this.gesture_cy
           this.pinch *= dist / this.gesture_dist
+          let angle_delta = angle - this.gesture_angle
+          if (angle_delta > Math.PI) angle_delta -= Math.PI * 2
+          else if (angle_delta < -Math.PI) angle_delta += Math.PI * 2
+          this.twist += angle_delta
         }
         this.gesture_cx = cx
         this.gesture_cy = cy
         this.gesture_dist = dist
+        this.gesture_angle = angle
         this.state.mouse_x = cx
         this.state.mouse_y = cy
         e.preventDefault()
@@ -263,12 +295,14 @@ export class input_collector {
     s.mouse_pressed = this.pressed
     s.mouse_released = this.released
     s.pointer_is_touch = this.is_touch
+    s.gesture_active = this.gesturing
     s.mouse_middle_down = this.middle_down
     s.mouse_right_pressed = this.right_pressed
     s.mouse_right_down = this.right_down
     s.pan_dx = this.pan_dx
     s.pan_dy = this.pan_dy
     s.zoom_factor = this.pinch
+    s.rotation_delta = this.twist
     s.wheel_y = this.wheel
     s.typed_text = this.typed
     s.ime_composition = this.composition
@@ -304,6 +338,7 @@ export class input_collector {
     this.pan_dx = 0
     this.pan_dy = 0
     this.pinch = 1
+    this.twist = 0
     this.wheel = 0
     this.typed = ''
     this.keys.clear()

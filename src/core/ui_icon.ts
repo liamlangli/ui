@@ -40,6 +40,10 @@ export type ui_icon_name =
   | 'check'
   | 'search'
   | 'settings'
+  | 'edit'
+  | 'upload'
+  | 'undo'
+  | 'redo'
   | 'trash'
   | 'image'
   | 'code'
@@ -191,6 +195,24 @@ const ICON_PATHS: Record<ui_icon_name, icon_path> = {
       const dy = Math.sin(a)
       p.line(cx + dx * 6, cy + dy * 6, cx + dx * 9, cy + dy * 9, 2.2)
     }
+  },
+  edit: (p) => {
+    p.polygon([8, 22, 10, 16, 21, 5, 27, 11, 16, 22])
+    p.line(18, 8, 24, 14, 1.8)
+    p.polygon([8, 22, 16, 22, 8, 25], 1.8)
+  },
+  upload: (p) => {
+    p.polyline([10, 13, 16, 7, 22, 13], 2.2)
+    p.line(16, 7, 16, 21, 2.2)
+    p.polyline([8, 19, 8, 25, 24, 25, 24, 19], 2.2)
+  },
+  undo: (p) => {
+    p.polyline([12, 9, 6, 15, 12, 21], 2.2)
+    p.polyline([7, 15, 17, 15, 22, 18, 24, 23], 2.2)
+  },
+  redo: (p) => {
+    p.polyline([20, 9, 26, 15, 20, 21], 2.2)
+    p.polyline([25, 15, 15, 15, 10, 18, 8, 23], 2.2)
   },
   trash: (p) => {
     p.line(7, 9, 25, 9, 2.2)

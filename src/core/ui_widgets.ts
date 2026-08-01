@@ -11,6 +11,8 @@ export interface ui_input_snapshot {
   mouse_released: boolean
   /** True when the most recent pointer contact came from a touch (vs mouse/pen). */
   pointer_is_touch?: boolean
+  /** True while a two-finger touch transform gesture is active. */
+  gesture_active?: boolean
   /** Middle mouse button held (level). Optional; used by the graph plugin to pan. */
   mouse_middle_down?: boolean
   /** Right mouse button pressed this frame (edge). Optional; used by the graph plugin to open a create menu. */
@@ -25,6 +27,8 @@ export interface ui_input_snapshot {
    * anchored at the current `mouse_x`/`mouse_y` (the gesture centroid).
    */
   zoom_factor?: number
+  /** Rotation delta in radians for this frame from a two-finger twist gesture. */
+  rotation_delta?: number
   wheel_y: number
   typed_text: string
   key_backspace: boolean
@@ -235,12 +239,14 @@ export function create_empty_ui_input(): ui_input_snapshot {
     mouse_pressed: false,
     mouse_released: false,
     pointer_is_touch: false,
+    gesture_active: false,
     mouse_middle_down: false,
     mouse_right_pressed: false,
     mouse_right_down: false,
     pan_dx: 0,
     pan_dy: 0,
     zoom_factor: 1,
+    rotation_delta: 0,
     wheel_y: 0,
     typed_text: '',
     key_backspace: false,
@@ -633,6 +639,10 @@ export class ui_widgets {
 
   has_keyboard_focus(): boolean {
     return this.focused_input_id != null || this.focused_number_id != null
+  }
+
+  has_open_popup(): boolean {
+    return this.open_dropdown_id != null || this.open_color_picker_id != null
   }
 
   focus_text_input(id: string, state: ui_input_text_state, cursor = state.cursor): void {
