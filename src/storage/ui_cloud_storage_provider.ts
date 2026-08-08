@@ -1,15 +1,32 @@
-// cloud_storage_provider — the storage abstraction the asset hub UI depends
-// on. UI components take this interface (never a concrete provider), so a
-// Dropbox / iCloud / local-folder backend only has to implement these
-// methods to plug into the same browser. `upload_file` / `create_folder` are
-// optional — a provider (or grant scope) that can't write leaves them unset
-// and the UI simply hides the Upload button.
+// cloud_storage_provider — the storage abstraction app code depends on.
+// Callers take this interface (never a concrete provider), so a Dropbox /
+// iCloud / local-folder backend only has to implement these methods to plug
+// into the same app.
 //
 // Everything runs in the browser: providers authenticate with a client-side
 // OAuth flow (no client secret, no backend) and stream file bytes directly
 // from the storage service to the page.
+//
+// Only reading is mandatory. `upload_file` / `update_file` / `create_folder` /
+// `delete_file` are optional, so a read-only backend (or a grant whose scope
+// can't write) simply leaves them unset and callers hide the corresponding
+// actions. An app that keeps its own documents in the user's drive needs the
+// write half; an asset browser needs only the read half.
 
 import type { cloud_file } from './ui_cloud_types'
+
+/** Options shared by the two write paths (`upload_file`, `update_file`). */
+export interface cloud_write_options {
+  /** Defaults to `data.type`, then `application/octet-stream`. */
+  mime_type?: string
+  /**
+   * App-private metadata to store with the file, surfaced again as
+   * `cloud_file.properties`. Providers without metadata support ignore it —
+   * callers must treat it as a cache, never as the only copy of a value.
+   */
+  properties?: Record<string, string>
+  signal?: AbortSignal
+}
 
 export interface cloud_storage_provider {
   /** Human-readable provider name, e.g. `Google Drive`. */
@@ -29,22 +46,22 @@ export interface cloud_storage_provider {
   is_signed_in(): boolean
 
   /**
-   * Locate the asset hub root folder the app already has access to (e.g. the
-   * Drive folder the user granted through the picker on a previous visit,
-   * revalidated against the provider). Resolves null when no root is known or
-   * it is no longer accessible — the viewer is read-only and never creates it.
+   * Locate the app's root folder if one was already granted (e.g. the Drive
+   * folder the user picked on a previous visit), revalidated against the
+   * provider. Resolves null when no root is known or it is no longer
+   * accessible — callers then offer `pick_root_folder` again.
    */
-  find_asset_hub_root(): Promise<cloud_file | null>
+  find_root_folder(): Promise<cloud_file | null>
 
   /**
    * Ask the user to grant a root folder through the provider's picker UI
    * (e.g. the Google Picker under the `drive.file` scope, where the app can
    * only ever see what the user explicitly selects). Resolves the picked
-   * folder — persisted so `find_asset_hub_root` returns it next time — or
-   * null when the user cancels. Optional: providers whose scope can already
-   * see the drive root don't need a picker.
+   * folder — persisted so `find_root_folder` returns it next time — or null
+   * when the user cancels. Optional: providers whose scope can already see
+   * the drive root don't need a picker.
    */
-  pick_asset_hub_root?(): Promise<cloud_file | null>
+  pick_root_folder?(): Promise<cloud_file | null>
 
   /** List the direct children of a folder, folders first, sorted by name. */
   list_folder(folder_id: string): Promise<cloud_file[]>
@@ -59,12 +76,28 @@ export interface cloud_storage_provider {
   get_file_content(file: cloud_file, signal?: AbortSignal): Promise<Blob>
 
   /**
-   * Upload `data` as a new file named `name` inside `folder_id`. `mime_type`
-   * defaults to `data.type`, then `application/octet-stream`. Optional: only
-   * providers that can write into the granted folder implement this.
+   * Create a new file named `name` inside `folder_id`. Always creates —
+   * providers generally allow duplicate names in one folder, so a caller
+   * keeping one file per record must look the name up first and route an
+   * existing id to `update_file`.
    */
-  upload_file?(folder_id: string, name: string, data: Blob, mime_type?: string, signal?: AbortSignal): Promise<cloud_file>
+  upload_file?(folder_id: string, name: string, data: Blob, options?: cloud_write_options): Promise<cloud_file>
 
-  /** Create a subfolder named `name` inside `folder_id`. Optional, see `upload_file`. */
+  /**
+   * Replace the contents (and optionally the metadata) of an existing file,
+   * keeping its id, parents and sharing intact. This is what lets an app use
+   * the drive as durable storage for records it rewrites, rather than
+   * accumulating a new file per save.
+   */
+  update_file?(file_id: string, data: Blob, options?: cloud_write_options): Promise<cloud_file>
+
+  /** Create a subfolder named `name` inside `folder_id`. */
   create_folder?(folder_id: string, name: string, signal?: AbortSignal): Promise<cloud_file>
+
+  /**
+   * Remove a file or folder. Providers may implement this as a move to trash
+   * rather than a permanent delete — callers must not rely on the bytes being
+   * unrecoverable.
+   */
+  delete_file?(file_id: string, signal?: AbortSignal): Promise<void>
 }

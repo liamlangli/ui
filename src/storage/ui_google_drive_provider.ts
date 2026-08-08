@@ -4,28 +4,43 @@
 // Services access-token flow (implicit, browser-only — no client secret, no
 // backend), and file access goes through the Drive v3 REST API with `fetch`.
 //
-// Reading an existing folder hierarchy requires `drive.readonly`: selecting a
-// folder with the narrower `drive.file` scope grants that folder itself, not
-// recursive access to its existing children. `drive.file` remains alongside
-// it for uploads created by this app. The asset hub root is chosen through the
-// Google Picker (`pick_asset_hub_root`) and remembered in `localStorage`.
+// Two access modes, because they cost the app very different things:
+//
+//   'app_files' (default) — `drive.file` only. The app sees the folder the
+//     user picked plus the files it creates itself, and nothing else in the
+//     drive. This is not a restricted scope, so a public deployment needs no
+//     Google verification review. It is all an app storing *its own*
+//     documents in the user's drive ever needs.
+//   'read_all' — adds `drive.readonly`, required to walk a folder hierarchy
+//     the app did not create: picking a folder under `drive.file` grants that
+//     folder itself, not recursive access to its existing children. Browsing
+//     a user's pre-existing assets needs this; it is a restricted scope and a
+//     public production app must pass Google verification to use it.
+//
+// Every persisted key is namespaced by `app_id`, so two apps served from the
+// same origin keep independent sessions and root folders. The root folder is
+// chosen through the Google Picker (`pick_root_folder`) and remembered in
+// `localStorage`.
 //
 // The access token is kept in memory and mirrored to `localStorage` (lightly
 // obfuscated, not just raw JSON, so it doesn't sit in plain sight in devtools)
 // so a new tab or a full browser restart resumes the session too, instead of
 // forcing the Google consent popup on every visit. Tokens still expire after
 // ~1 hour regardless of where they're stored — every API call re-checks
-// expiry and 401 responses drop the token, so the UI asks the user to sign in
-// again once it actually lapses instead of assuming it lives forever.
+// expiry and 401 responses drop the token, so the app asks the user to sign in
+// again once it actually lapses instead of assuming it lives forever. The
+// granted scope string is stored with the token, so changing `access` (or
+// upgrading this module) invalidates stale grants automatically.
 //
-// `upload_file` / `create_folder` write into the granted folder (Drive API
-// `files.create`, the upload variant taking a `multipart/related` body).
-// Under drive.file, files this app creates are automatically accessible to it
-// afterwards — no extra grant needed, unlike files added to the folder by
-// some other app or by the user directly in Drive.
+// `upload_file` / `update_file` / `create_folder` / `delete_file` write into
+// the granted folder. Under `drive.file`, files this app creates stay
+// accessible to it afterwards — no extra grant needed, unlike files added to
+// the folder by some other app or by the user directly in Drive. Deletion
+// moves the file to Drive's trash rather than destroying it.
 
 import { cloud_error, type cloud_file } from './ui_cloud_types'
-import type { cloud_storage_provider } from './ui_cloud_storage_provider'
+import type { cloud_storage_provider, cloud_write_options } from './ui_cloud_storage_provider'
+import { DEFAULT_APP_ID, sanitize_app_id } from './ui_cloud_config'
 
 const GIS_SCRIPT_SRC = 'https://accounts.google.com/gsi/client'
 const GAPI_SCRIPT_SRC = 'https://apis.google.com/js/api.js'
@@ -33,22 +48,19 @@ const DRIVE_API = 'https://www.googleapis.com/drive/v3'
 const DRIVE_UPLOAD_API = 'https://www.googleapis.com/upload/drive/v3'
 const DRIVE_FILE_SCOPE = 'https://www.googleapis.com/auth/drive.file'
 const DRIVE_READONLY_SCOPE = 'https://www.googleapis.com/auth/drive.readonly'
-const DRIVE_SCOPES = `${DRIVE_READONLY_SCOPE} ${DRIVE_FILE_SCOPE}`
 const DRIVE_FOLDER_MIME = 'application/vnd.google-apps.folder'
-const FILE_FIELDS = 'id,name,mimeType,size,modifiedTime,webViewLink,parents'
-// v3 invalidates tokens issued before the required read scope was added.
-const TOKEN_STORAGE_KEY = 'ui.cloud.gdrive.token.v3'
-const LEGACY_TOKEN_STORAGE_KEYS = ['ui.cloud.gdrive.token.v2']
-const ROOT_STORAGE_KEY = 'ui.cloud.gdrive.root'
-/**
- * Fixed XOR key used to obfuscate the access token before it lands in
- * `localStorage`. This is not encryption (there is no secret to keep it
- * secure from anyone reading this source) — it just keeps the stored value
- * from being a plain, instantly-recognizable bearer token in devtools.
- */
-const TOKEN_OBFUSCATION_KEY = 'ui.asset_hub.gdrive.token'
+const FILE_FIELDS = 'id,name,mimeType,size,modifiedTime,webViewLink,parents,appProperties'
+/** Bumped when the stored token payload shape changes, not when scopes do. */
+const TOKEN_KEY_VERSION = 'v1'
 /** Treat tokens as expired slightly early so in-flight requests don't 401. */
 const TOKEN_EXPIRY_MARGIN_MS = 30_000
+
+/** Which Drive scopes to request; see the module header for the trade-off. */
+export type google_drive_access = 'app_files' | 'read_all'
+
+function scopes_for(access: google_drive_access): string {
+  return access === 'read_all' ? `${DRIVE_READONLY_SCOPE} ${DRIVE_FILE_SCOPE}` : DRIVE_FILE_SCOPE
+}
 
 // --- Google Identity Services ambient surface --------------------------------
 // GIS is loaded at runtime from accounts.google.com; only the sliver of its
@@ -119,6 +131,7 @@ interface drive_file_resource {
   modifiedTime?: string
   webViewLink?: string
   parents?: string[]
+  appProperties?: Record<string, string>
 }
 
 interface google_api_error_body {
@@ -137,29 +150,61 @@ interface google_api_error_detail {
 }
 
 export interface google_drive_provider_options {
+  /** Google OAuth 2.0 Web application client id. */
+  client_id: string
+  /**
+   * Namespace for the `localStorage` token and root-folder keys. Give every
+   * app its own, so apps sharing an origin don't share a session.
+   */
+  app_id?: string
+  /** Folder name suggested in the picker prompt; defaults to `app_id`. */
+  root_folder_name?: string
   /**
    * Optional Google API key passed to the Picker (`setDeveloperKey`). The
    * Picker usually works with the OAuth token alone; set this if Google
    * rejects the dialog with a developer-key error.
    */
   api_key?: string
+  /** Scope profile to request; defaults to the unrestricted `'app_files'`. */
+  access?: google_drive_access
+  /**
+   * Keys written by an earlier version of the host app, purged on
+   * construction. Use when renaming an `app_id` so stale grants don't linger.
+   */
+  legacy_token_storage_keys?: string[]
 }
 
 export class google_drive_provider implements cloud_storage_provider {
   readonly label = 'Google Drive'
 
   private client_id: string
+  private app_id: string
   private root_folder_name: string
   private api_key: string
+  private access: google_drive_access
+  private scopes: string
+  private token_storage_key: string
+  private root_storage_key: string
+  private obfuscation_key: string
+  private legacy_token_storage_keys: string[]
   private access_token: string | null = null
   private token_expires_at = 0
   private gis_load: Promise<gis_oauth2> | null = null
   private picker_load: Promise<picker_namespace> | null = null
 
-  constructor(client_id: string, root_folder_name = 'asset_hub', options?: google_drive_provider_options) {
-    this.client_id = client_id
-    this.root_folder_name = root_folder_name
-    this.api_key = options?.api_key ?? ''
+  constructor(options: google_drive_provider_options) {
+    this.client_id = options.client_id
+    this.app_id = sanitize_app_id(options.app_id ?? DEFAULT_APP_ID)
+    this.root_folder_name = options.root_folder_name?.trim() || this.app_id
+    this.api_key = options.api_key ?? ''
+    this.access = options.access ?? 'app_files'
+    this.scopes = scopes_for(this.access)
+    this.token_storage_key = `${this.app_id}.cloud.gdrive.token.${TOKEN_KEY_VERSION}`
+    this.root_storage_key = `${this.app_id}.cloud.gdrive.root`
+    // Not encryption (the key is right here in the source) — it just keeps the
+    // stored value from being a plain, instantly-recognizable bearer token.
+    this.obfuscation_key = `${this.app_id}.cloud.gdrive.token`
+    this.legacy_token_storage_keys = options.legacy_token_storage_keys ?? []
     this.restore_token()
   }
 
@@ -170,6 +215,7 @@ export class google_drive_provider implements cloud_storage_provider {
       throw new cloud_error('config', 'Google client id is not configured (set VITE_GOOGLE_CLIENT_ID).')
     }
     const oauth2 = await this.load_gis()
+    const required = this.scopes.split(' ')
     await new Promise<void>((resolve, reject) => {
       let settled = false
       const settle = (err?: cloud_error) => {
@@ -180,15 +226,17 @@ export class google_drive_provider implements cloud_storage_provider {
       }
       const client = oauth2.initTokenClient({
         client_id: this.client_id,
-        scope: DRIVE_SCOPES,
+        scope: this.scopes,
         callback: (response) => {
           if (!response.access_token) {
             settle(new cloud_error('auth', response.error_description ?? response.error ?? 'Google did not return an access token.'))
             return
           }
-          const granted_scopes = new Set((response.scope ?? '').split(/\s+/).filter(Boolean))
-          if (granted_scopes.size > 0 && (!granted_scopes.has(DRIVE_READONLY_SCOPE) || !granted_scopes.has(DRIVE_FILE_SCOPE))) {
-            settle(new cloud_error('auth', 'Google did not grant the Drive read and upload permissions required by Asset Hub.'))
+          // An empty scope string means GIS didn't report them; only reject on
+          // a reported set that is actually missing something we need.
+          const granted = new Set((response.scope ?? '').split(/\s+/).filter(Boolean))
+          if (granted.size > 0 && required.some((scope) => !granted.has(scope))) {
+            settle(new cloud_error('auth', 'Google did not grant the Drive permissions this app requires.'))
             return
           }
           this.store_token(response.access_token, response.expires_in ?? 3600)
@@ -221,7 +269,7 @@ export class google_drive_provider implements cloud_storage_provider {
 
   // --- root folder -------------------------------------------------------------
 
-  async find_asset_hub_root(): Promise<cloud_file | null> {
+  async find_root_folder(): Promise<cloud_file | null> {
     const saved = this.load_root()
     if (!saved) return null
     // Revalidate the stored id: the folder may have been deleted, or the
@@ -237,13 +285,13 @@ export class google_drive_provider implements cloud_storage_provider {
       const e = err instanceof cloud_error ? err : null
       if (e?.kind === 'not_found' || e?.kind === 'forbidden') {
         this.clear_root()
-        return null // folder deleted or grant lost — the UI offers the picker again
+        return null // folder deleted or grant lost — the app offers the picker again
       }
       throw err
     }
   }
 
-  async pick_asset_hub_root(): Promise<cloud_file | null> {
+  async pick_root_folder(): Promise<cloud_file | null> {
     if (!this.is_signed_in()) {
       throw new cloud_error('auth_expired', 'Your Google Drive session expired. Sign in again.')
     }
@@ -274,8 +322,8 @@ export class google_drive_provider implements cloud_storage_provider {
         })
       // The app id (the project number, the client id's leading segment) ties
       // the picker grant to this app — required for drive.file access.
-      const app_id = this.client_id.split('-')[0] ?? ''
-      if (/^\d+$/.test(app_id)) builder = builder.setAppId(app_id)
+      const project_number = this.client_id.split('-')[0] ?? ''
+      if (/^\d+$/.test(project_number)) builder = builder.setAppId(project_number)
       if (this.api_key) builder = builder.setDeveloperKey(this.api_key)
       builder.build().setVisible(true)
     })
@@ -315,26 +363,48 @@ export class google_drive_provider implements cloud_storage_provider {
     return to_cloud_file(body)
   }
 
-  async upload_file(parent_id: string, name: string, data: Blob, mime_type?: string, signal?: AbortSignal): Promise<cloud_file> {
-    const type = mime_type || data.type || 'application/octet-stream'
-    // multipart/related upload: a JSON metadata part followed by the file
-    // bytes. Built as a `Blob` (not a string) so binary content survives
-    // untouched — string concatenation would corrupt it on the first
-    // non-UTF8 byte.
-    const boundary = `ui-asset-hub-${Math.random().toString(36).slice(2)}`
-    const body = new Blob([
-      `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify({ name, parents: [parent_id], mimeType: type })}\r\n`,
-      `--${boundary}\r\nContent-Type: ${type}\r\n\r\n`,
-      data,
-      `\r\n--${boundary}--`,
-    ])
+  async upload_file(parent_id: string, name: string, data: Blob, options?: cloud_write_options): Promise<cloud_file> {
+    const type = options?.mime_type || data.type || 'application/octet-stream'
+    const metadata: Record<string, unknown> = { name, parents: [parent_id], mimeType: type }
+    if (options?.properties) metadata.appProperties = options.properties
+    const { body, content_type } = multipart_body(metadata, data, type)
     const result = (await this.api_json(`${DRIVE_UPLOAD_API}/files?uploadType=multipart&fields=${FILE_FIELDS}`, {
       method: 'POST',
-      headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
+      headers: { 'Content-Type': content_type },
       body,
-      signal,
+      signal: options?.signal,
     })) as drive_file_resource
     return to_cloud_file(result)
+  }
+
+  async update_file(file_id: string, data: Blob, options?: cloud_write_options): Promise<cloud_file> {
+    const type = options?.mime_type || data.type || 'application/octet-stream'
+    // `parents` is deliberately absent: Drive rejects a parent change here,
+    // and an in-place rewrite should keep the file exactly where it is.
+    const metadata: Record<string, unknown> = { mimeType: type }
+    if (options?.properties) metadata.appProperties = options.properties
+    const { body, content_type } = multipart_body(metadata, data, type)
+    const result = (await this.api_json(`${DRIVE_UPLOAD_API}/files/${encodeURIComponent(file_id)}?uploadType=multipart&fields=${FILE_FIELDS}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': content_type },
+      body,
+      signal: options?.signal,
+    })) as drive_file_resource
+    return to_cloud_file(result)
+  }
+
+  /**
+   * Move the file to Drive's trash instead of deleting it outright, so a sync
+   * bug can never permanently destroy a user's data — Drive keeps trashed
+   * items for 30 days and `list_folder` already filters them out.
+   */
+  async delete_file(file_id: string, signal?: AbortSignal): Promise<void> {
+    await this.api_json(`${DRIVE_API}/files/${encodeURIComponent(file_id)}?fields=id`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ trashed: true }),
+      signal,
+    })
   }
 
   async get_file_content(file: cloud_file, signal?: AbortSignal): Promise<Blob> {
@@ -416,7 +486,7 @@ export class google_drive_provider implements cloud_storage_provider {
     } catch (cause) {
       if (is_abort_error(cause)) throw cause
       const error = new cloud_error('network', 'Network request to Google Drive failed.')
-      log_drive_error(url, init, error, undefined, undefined, cause)
+      this.log_drive_error(url, init, error, undefined, undefined, cause)
       throw error
     }
     if (response.ok) return response
@@ -444,7 +514,7 @@ export class google_drive_provider implements cloud_storage_provider {
     } else {
       error = new cloud_error('api', detail.message || `Google Drive API error (HTTP ${response.status}).`)
     }
-    log_drive_error(url, init, error, response, detail)
+    this.log_drive_error(url, init, error, response, detail)
     throw error
   }
 
@@ -457,12 +527,36 @@ export class google_drive_provider implements cloud_storage_provider {
     }
   }
 
+  private log_drive_error(
+    url: string,
+    init: RequestInit | undefined,
+    error: cloud_error,
+    response?: Response,
+    detail?: google_api_error_detail,
+    cause?: unknown,
+  ): void {
+    // Deliberately omit request headers/body so bearer tokens and uploaded file
+    // contents never land in DevTools. The URL, status and Google reason are
+    // enough to diagnose scope and endpoint failures.
+    console.error(`[${this.app_id}][Google Drive] request failed`, {
+      method: init?.method ?? 'GET',
+      url,
+      status: response?.status,
+      status_text: response?.statusText,
+      reason: detail?.reason,
+      google_status: detail?.status,
+      message: detail?.message || error.message,
+      error_kind: error.kind,
+      cause,
+    })
+  }
+
   private store_token(token: string, expires_in_s: number): void {
     this.access_token = token
     this.token_expires_at = Date.now() + expires_in_s * 1000
     try {
-      const payload = JSON.stringify({ token, expires_at: this.token_expires_at, scopes: DRIVE_SCOPES })
-      window.localStorage.setItem(TOKEN_STORAGE_KEY, obfuscate(payload))
+      const payload = JSON.stringify({ token, expires_at: this.token_expires_at, scopes: this.scopes })
+      window.localStorage.setItem(this.token_storage_key, obfuscate(payload, this.obfuscation_key))
     } catch {
       // storage unavailable (private mode / quota) — session just won't survive a reload
     }
@@ -470,14 +564,16 @@ export class google_drive_provider implements cloud_storage_provider {
 
   private restore_token(): void {
     try {
-      for (const key of LEGACY_TOKEN_STORAGE_KEYS) window.localStorage.removeItem(key)
-      const raw = window.localStorage.getItem(TOKEN_STORAGE_KEY)
+      for (const key of this.legacy_token_storage_keys) window.localStorage.removeItem(key)
+      const raw = window.localStorage.getItem(this.token_storage_key)
       if (!raw) return
-      const payload = deobfuscate(raw)
+      const payload = deobfuscate(raw, this.obfuscation_key)
       const saved = payload ? (JSON.parse(payload) as { token?: string; expires_at?: number; scopes?: string }) : null
       if (
         saved &&
-        saved.scopes === DRIVE_SCOPES &&
+        // A grant issued for a different scope set is useless here — discard
+        // it rather than failing the first API call that needs the new scope.
+        saved.scopes === this.scopes &&
         typeof saved.token === 'string' &&
         typeof saved.expires_at === 'number' &&
         Date.now() < saved.expires_at - TOKEN_EXPIRY_MARGIN_MS
@@ -485,7 +581,7 @@ export class google_drive_provider implements cloud_storage_provider {
         this.access_token = saved.token
         this.token_expires_at = saved.expires_at
       } else {
-        window.localStorage.removeItem(TOKEN_STORAGE_KEY)
+        window.localStorage.removeItem(this.token_storage_key)
       }
     } catch {
       // storage unavailable or corrupt blob — start signed out
@@ -496,8 +592,8 @@ export class google_drive_provider implements cloud_storage_provider {
     this.access_token = null
     this.token_expires_at = 0
     try {
-      window.localStorage.removeItem(TOKEN_STORAGE_KEY)
-      for (const key of LEGACY_TOKEN_STORAGE_KEYS) window.localStorage.removeItem(key)
+      window.localStorage.removeItem(this.token_storage_key)
+      for (const key of this.legacy_token_storage_keys) window.localStorage.removeItem(key)
     } catch {
       // storage unavailable — nothing to clear
     }
@@ -505,7 +601,7 @@ export class google_drive_provider implements cloud_storage_provider {
 
   private store_root(root: cloud_file): void {
     try {
-      window.localStorage.setItem(ROOT_STORAGE_KEY, JSON.stringify({ id: root.id, name: root.name }))
+      window.localStorage.setItem(this.root_storage_key, JSON.stringify({ id: root.id, name: root.name }))
     } catch {
       // storage unavailable — the user just re-picks next visit
     }
@@ -513,7 +609,7 @@ export class google_drive_provider implements cloud_storage_provider {
 
   private load_root(): { id: string; name: string } | null {
     try {
-      const raw = window.localStorage.getItem(ROOT_STORAGE_KEY)
+      const raw = window.localStorage.getItem(this.root_storage_key)
       if (!raw) return null
       const saved = JSON.parse(raw) as { id?: string; name?: string }
       if (typeof saved.id === 'string' && saved.id) return { id: saved.id, name: saved.name ?? '' }
@@ -525,11 +621,28 @@ export class google_drive_provider implements cloud_storage_provider {
 
   private clear_root(): void {
     try {
-      window.localStorage.removeItem(ROOT_STORAGE_KEY)
+      window.localStorage.removeItem(this.root_storage_key)
     } catch {
       // storage unavailable — nothing to clear
     }
   }
+}
+
+/**
+ * Build a Drive `multipart/related` body: a JSON metadata part followed by the
+ * file bytes. Assembled as a `Blob` (not a string) so binary content survives
+ * untouched — string concatenation corrupts it on the first non-UTF8 byte.
+ */
+function multipart_body(metadata: Record<string, unknown>, data: Blob, type: string): { body: Blob; content_type: string } {
+  // Only needs to not appear in the payload; a random suffix is enough.
+  const boundary = `cloud-storage-${Math.random().toString(36).slice(2)}`
+  const body = new Blob([
+    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n`,
+    `--${boundary}\r\nContent-Type: ${type}\r\n\r\n`,
+    data,
+    `\r\n--${boundary}--`,
+  ])
+  return { body, content_type: `multipart/related; boundary=${boundary}` }
 }
 
 function escape_drive_query_value(value: string): string {
@@ -553,46 +666,22 @@ async function read_google_api_error(response: Response): Promise<google_api_err
   }
 }
 
-function log_drive_error(
-  url: string,
-  init: RequestInit | undefined,
-  error: cloud_error,
-  response?: Response,
-  detail?: google_api_error_detail,
-  cause?: unknown,
-): void {
-  // Deliberately omit request headers/body so bearer tokens and uploaded file
-  // contents never land in DevTools. The URL, status and Google reason are
-  // enough to diagnose scope and endpoint failures.
-  console.error('[Asset Hub][Google Drive] request failed', {
-    method: init?.method ?? 'GET',
-    url,
-    status: response?.status,
-    status_text: response?.statusText,
-    reason: detail?.reason,
-    google_status: detail?.status,
-    message: detail?.message || error.message,
-    error_kind: error.kind,
-    cause,
-  })
-}
-
-/** XOR the string against `TOKEN_OBFUSCATION_KEY`, then base64-encode it. */
-function obfuscate(value: string): string {
+/** XOR the string against `key`, then base64-encode it. */
+function obfuscate(value: string, key: string): string {
   const bytes = new TextEncoder().encode(value)
-  const key = new TextEncoder().encode(TOKEN_OBFUSCATION_KEY)
+  const key_bytes = new TextEncoder().encode(key)
   let binary = ''
-  for (let i = 0; i < bytes.length; i += 1) binary += String.fromCharCode(bytes[i]! ^ key[i % key.length]!)
+  for (let i = 0; i < bytes.length; i += 1) binary += String.fromCharCode(bytes[i]! ^ key_bytes[i % key_bytes.length]!)
   return btoa(binary)
 }
 
 /** Inverse of `obfuscate`; returns null for anything that isn't a valid blob. */
-function deobfuscate(value: string): string | null {
+function deobfuscate(value: string, key: string): string | null {
   try {
     const binary = atob(value)
-    const key = new TextEncoder().encode(TOKEN_OBFUSCATION_KEY)
+    const key_bytes = new TextEncoder().encode(key)
     const bytes = new Uint8Array(binary.length)
-    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i) ^ key[i % key.length]!
+    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i) ^ key_bytes[i % key_bytes.length]!
     return new TextDecoder().decode(bytes)
   } catch {
     return null
@@ -609,5 +698,6 @@ function to_cloud_file(raw: drive_file_resource): cloud_file {
     size_bytes: Number.isFinite(size) ? size : undefined,
     modified_time: raw.modifiedTime,
     web_view_url: raw.webViewLink,
+    properties: raw.appProperties,
   }
 }

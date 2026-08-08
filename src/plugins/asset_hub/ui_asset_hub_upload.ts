@@ -58,7 +58,7 @@ export async function upload_local_files(
     try {
       if (ext === 'glb') {
         on_progress?.(`Uploading ${file.name}…`)
-        uploaded.push(await upload_file(parent_id, file.name, file, GLB_MIME, signal))
+        uploaded.push(await upload_file(parent_id, file.name, file, { mime_type: GLB_MIME, signal }))
       } else if (ext === 'zip') {
         on_progress?.(`Unpacking ${file.name}…`)
         const plan = await plan_zip_upload(file)
@@ -74,7 +74,7 @@ export async function upload_local_files(
         for (const part of plan) {
           throw_if_aborted(signal)
           on_progress?.(`Uploading ${part.name}…`)
-          uploaded.push(await upload_file(target_id, part.name, part.data, undefined, signal))
+          uploaded.push(await upload_file(target_id, part.name, part.data, { signal }))
         }
       } else {
         errors.push(`"${file.name}" isn't a .glb or .zip — skipped.`)

@@ -1,6 +1,6 @@
 // Cloud storage types shared by every storage provider (Google Drive today;
 // Dropbox / iCloud / local-folder providers can implement the same shapes
-// later). UI code should only ever see these types plus the
+// later). App code should only ever see these types plus the
 // `cloud_storage_provider` interface — never a provider's raw API payloads.
 
 /** A file or folder as reported by a cloud storage provider. */
@@ -16,6 +16,14 @@ export interface cloud_file {
   modified_time?: string
   /** Provider web page for the file (e.g. Google Drive's "open in Drive" link). */
   web_view_url?: string
+  /**
+   * Small app-private key/value metadata stored alongside the file (Google
+   * Drive `appProperties`). A sync layer stamps a record's own version here,
+   * so comparing local against remote costs a listing rather than a download.
+   * Absent when the provider has no metadata support, and only ever populated
+   * for files this app itself wrote.
+   */
+  properties?: Record<string, string>
 }
 
 export type cloud_error_kind =

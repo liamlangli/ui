@@ -1051,9 +1051,20 @@ function init_plugins(mod: plugin_module): void {
   // Asset Hub: a read-only viewer over the `asset_hub/` folder in the user's
   // Google Drive. The provider only exists when VITE_GOOGLE_CLIENT_ID is set;
   // otherwise the panel shows a configuration message (see README).
-  const cloud_cfg = mod.load_cloud_config()
+  const cloud_cfg = mod.load_cloud_config({ app_id: 'ui', root_folder_name: 'asset_hub' })
   const drive_provider = cloud_cfg.google_client_id
-    ? new mod.google_drive_provider(cloud_cfg.google_client_id, cloud_cfg.default_root_folder_name, { api_key: cloud_cfg.google_api_key })
+    ? new mod.google_drive_provider({
+        client_id: cloud_cfg.google_client_id,
+        app_id: cloud_cfg.app_id,
+        root_folder_name: cloud_cfg.root_folder_name,
+        api_key: cloud_cfg.google_api_key,
+        // Browsing a folder tree the user already filled needs drive.readonly;
+        // an app that only reads back its own files should stay on 'app_files'.
+        access: 'read_all',
+        // Token keys used before the app_id namespacing; purged so an old
+        // grant doesn't linger in localStorage (costs one re-sign-in).
+        legacy_token_storage_keys: ['ui.cloud.gdrive.token.v2', 'ui.cloud.gdrive.token.v3'],
+      })
     : null
   const editor_buffer = new mod.text_buffer(
     [
@@ -1079,7 +1090,7 @@ function init_plugins(mod: plugin_module): void {
     file_state: mod.create_file_browser_state(),
     audit_state: mod.create_asset_audit_state(),
     asset_hub_drive_state: mod.create_asset_hub_drive_state(drive_provider, {
-      root_folder_name: cloud_cfg.default_root_folder_name,
+      root_folder_name: cloud_cfg.root_folder_name,
       task_queue: desktop_task_queue,
       on_change: () => {
         windows.invalidate('asset_hub')

@@ -1,6 +1,6 @@
-// zip_reader — minimal, dependency-free ZIP archive reader used to pull a
-// glTF (plus its sibling .bin / texture files) out of a .zip dropped on the
-// Asset Hub upload picker.
+// zip_reader — minimal, dependency-free ZIP archive reader used to unpack a
+// multi-file asset archive (e.g. a glTF plus its sibling .bin / texture
+// files) in the browser before handing the parts to a storage provider.
 //
 // Parses the ZIP central directory by hand (no zip64 support — plenty for
 // the small asset archives this feeds) and inflates DEFLATE entries with the

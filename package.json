@@ -23,6 +23,10 @@
     "./plugins": {
       "types": "./src/plugins/index.ts",
       "default": "./src/plugins/index.ts"
+    },
+    "./storage": {
+      "types": "./src/storage/index.ts",
+      "default": "./src/storage/index.ts"
     }
   },
   "main": "./src/index.ts",

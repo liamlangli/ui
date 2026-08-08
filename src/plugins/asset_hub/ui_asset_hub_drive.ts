@@ -207,7 +207,7 @@ async function action_locate_root(state: asset_hub_drive_state): Promise<void> {
   notify(state)
   let root: cloud_file | null = null
   try {
-    root = await provider.find_asset_hub_root()
+    root = await provider.find_root_folder()
   } catch (err) {
     if (seq === state._seq) {
       fail_action(state, 'Locate root folder', err)
@@ -219,7 +219,7 @@ async function action_locate_root(state: asset_hub_drive_state): Promise<void> {
   if (!root) {
     // With a picker-based provider the user selects the folder; pickerless
     // providers can only report that the folder doesn't exist.
-    set_status(state, provider.pick_asset_hub_root ? 'root_needed' : 'root_missing')
+    set_status(state, provider.pick_root_folder ? 'root_needed' : 'root_missing')
     notify(state)
     return
   }
@@ -230,11 +230,11 @@ async function action_locate_root(state: asset_hub_drive_state): Promise<void> {
 /** Open the provider's folder picker; on a pick, make it the new hub root. */
 async function action_pick_root(state: asset_hub_drive_state): Promise<void> {
   const provider = state.provider
-  if (!provider?.pick_asset_hub_root || state._picking) return
+  if (!provider?.pick_root_folder || state._picking) return
   state._picking = true
   let root: cloud_file | null = null
   try {
-    root = await provider.pick_asset_hub_root()
+    root = await provider.pick_root_folder()
   } catch (err) {
     state._picking = false
     fail_action(state, 'Pick root folder', err)
@@ -767,7 +767,7 @@ function draw_header(
         trigger_upload_picker(state)
       }
     }
-    if (provider?.pick_asset_hub_root && state.breadcrumb.length > 0) {
+    if (provider?.pick_root_folder && state.breadcrumb.length > 0) {
       const change = place('Change Folder')
       if (button(ui, input, change.bx, button_y, change.bw, button_h, 'Change Folder', false, font_px, scale, col, state._picking) && !state._press_consumed) {
         state._press_consumed = true

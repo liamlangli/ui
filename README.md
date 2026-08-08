@@ -511,8 +511,12 @@ The UI depends only on the `cloud_storage_provider` interface
 (`src/storage/ui_cloud_storage_provider.ts`); every Google Drive API call
 lives in `google_drive_provider` (`src/storage/ui_google_drive_provider.ts`),
 so a Dropbox / iCloud / local-folder backend can implement the same interface
-and reuse the panel unchanged (`upload_file` / `create_folder` are optional —
-a provider without them just doesn't get an Upload button).
+and reuse the panel unchanged (the write methods are optional — a provider
+without them just doesn't get an Upload button).
+
+The storage module is app-agnostic and also available on its own, without the
+plugin chunk, as `@liamlangli/ui/storage` — see
+[Cloud storage without the Asset Hub](#cloud-storage-without-the-asset-hub).
 
 ```ts
 import {
@@ -520,13 +524,21 @@ import {
   google_drive_provider, load_cloud_config,
 } from '@liamlangli/ui/plugins'
 
-const cfg = load_cloud_config() // reads VITE_GOOGLE_CLIENT_ID
+// `app_id` namespaces the localStorage token and root-folder keys, so two
+// apps on one origin never share a session. VITE_CLOUD_APP_ID overrides it.
+const cfg = load_cloud_config({ app_id: 'ui', root_folder_name: 'asset_hub' })
 const provider = cfg.google_client_id
-  ? new google_drive_provider(cfg.google_client_id, cfg.default_root_folder_name)
+  ? new google_drive_provider({
+      client_id: cfg.google_client_id,
+      app_id: cfg.app_id,
+      root_folder_name: cfg.root_folder_name,
+      api_key: cfg.google_api_key,
+      access: 'read_all', // browsing pre-existing folders needs drive.readonly
+    })
   : null // panel shows a clear configuration message when null
 
 const hub = create_asset_hub_drive_state(provider, {
-  root_folder_name: cfg.default_root_folder_name,
+  root_folder_name: cfg.root_folder_name,
   on_change: () => renderer.request_render(), // async work landed — redraw
 })
 
@@ -584,6 +596,66 @@ After a scope change, the stored token is discarded automatically. Connect
 again and approve the updated permissions. Empty folders then return a normal
 empty listing, while Drive API failures include their HTTP status and Google
 reason in the browser console without logging bearer tokens or upload bodies.
+
+#### Cloud storage without the Asset Hub
+
+The storage module is not tied to the Asset Hub — nothing in it knows what an
+asset is. Import it on its own as `@liamlangli/ui/storage` to give any app a
+place to keep its own documents in the user's drive, no server involved.
+
+Two things make it app-agnostic. `app_id` namespaces every persisted key, so
+apps sharing an origin keep independent tokens and root folders. And `access`
+picks the scope profile:
+
+| `access` | Scopes | Sees | Verification |
+| --- | --- | --- | --- |
+| `'app_files'` (default) | `drive.file` | the picked folder + files this app created | none needed |
+| `'read_all'` | `drive.readonly` + `drive.file` | the whole drive, read-only | restricted scope; public apps must pass Google review |
+
+An app that only reads back what it wrote should stay on `'app_files'` — it
+avoids the verification burden entirely. Only a browser over folders the user
+filled in some other way needs `'read_all'`.
+
+Beyond reading, the interface covers the write half a document store needs:
+`upload_file` (create), `update_file` (rewrite in place, keeping the id),
+`create_folder`, and `delete_file` (which the Drive backend implements as a
+move to trash, never a permanent delete). All four are optional, so a
+read-only backend simply omits them. `cloud_write_options.properties` stores
+small app-private key/value metadata with a file — Drive `appProperties` —
+which is what lets a sync pass compare a record's version from a folder
+listing instead of downloading it.
+
+`ui_cloud_folder.ts` adds the provider-agnostic glue on top:
+
+```ts
+import {
+  ensure_folder, google_drive_provider, index_folder,
+  load_cloud_config, put_file, read_json,
+} from '@liamlangli/ui/storage'
+
+const cfg = load_cloud_config({ app_id: 'my_app' })
+const drive = new google_drive_provider({
+  client_id: cfg.google_client_id,
+  app_id: cfg.app_id,
+  root_folder_name: cfg.root_folder_name,
+})
+
+await drive.sign_in()
+const root = (await drive.find_root_folder()) ?? (await drive.pick_root_folder!())
+if (root) {
+  const docs = await ensure_folder(drive, root.id, 'documents')
+  // Index once, then create-or-update each record through it — providers
+  // allow duplicate names, so `put_file` resolves the name to an id first.
+  const index = await index_folder(drive, docs.id)
+  await put_file(drive, docs.id, 'note.json', blob, {
+    mime_type: 'application/json',
+    properties: { updated_at: String(Date.now()) },
+  }, index)
+}
+```
+
+Puppet uses exactly this to mirror its IndexedDB projects and scenes into a
+Drive folder, with IndexedDB staying the working store.
 
 #### Uploading assets
 
