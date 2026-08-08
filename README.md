@@ -654,8 +654,9 @@ if (root) {
 }
 ```
 
-Puppet uses exactly this to mirror its IndexedDB projects and scenes into a
-Drive folder, with IndexedDB staying the working store.
+Puppet uses exactly this to move its IndexedDB projects and scenes to and from
+a Drive folder, with IndexedDB staying the working store and the user driving
+each transfer with an explicit Upload / Download button.
 
 #### Uploading assets
 
