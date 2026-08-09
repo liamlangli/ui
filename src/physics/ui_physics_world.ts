@@ -1,4 +1,5 @@
 import create_box3d_module, { type ui_box3d_module } from './wasm/ui_box3d.js'
+import bundled_box3d_wasm_url from './wasm/ui_box3d.wasm?url'
 
 /** The 3D physics implementation bundled by @liamlangli/ui. */
 export const default_physics_engine = 'box3d' as const
@@ -61,7 +62,7 @@ export class physics_world {
   static async create(options: physics_world_options = {}): Promise<physics_world> {
     const wasm_url = options.wasm_url
       ? String(options.wasm_url)
-      : new URL('./wasm/ui_box3d.wasm', import.meta.url).href
+      : bundled_box3d_wasm_url
     const module = await create_box3d_module({
       locateFile: (path) => path.endsWith('.wasm') ? wasm_url : path,
     })
