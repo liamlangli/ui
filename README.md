@@ -193,10 +193,27 @@ const ev = file_browser(renderer, theme, input, x, y, w, h, folders, entries, fb
   render_preview: (entry, px, py, pw, ph) => draw_thumbnail(entry, px, py, pw, ph),
 })
 if (ev.folder_selected) load_folder(ev.folder_selected)
+if (ev.entries_selected) highlight_selection(ev.entries_selected)
 if (ev.entry_activated) open_asset(ev.entry_activated.path)
 if (ev.toolbar_clicked === 'create') open_create_menu()
 if (ev.context_requested) open_context_menu(ev.context_requested)
 ```
+
+List and grid entries support range multi-select: a plain click selects one
+entry and drops the range anchor there, and Shift-click selects everything
+between that anchor and the clicked entry, in view order. Every selected row and
+card is stroked with a yellow rounded outline on top of its fill, so a
+multi-selection stays legible against host thumbnails. Repeated Shift-clicks
+re-adjust the same range, so the anchor stays put until the next plain click;
+clicking empty space, switching folders, or a double-click into a folder clears
+both selection and anchor. Shift-click never starts an entry drag, activates an
+entry, or counts toward a double-click. The full selection lives in
+`state.selected_paths` and is reported as `entries_selected`; `entry_selected`
+stays the single entry under the cursor. Entry drag and `context_requested`
+remain single-entry — a host that acts on the whole selection (a context-menu
+delete, say) should read `state.selected_paths` and check whether the
+right-clicked path is part of it. Hosts that select an entry programmatically
+only need to assign `selected_paths`; the anchor follows the live selection.
 
 ### `graph` — node-graph canvas
 

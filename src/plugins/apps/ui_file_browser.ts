@@ -21,6 +21,11 @@ import {
 } from '../../core/ui_stack_layout'
 import { hori_split_view, type hori_split_view_state } from '../layout/ui_hori_split_view'
 
+// Selection outline for list rows and grid cards. Deliberately not a theme slot:
+// the accent slot is per-theme and doubles as the drag/drop colour, so a fixed
+// warm yellow keeps a multi-selection readable and distinct on every theme.
+const SELECTION_OUTLINE = pack('#ffc83d')
+
 export interface file_node {
   /** Stable id; if omitted a path-derived key is used. */
   id?: string
@@ -67,6 +72,8 @@ export interface file_browser_state {
 
   selected_folder?: string
   selected_paths?: string[]
+  /** Range anchor for shift-click multi-select; the last plainly clicked entry. */
+  selection_anchor_path?: string | null
   collapsed?: Set<string>
   /** Tree-pane width as a fraction of the content body. */
   split_ratio?: number
@@ -151,8 +158,10 @@ export interface file_browser_event {
 
   /** Rich browser: a folder was clicked in the tree, breadcrumb, list, or grid. */
   folder_selected?: string
-  /** Rich browser: an entry was single-clicked / focused. */
+  /** Rich browser: an entry was single-clicked / focused. Shift-click reports the clicked end of the range. */
   entry_selected?: file_browser_entry
+  /** Rich browser: the full selection after a click, in view order. Mirrors `state.selected_paths`. */
+  entries_selected?: file_browser_entry[]
   /** Rich browser: a file entry was double-clicked. */
   entry_activated?: file_browser_entry
   /** Rich browser: a toolbar button was pressed. */
@@ -181,6 +190,7 @@ export function create_file_browser_state(initial_folder = 'Project'): file_brow
 
     selected_folder: initial_folder,
     selected_paths: [],
+    selection_anchor_path: null,
     collapsed: new Set<string>(),
     split_ratio: 0.32,
     split_view: { ratio: 0.32 },
@@ -484,6 +494,7 @@ function rich_file_browser(
   draw_breadcrumb(ui, breadcrumb_rect.x, breadcrumb_rect.y, breadcrumb_rect.h, state.selected_folder ?? '', input, font_px, scale, (path) => {
     state.selected_folder = path
     state.selected_paths = []
+    state.selection_anchor_path = null
     event.folder_selected = path
   }, col)
   ui.pop_clip()
@@ -505,6 +516,7 @@ function rich_file_browser(
 function ensure_rich_state(state: file_browser_state): void {
   state.selected_folder ??= 'Project'
   state.selected_paths ??= []
+  state.selection_anchor_path ??= null
   state.collapsed ??= new Set<string>()
   state.split_ratio ??= 0.32
   state.split_view ??= { ratio: state.split_ratio }
@@ -745,6 +757,7 @@ function draw_folder_tree(
         state._tree_drop_path = null
         state.selected_folder = row.path
         state.selected_paths = []
+        state.selection_anchor_path = null
         event.folder_selected = row.path
       }
     }
@@ -813,7 +826,16 @@ function draw_entry_grid(
   scroll.offset_y = clamp(scroll.offset_y, 0, max_off)
   state.grid_scroll = scroll
 
-  if (over_grid && input.mouse_pressed) { state.selected_paths = []; event.entry_selected = undefined }
+  // Clear up front so a click that lands on empty space deselects; a click that
+  // lands on a card restores the selection below. The anchor is resolved before
+  // the wipe and only dropped after the loop, since shift-click needs it to
+  // resolve its range.
+  const background_click = over_grid && input.mouse_pressed
+  if (background_click) {
+    state.selection_anchor_path = resolve_selection_anchor(state)
+    state.selected_paths = []
+    event.entry_selected = undefined
+  }
   if (over_grid && input.mouse_right_pressed) event.context_requested = { x: input.mouse_x, y: input.mouse_y, path: null }
 
   ui.push_clip(rect.x, rect.y, rect.w, rect.h)
@@ -841,11 +863,18 @@ function draw_entry_grid(
     const meta_y = ey + card_h - meta_h
     ui.draw_text(ex + card_w - 2 * scale - tw, ui.text_v_center_y(meta_y, meta_h, 5 * scale), type_label, 5 * scale, col('text_dim'))
     if (entry.marked) ui.fill_circle(ex + card_w - 7 * scale, ey + 8 * scale, 2.5 * scale, col('accent'))
+    // Stroked last so the host thumbnail, label and marker never cover it.
+    if (active) ui.stroke_round_rect(ex, ey, card_w, card_h, node_r, Math.max(1, 1.5 * scale), SELECTION_OUTLINE)
 
     if (hover && input.mouse_right_pressed) event.context_requested = { x: input.mouse_x, y: input.mouse_y, path: entry.path }
-    handle_entry_click(input, hover, entry, state, event, options?.can_drag_entry?.(entry) ?? false)
+    handle_entry_click(input, hover, entry, entries, i, state, event, options?.can_drag_entry?.(entry) ?? false)
   }
   ui.pop_clip()
+
+  if (background_click && !event.entry_selected) {
+    state.selection_anchor_path = null
+    event.entries_selected = []
+  }
 }
 
 function draw_internal_grid_node(
@@ -893,7 +922,12 @@ function draw_entry_list(
   scroll.offset_y = clamp(scroll.offset_y, 0, max_off)
   state.list_scroll = scroll
 
-  if (over_list && input.mouse_pressed) { state.selected_paths = []; event.entry_selected = undefined }
+  const background_click = over_list && input.mouse_pressed
+  if (background_click) {
+    state.selection_anchor_path = resolve_selection_anchor(state)
+    state.selected_paths = []
+    event.entry_selected = undefined
+  }
   if (over_list && input.mouse_right_pressed) event.context_requested = { x: input.mouse_x, y: input.mouse_y, path: null }
 
   const type_x = rect.x + Math.max(150 * scale, rect.w * 0.46)
@@ -913,8 +947,10 @@ function draw_entry_list(
     if (ry + row_h < rect.y + header_h || ry > rect.y + rect.h) continue
     const active = (state.selected_paths ?? []).includes(entry.path)
     const hover = point_in(input, rect.x, ry, rect.w, row_h)
-    if (active) ui.fill_round_rect(rect.x + 3 * scale, ry + 1 * scale, rect.w - 6 * scale, row_h - 2 * scale, 6 * scale, col('active'))
-    else if (hover) ui.fill_round_rect(rect.x + 3 * scale, ry + 1 * scale, rect.w - 6 * scale, row_h - 2 * scale, 6 * scale, col('hover'))
+    if (active) {
+      ui.fill_round_rect(rect.x + 3 * scale, ry + 1 * scale, rect.w - 6 * scale, row_h - 2 * scale, 6 * scale, col('active'))
+      ui.stroke_round_rect(rect.x + 3 * scale, ry + 1 * scale, rect.w - 6 * scale, row_h - 2 * scale, 6 * scale, Math.max(1, 1.5 * scale), SELECTION_OUTLINE)
+    } else if (hover) ui.fill_round_rect(rect.x + 3 * scale, ry + 1 * scale, rect.w - 6 * scale, row_h - 2 * scale, 6 * scale, col('hover'))
 
     const label = `${entry.kind === 'folder' ? '▸' : ' '} ${entry.name}`
     ui.push_clip(rect.x + pad, ry, Math.max(0, type_x - rect.x - pad * 2), row_h)
@@ -932,15 +968,22 @@ function draw_entry_list(
 
     if (entry.marked) ui.fill_circle(rect.x + rect.w - 12 * scale, ry + row_h * 0.5, 2.5 * scale, col('accent'))
     if (hover && input.mouse_right_pressed) event.context_requested = { x: input.mouse_x, y: input.mouse_y, path: entry.path }
-    handle_entry_click(input, hover, entry, state, event, options?.can_drag_entry?.(entry) ?? false)
+    handle_entry_click(input, hover, entry, entries, i, state, event, options?.can_drag_entry?.(entry) ?? false)
   }
   ui.pop_clip()
+
+  if (background_click && !event.entry_selected) {
+    state.selection_anchor_path = null
+    event.entries_selected = []
+  }
 }
 
 function handle_entry_click(
   input: ui_input_snapshot,
   hover: boolean,
   entry: file_browser_entry,
+  entries: file_browser_entry[],
+  index: number,
   state: file_browser_state,
   event: file_browser_event,
   draggable: boolean,
@@ -948,11 +991,31 @@ function handle_entry_click(
   const now = performance.now()
   track_context_press(input, hover, entry.path, state, event, now)
   if (hover && input.mouse_pressed) {
+    // Shift extends the selection from the anchor (the last plain click) to the
+    // clicked entry. It never starts a drag, opens a folder, or counts toward a
+    // double-click, so a range can be re-adjusted with repeated shift-clicks.
+    if (input.shift) {
+      state.last_click_path = null
+      state.last_entry_click_ms = now
+      const anchor = state.selection_anchor_path ?? null
+      const anchor_index = anchor ? entries.findIndex((candidate) => candidate.path === anchor) : -1
+      const range = anchor_index >= 0
+        ? entries.slice(Math.min(anchor_index, index), Math.max(anchor_index, index) + 1)
+        : [entry]
+      if (anchor_index < 0) state.selection_anchor_path = entry.path
+      state.selected_paths = range.map((candidate) => candidate.path)
+      event.entry_selected = entry
+      event.entries_selected = range
+      return
+    }
+
     const dbl = state.last_click_path === entry.path && now - (state.last_entry_click_ms ?? 0) < 320
     state.last_click_path = entry.path
     state.last_entry_click_ms = now
     state.selected_paths = [entry.path]
+    state.selection_anchor_path = entry.path
     event.entry_selected = entry
+    event.entries_selected = [entry]
     if (draggable && entry.kind === 'file') {
       state._entry_drag_path = entry.path
       state._entry_drag_start_x = input.mouse_x
@@ -964,6 +1027,8 @@ function handle_entry_click(
       if (dbl) {
         state.selected_folder = entry.path
         state.selected_paths = []
+        state.selection_anchor_path = null
+        event.entries_selected = []
         event.folder_selected = entry.path
       }
     } else if (dbl && !draggable) {
@@ -972,6 +1037,17 @@ function handle_entry_click(
     return
   }
 
+}
+
+// The anchor only survives while it is still part of the live selection. Hosts
+// select an entry programmatically after an import or rename by assigning
+// `selected_paths` alone, so falling back to the first selected path keeps
+// shift-click ranging from what is actually highlighted, not a stale anchor.
+function resolve_selection_anchor(state: file_browser_state): string | null {
+  const selected = state.selected_paths ?? []
+  const anchor = state.selection_anchor_path ?? null
+  if (anchor && selected.includes(anchor)) return anchor
+  return selected[0] ?? null
 }
 
 function draw_entry_drag_ghost(
