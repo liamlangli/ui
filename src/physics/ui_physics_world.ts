@@ -13,6 +13,11 @@ export interface physics_quaternion extends physics_vector3 {
   w: number
 }
 
+export interface physics_transform {
+  position: physics_vector3
+  rotation: physics_quaternion
+}
+
 export interface capsule_move_result {
   position: physics_vector3
   delta: physics_vector3
@@ -42,13 +47,14 @@ export function quaternion_from_euler(rotation: physics_vector3): physics_quater
 }
 
 /**
- * Isolated Box3D world used for static scene collision and swept character
- * movement. Each instance owns its own Emscripten module, so worlds do not
- * share Box3D state.
+ * Isolated Box3D world used for rigid-body simulation, static scene collision,
+ * and swept character movement. Each instance owns its own Emscripten module,
+ * so worlds do not share Box3D state.
  */
 export class physics_world {
   readonly engine = default_physics_engine
   private active = false
+  private transform_pointer = 0
 
   private constructor(private readonly module: ui_box3d_module) {}
 
@@ -78,6 +84,18 @@ export class physics_world {
 
   dispose(): void {
     this.clear()
+    if (this.transform_pointer) {
+      this.module._free(this.transform_pointer)
+      this.transform_pointer = 0
+    }
+  }
+
+  set_gravity(gravity: physics_vector3): void {
+    if (this.active) this.module._ui_box3d_set_gravity(gravity.x, gravity.y, gravity.z)
+  }
+
+  step(time_step: number, sub_step_count = 4): void {
+    if (this.active) this.module._ui_box3d_step(time_step, sub_step_count)
   }
 
   add_box(position: physics_vector3, rotation: physics_quaternion, half_size: physics_vector3): boolean {
@@ -90,6 +108,33 @@ export class physics_world {
 
   add_sphere(position: physics_vector3, radius: number): boolean {
     return this.active && this.module._ui_box3d_add_sphere(position.x, position.y, position.z, radius) !== 0
+  }
+
+  add_dynamic_box(position: physics_vector3, rotation: physics_quaternion, half_size: physics_vector3): number {
+    if (!this.active) return 0
+    return this.module._ui_box3d_add_dynamic_box(
+      position.x, position.y, position.z,
+      rotation.x, rotation.y, rotation.z, rotation.w,
+      half_size.x, half_size.y, half_size.z,
+    )
+  }
+
+  add_dynamic_sphere(position: physics_vector3, radius: number): number {
+    if (!this.active) return 0
+    return this.module._ui_box3d_add_dynamic_sphere(position.x, position.y, position.z, radius)
+  }
+
+  body_transform(handle: number): physics_transform | null {
+    const output_count = 7
+    const pointer = this.transform_pointer || this.module._malloc(output_count * Float32Array.BYTES_PER_ELEMENT)
+    if (!pointer) throw new Error('Box3D transform allocation failed')
+    this.transform_pointer = pointer
+    if (!this.active || this.module._ui_box3d_get_body_transform(handle, pointer) === 0) return null
+    const output = this.module.HEAPF32.subarray(pointer >>> 2, (pointer >>> 2) + output_count)
+    return {
+      position: { x: output[0]!, y: output[1]!, z: output[2]! },
+      rotation: { x: output[3]!, y: output[4]!, z: output[5]!, w: output[6]! },
+    }
   }
 
   add_height_field(

@@ -16,6 +16,7 @@
 #endif
 
 #define UI_MAX_HEIGHT_FIELDS 128
+#define UI_MAX_DYNAMIC_BODIES 256
 #define UI_MAX_PLANES 16
 #define UI_MOVE_ITERATIONS 5
 
@@ -23,6 +24,8 @@ static b3WorldId ui_world_id;
 static bool ui_world_created;
 static b3HeightFieldData* ui_height_fields[UI_MAX_HEIGHT_FIELDS];
 static int ui_height_field_count;
+static b3BodyId ui_dynamic_bodies[UI_MAX_DYNAMIC_BODIES];
+static int ui_dynamic_body_count;
 
 typedef struct ui_plane_context
 {
@@ -83,6 +86,7 @@ UI_EXPORT int ui_box3d_create_world(void)
   definition.workerCount = 1;
   ui_world_id = b3CreateWorld(&definition);
   ui_world_created = b3World_IsValid(ui_world_id);
+  ui_dynamic_body_count = 0;
   return ui_world_created ? 1 : 0;
 }
 
@@ -93,12 +97,33 @@ UI_EXPORT void ui_box3d_destroy_world(void)
     b3DestroyWorld(ui_world_id);
     ui_world_created = false;
   }
+  ui_dynamic_body_count = 0;
   for (int index = 0; index < ui_height_field_count; ++index)
   {
     b3DestroyHeightField(ui_height_fields[index]);
     ui_height_fields[index] = NULL;
   }
   ui_height_field_count = 0;
+}
+
+UI_EXPORT void ui_box3d_set_gravity(float x, float y, float z)
+{
+  if (!ui_world_created || !isfinite(x) || !isfinite(y) || !isfinite(z))
+  {
+    return;
+  }
+  b3World_SetGravity(ui_world_id, (b3Vec3){ x, y, z });
+}
+
+UI_EXPORT void ui_box3d_step(float time_step, int sub_step_count)
+{
+  if (!ui_world_created || !isfinite(time_step) || time_step <= 0.0f)
+  {
+    return;
+  }
+  float safe_time_step = fminf(time_step, 0.1f);
+  int safe_sub_steps = sub_step_count < 1 ? 1 : sub_step_count > 16 ? 16 : sub_step_count;
+  b3World_Step(ui_world_id, safe_time_step, safe_sub_steps);
 }
 
 UI_EXPORT int ui_box3d_add_box(
@@ -136,6 +161,83 @@ UI_EXPORT int ui_box3d_add_sphere(float px, float py, float pz, float radius)
   b3Sphere sphere = { b3Vec3_zero, ui_positive(fabsf(radius), 0.0001f) };
   b3ShapeId shape_id = b3CreateSphereShape(body_id, &shape_definition, &sphere);
   return b3Shape_IsValid(shape_id) ? 1 : 0;
+}
+
+UI_EXPORT int ui_box3d_add_dynamic_box(
+  float px, float py, float pz,
+  float qx, float qy, float qz, float qw,
+  float half_x, float half_y, float half_z)
+{
+  if (!ui_world_created || ui_dynamic_body_count >= UI_MAX_DYNAMIC_BODIES)
+  {
+    return 0;
+  }
+  b3BodyDef body_definition = b3DefaultBodyDef();
+  body_definition.type = b3_dynamicBody;
+  body_definition.position = (b3Pos){ px, py, pz };
+  body_definition.rotation = ui_quaternion(qx, qy, qz, qw);
+  b3BodyId body_id = b3CreateBody(ui_world_id, &body_definition);
+  b3ShapeDef shape_definition = b3DefaultShapeDef();
+  b3BoxHull box = b3MakeBoxHull(
+    ui_positive(fabsf(half_x), 0.0001f),
+    ui_positive(fabsf(half_y), 0.0001f),
+    ui_positive(fabsf(half_z), 0.0001f));
+  b3ShapeId shape_id = b3CreateHullShape(body_id, &shape_definition, &box.base);
+  if (!b3Shape_IsValid(shape_id))
+  {
+    b3DestroyBody(body_id);
+    return 0;
+  }
+  ui_dynamic_bodies[ui_dynamic_body_count] = body_id;
+  ui_dynamic_body_count += 1;
+  return ui_dynamic_body_count;
+}
+
+UI_EXPORT int ui_box3d_add_dynamic_sphere(float px, float py, float pz, float radius)
+{
+  if (!ui_world_created || ui_dynamic_body_count >= UI_MAX_DYNAMIC_BODIES)
+  {
+    return 0;
+  }
+  b3BodyDef body_definition = b3DefaultBodyDef();
+  body_definition.type = b3_dynamicBody;
+  body_definition.position = (b3Pos){ px, py, pz };
+  b3BodyId body_id = b3CreateBody(ui_world_id, &body_definition);
+  b3ShapeDef shape_definition = b3DefaultShapeDef();
+  b3Sphere sphere = { b3Vec3_zero, ui_positive(fabsf(radius), 0.0001f) };
+  b3ShapeId shape_id = b3CreateSphereShape(body_id, &shape_definition, &sphere);
+  if (!b3Shape_IsValid(shape_id))
+  {
+    b3DestroyBody(body_id);
+    return 0;
+  }
+  ui_dynamic_bodies[ui_dynamic_body_count] = body_id;
+  ui_dynamic_body_count += 1;
+  return ui_dynamic_body_count;
+}
+
+UI_EXPORT int ui_box3d_get_body_transform(int handle, float* output)
+{
+  int index = handle - 1;
+  if (!ui_world_created || output == NULL || index < 0 || index >= ui_dynamic_body_count)
+  {
+    return 0;
+  }
+  b3BodyId body_id = ui_dynamic_bodies[index];
+  if (!b3Body_IsValid(body_id))
+  {
+    return 0;
+  }
+  b3Pos position = b3Body_GetPosition(body_id);
+  b3Quat rotation = b3Body_GetRotation(body_id);
+  output[0] = position.x;
+  output[1] = position.y;
+  output[2] = position.z;
+  output[3] = rotation.v.x;
+  output[4] = rotation.v.y;
+  output[5] = rotation.v.z;
+  output[6] = rotation.s;
+  return 1;
 }
 
 UI_EXPORT int ui_box3d_add_height_field(

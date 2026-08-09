@@ -50,6 +50,18 @@ try {
   const height_field = move(0, 2, 0, 0, -3, 0)
   assert.ok(Math.abs(height_field[1] - 0.995) < 0.001, `unexpected height-field y: ${height_field[1]}`)
   assert.equal(height_field[6], 1)
+
+  module._ui_box3d_destroy_world()
+  assert.equal(module._ui_box3d_create_world(), 1)
+  module._ui_box3d_set_gravity(0, -9.81, 0)
+  assert.equal(module._ui_box3d_add_box(0, -0.5, 0, 0, 0, 0, 1, 5, 0.5, 5), 1)
+  const sphere_handle = module._ui_box3d_add_dynamic_sphere(0, 3, 0, 0.5)
+  assert.ok(sphere_handle > 0)
+  for (let i = 0; i < 240; i += 1) module._ui_box3d_step(1 / 60, 4)
+  assert.equal(module._ui_box3d_get_body_transform(sphere_handle, output_pointer), 1)
+  const body = result()
+  assert.ok(body[1] > 0.48 && body[1] < 0.55, `unexpected resting sphere y: ${body[1]}`)
+  assert.ok(Math.abs(body[0]) < 0.01 && Math.abs(body[2]) < 0.01, `sphere drifted: ${body[0]}, ${body[2]}`)
 } finally {
   module._free(output_pointer)
   module._ui_box3d_destroy_world()

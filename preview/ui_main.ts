@@ -156,6 +156,7 @@ const about_lines: ui_text_view_line[] = [
   { text: '  • code_editor   — the Editor tab (type, select, syntax-highlight)', color: '#9aa3b0' },
   { text: '  • im_dialog     — the Chat window', color: '#9aa3b0' },
   { text: '  • gamepad_test  — Controller Test (plug in a game controller)', color: '#9aa3b0' },
+  { text: '  • box3d_demo    — Box3D WASM rigid bodies, stacking and collisions', color: '#9aa3b0' },
   { text: '  • asset_audit   — View ▸ Apps ▸ Asset Audit: drop a .glb/.gltf/.fbx', color: '#9aa3b0' },
   { text: '                    (or a folder) to preview it in a WebGPU viewport,', color: '#9aa3b0' },
   { text: '                    audit its stats, optimize and download a fixed GLB.', color: '#9aa3b0' },
@@ -328,6 +329,7 @@ const BUILTIN_APPS: { id: string; name: string; icon: string; accent?: string; d
   { id: 'chat', name: 'Chat', icon: 'file_text', accent: '#3d6b4f', description: 'IM dialog plugin.' },
   { id: 'profiler', name: 'Profiler', icon: 'search', description: 'Frame profiler and memory registry.' },
   { id: 'gamepad', name: 'Controller Test', icon: 'circle', description: 'Game controller visualiser.' },
+  { id: 'box3d', name: 'Box3D Physics', icon: 'circle', accent: '#3d5f8f', description: 'Interactive Box3D WASM rigid-body playground.' },
   { id: 'asset_audit', name: 'Asset Audit', icon: 'file', accent: '#6b3d5a', description: 'Drop or upload .glb/.fbx assets: 3D preview, stats, optimize, re-export.' },
   { id: 'asset_hub', name: 'Asset Hub', icon: 'image', accent: '#3d5f6b', description: 'Browse the asset_hub folder of your Google Drive — read-only, entirely in the browser.' },
   { id: 'material_audit', name: 'Material Audit', icon: 'image', accent: '#5a6b3d', description: 'Upload base color / normal maps and validate them on a repeat grid, UV sphere or rounded cube.' },
@@ -368,6 +370,7 @@ interface demo_plugins {
   chat_state: ReturnType<plugin_module['create_im_dialog_state']>
   profiler_state: ReturnType<plugin_module['create_profiler_panel_state']>
   gamepad_test_state: ReturnType<plugin_module['create_gamepad_test_state']>
+  box3d_state: ReturnType<plugin_module['create_box3d_demo_state']>
   editor_buffer: text_buffer
   editor_state: ReturnType<plugin_module['create_code_editor_state']>
   graph_state: ReturnType<plugin_module['create_graph_state']>
@@ -532,6 +535,7 @@ const VIEW_TABS: { id: string; title: string; win?: window_new_options }[] = [
   { id: 'chat', title: 'Chat', win: { w: 300, h: 400 } },
   { id: 'profiler', title: 'Profiler', win: { w: 760, h: 460 } },
   { id: 'gamepad', title: 'Controller Test', win: { w: 620, h: 540 } },
+  { id: 'box3d', title: 'Box3D Physics', win: { w: 820, h: 560 } },
   { id: 'asset_audit', title: 'Asset Audit', win: { w: 900, h: 560 } },
   { id: 'asset_hub', title: 'Asset Hub', win: { w: 920, h: 560 } },
   { id: 'material_audit', title: 'Material Audit', win: { w: 760, h: 560 } },
@@ -681,6 +685,7 @@ function build_main_menu(mod: plugin_module): ui_main_menu {
           { id: 'chat', label: 'Chat' },
           { id: 'profiler', label: 'Profiler' },
           { id: 'gamepad', label: 'Controller Test' },
+          { id: 'box3d', label: 'Box3D Physics' },
           { id: 'asset_audit', label: 'Asset Audit' },
           { id: 'asset_hub', label: 'Asset Hub' },
           { id: 'material_audit', label: 'Material Audit' },
@@ -1101,6 +1106,10 @@ function init_plugins(mod: plugin_module): void {
     chat_state: mod.create_im_dialog_state(),
     profiler_state: mod.create_profiler_panel_state(),
     gamepad_test_state: mod.create_gamepad_test_state(),
+    box3d_state: mod.create_box3d_demo_state(() => {
+      windows.invalidate('box3d')
+      active_renderer?.request_render()
+    }),
     editor_buffer,
     editor_state: mod.create_code_editor_state(),
     graph_state: mod.create_graph_state(),
@@ -1491,6 +1500,9 @@ async function main(): Promise<void> {
           break
         case 'gamepad':
           live.mod.gamepad_test_panel(renderer, theme, snapshot, px, py, pw, ph, gamepad, live.gamepad_test_state)
+          break
+        case 'box3d':
+          live.mod.box3d_demo(renderer, widgets, theme, snapshot, px, py, pw, ph, live.box3d_state, { scale })
           break
         case 'asset_audit':
           live.mod.asset_audit(renderer, widgets, theme, snapshot, px, py, pw, ph, live.audit_state, { scale })

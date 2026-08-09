@@ -37,5 +37,5 @@ target_link_options(ui_box3d PRIVATE
   "-sASSERTIONS=0"
   "-sMALLOC=emmalloc"
   "-sEXPORTED_RUNTIME_METHODS=['HEAPF32']"
-  "-sEXPORTED_FUNCTIONS=['_malloc','_free','_ui_box3d_create_world','_ui_box3d_destroy_world','_ui_box3d_add_box','_ui_box3d_add_sphere','_ui_box3d_add_height_field','_ui_box3d_move_capsule']"
+  "-sEXPORTED_FUNCTIONS=['_malloc','_free','_ui_box3d_create_world','_ui_box3d_destroy_world','_ui_box3d_set_gravity','_ui_box3d_step','_ui_box3d_add_box','_ui_box3d_add_sphere','_ui_box3d_add_dynamic_box','_ui_box3d_add_dynamic_sphere','_ui_box3d_get_body_transform','_ui_box3d_add_height_field','_ui_box3d_move_capsule']"
 )

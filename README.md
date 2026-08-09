@@ -11,9 +11,9 @@ It bundles the pieces needed to build a browser-native editor UI on top of WebGP
 - **`dock_system` / `window_system`** — ready-to-use workspace systems built on `dock`/`window`: a docked split workspace and a floating desktop-style window manager, both part of core so third-party projects can build directly on them. See [Workspace systems](#workspace-systems).
 - **`theme`** — palette/CSS-variable theming with `load_theme`, `apply_theme`, `theme_color`, `theme_rgba`, `pack_color`, and `hex_to_normalized_rgba`.
 - **`app_registry`** — installable apps described by a JSON manifest: install/uninstall, persistence, and update checks against each app's `shipping_path`. See [`dashboard`](#dashboard--full-screen-app-launcher).
-- **`plugins`** — opt-in, higher-level drop-in components (`file_browser`, `graph`, `node_graph`, `im_dialog`, `code_editor`, `dashboard`, `asset_hub` cloud drive browser/uploader, `material_audit`, `webtix` WebGPU path tracer) packaged so other projects can reuse them piecemeal. See [Plugins](#plugins).
+- **`plugins`** — opt-in, higher-level drop-in components (`file_browser`, `graph`, `node_graph`, `im_dialog`, `code_editor`, `dashboard`, `box3d_demo`, `asset_hub` cloud drive browser/uploader, `material_audit`, `webtix` WebGPU path tracer) packaged so other projects can reuse them piecemeal. See [Plugins](#plugins).
 - **`storage`** — a browser-only cloud storage abstraction (`cloud_storage_provider`) with a Google Drive backend, used by the Asset Hub browser/uploader. See [Asset Hub](#asset_hub--cloud-drive-browser--uploader-google-drive).
-- **`physics`** — the default browser 3D physics module, backed by Box3D WASM. It provides static Box/Sphere/height-field collision and swept capsule movement through an engine-neutral API.
+- **`physics`** — the default browser 3D physics module, backed by Box3D WASM. It provides dynamic rigid bodies, gravity/stepping, static Box/Sphere/height-field collision, and swept capsule movement through an engine-neutral API.
 
 ## 3D physics
 
@@ -31,6 +31,10 @@ world.add_box(
   quaternion_from_euler({ x: 0, y: 0, z: 0 }),
   { x: 5, y: 0.5, z: 5 },
 )
+world.set_gravity({ x: 0, y: -9.81, z: 0 })
+const body = world.add_dynamic_sphere({ x: 0, y: 3, z: 0 }, 0.5)
+world.step(1 / 60, 4)
+const transform = world.body_transform(body)
 const moved = world.move_capsule(
   { x: 0, y: 2, z: 0 },
   -0.7,
@@ -61,6 +65,10 @@ the core `window_system`: the docked workspace (Explorer, Editor, Console,
 Metrics) is a single "Demo Editor" app window powered by `dock_system`, and the
 other views (Widgets gallery, Icons, Graph, Node Graph, About, Chat) float as
 their own windows — every pixel is drawn on the GPU.
+
+Open **View ▸ Apps ▸ Box3D Physics** (or launch it from the Dashboard) for an
+interactive WASM rigid-body playground with falling boxes and spheres, a ramp,
+stacking collisions, pause/reset controls, and click-to-drop interaction.
 
 ```bash
 npm install
