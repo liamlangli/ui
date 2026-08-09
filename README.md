@@ -13,6 +13,45 @@ It bundles the pieces needed to build a browser-native editor UI on top of WebGP
 - **`app_registry`** — installable apps described by a JSON manifest: install/uninstall, persistence, and update checks against each app's `shipping_path`. See [`dashboard`](#dashboard--full-screen-app-launcher).
 - **`plugins`** — opt-in, higher-level drop-in components (`file_browser`, `graph`, `node_graph`, `im_dialog`, `code_editor`, `dashboard`, `asset_hub` cloud drive browser/uploader, `material_audit`, `webtix` WebGPU path tracer) packaged so other projects can reuse them piecemeal. See [Plugins](#plugins).
 - **`storage`** — a browser-only cloud storage abstraction (`cloud_storage_provider`) with a Google Drive backend, used by the Asset Hub browser/uploader. See [Asset Hub](#asset_hub--cloud-drive-browser--uploader-google-drive).
+- **`physics`** — the default browser 3D physics module, backed by Box3D WASM. It provides static Box/Sphere/height-field collision and swept capsule movement through an engine-neutral API.
+
+## 3D physics
+
+Box3D is the toolkit's default 3D physics backend. Applications import the
+engine-neutral surface from `@liamlangli/ui/physics`; the Emscripten module and
+WASM asset stay private to that package boundary.
+
+```ts
+import { physics_world, quaternion_from_euler } from '@liamlangli/ui/physics'
+
+const world = await physics_world.create()
+world.reset()
+world.add_box(
+  { x: 0, y: -0.5, z: 0 },
+  quaternion_from_euler({ x: 0, y: 0, z: 0 }),
+  { x: 5, y: 0.5, z: 5 },
+)
+const moved = world.move_capsule(
+  { x: 0, y: 2, z: 0 },
+  -0.7,
+  0.7,
+  0.3,
+  { x: 0, y: -3, z: 0 },
+)
+```
+
+The checked-in WASM is pinned to a Box3D commit and can be regenerated on
+macOS 26+ with [Apple container](https://github.com/apple/container):
+
+```bash
+npm run wasm:box3d
+npm run test:physics
+```
+
+The build uses the pinned `emscripten/emsdk:4.0.13` image under Rosetta, so no
+host Emscripten installation is required. WebTIX remains the rendering/path-
+tracing plugin; Box3D replaces the toolkit's default 3D physics implementation,
+not its renderer.
 
 ## Live preview
 

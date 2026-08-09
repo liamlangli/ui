@@ -7,6 +7,8 @@
   "sideEffects": false,
   "scripts": {
     "dev": "vite",
+    "wasm:box3d": "./scripts/build_box3d_wasm.sh",
+    "test:physics": "node scripts/test_box3d_wasm.mjs",
     "build": "vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit"
@@ -27,6 +29,10 @@
     "./storage": {
       "types": "./src/storage/index.ts",
       "default": "./src/storage/index.ts"
+    },
+    "./physics": {
+      "types": "./src/physics/index.ts",
+      "default": "./src/physics/index.ts"
     }
   },
   "main": "./src/index.ts",
@@ -34,7 +40,8 @@
   "types": "./src/index.ts",
   "files": [
     "src",
-    "assets"
+    "assets",
+    "native/box3d/LICENSE.box3d"
   ],
   "peerDependencies": {
     "@webgpu/types": "^0.1.69"
